@@ -1,0 +1,18 @@
+{
+  "name": "@vinko/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./plugins": "./src/plugins/index.ts"
+  },
+  "dependencies": {
+    "@vinko/plugin-sdk": "../plugin-sdk",
+    "bcrypt": "^5.1.1"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --root ../.."
+  }
+}

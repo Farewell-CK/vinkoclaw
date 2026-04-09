@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VinkoClaw - Login</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/login.css" />
+  </head>
+  <body>
+    <div class="background"></div>
+    <main class="login-shell">
+      <article class="login-panel">
+        <header class="login-header">
+          <p class="eyebrow">VinkoClaw</p>
+          <h1 data-i18n="login.title">Welcome Back</h1>
+          <p class="lede" data-i18n="login.subtitle">Sign in to access the OPC Command Room</p>
+        </header>
+
+        <form id="login-form" class="login-form">
+          <div class="form-group">
+            <label for="username" data-i18n="login.username">Username</label>
+            <input
+              type="text"
+              id="username"
+              name="username"
+              autocomplete="username"
+              data-i18n-placeholder="login.usernamePlaceholder"
+              placeholder="Enter your username"
+              required
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="password" data-i18n="login.password">Password</label>
+            <input
+              type="password"
+              id="password"
+              name="password"
+              autocomplete="current-password"
+              data-i18n-placeholder="login.passwordPlaceholder"
+              placeholder="Enter your password"
+              required
+            />
+          </div>
+
+          <div class="form-row">
+            <label class="checkbox-label">
+              <input type="checkbox" id="remember" name="remember" />
+              <span data-i18n="login.remember">Remember me</span>
+            </label>
+          </div>
+
+          <button type="submit" class="login-btn" data-i18n="login.submit">Sign In</button>
+
+          <div id="login-error" class="login-error"></div>
+        </form>
+      </article>
+    </main>
+
+    <script type="module" src="/auth.js"></script>
+    <script type="module" src="/login.js"></script>
+  </body>
+</html>

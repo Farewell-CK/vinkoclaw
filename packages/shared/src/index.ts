@@ -1,0 +1,32 @@
+export * from "./agent-collaboration.js";
+export * from "./auth/index.js";
+export * from "./emoji.js";
+export * from "./errors.js";
+export * from "./env.js";
+export * from "./feishu-policy.js";
+export * from "./inbound-commands.js";
+export * from "./logger.js";
+export * from "./observability.js";
+export * from "./operator-actions.js";
+export * from "./plugins/index.js";
+export * from "./roles.js";
+export * from "./runtime-config.js";
+export * from "./search-policy.js";
+export * from "./skills.js";
+export * from "./store.js";
+export * from "./tool-exec.js";
+export * from "./types.js";
+
+// Re-export plugin-sdk types for convenience
+export type {
+  PluginInstance,
+  PluginDefinition,
+  PluginManifest,
+  PluginState,
+  PluginKind,
+  PluginSkillDefinition,
+  PluginProviderDefinition,
+  PluginCommandDefinition,
+  TaskLifecycleEvent,
+  ApprovalLifecycleEvent
+} from "@vinko/plugin-sdk";

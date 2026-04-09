@@ -1,0 +1,40 @@
+{
+  "id": "vector-memory",
+  "name": "Vector Memory",
+  "version": "1.0.0",
+  "kind": "skill",
+  "description": "Persist role memory in vector database",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "backend": {
+        "type": "string",
+        "description": "Backend for vector storage",
+        "default": "vector-db",
+        "enum": ["vector-db", "sqlite", "none"]
+      },
+      "namespaceStrategy": {
+        "type": "string",
+        "description": "How to namespace memory",
+        "default": "role",
+        "enum": ["role", "agent", "global"]
+      }
+    },
+    "required": []
+  },
+  "allowedRoles": [
+    "ceo",
+    "cto",
+    "product",
+    "uiux",
+    "frontend",
+    "backend",
+    "algorithm",
+    "qa",
+    "developer",
+    "engineering",
+    "research",
+    "operations"
+  ],
+  "entry": "./src/index.ts"
+}

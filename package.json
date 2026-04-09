@@ -1,0 +1,43 @@
+{
+  "name": "vinkoclaw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "services/*",
+    "packages/*",
+    "packages/plugins/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n orchestrator,runner,email \"npm:dev:orchestrator\" \"npm:dev:task-runner:multi\" \"npm:dev:email-inbound\"",
+    "dev:orchestrator": "npm run dev -w @vinko/orchestrator",
+    "dev:task-runner": "npm run dev -w @vinko/task-runner",
+    "dev:task-runner:multi": "node ./scripts/run-task-runners.mjs dev",
+    "dev:email-inbound": "npm run dev -w @vinko/email-inbound",
+    "self-check": "node ./scripts/self-check.mjs",
+    "self-check:product": "node ./scripts/product-selfcheck.mjs",
+    "self-check:product:once": "node ./scripts/product-selfcheck-watch.mjs --once",
+    "self-check:product:watch": "node ./scripts/product-selfcheck-watch.mjs",
+    "self-check:product:watch:start": "node ./scripts/product-selfcheck-daemon.mjs start",
+    "self-check:product:watch:stop": "node ./scripts/product-selfcheck-daemon.mjs stop",
+    "self-check:product:watch:status": "node ./scripts/product-selfcheck-daemon.mjs status",
+    "self-check:product:watch:restart": "node ./scripts/product-selfcheck-daemon.mjs restart",
+    "persona-test": "node ./scripts/persona-test.mjs",
+    "start:task-runner": "npm run start -w @vinko/task-runner",
+    "start:task-runner:multi": "node ./scripts/run-task-runners.mjs start",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "ci:check": "npm run typecheck && npm run test",
+    "test": "vitest run",
+    "lint": "npm run typecheck",
+    "start": "npm run start -w @vinko/orchestrator"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.5.2",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

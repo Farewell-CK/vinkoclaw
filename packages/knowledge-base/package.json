@@ -1,0 +1,17 @@
+{
+  "name": "@vinko/knowledge-base",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@vinko/shared": "0.1.0",
+    "pdf-parse": "^1.1.1"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --root ../.."
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@vinko/orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@vinko/agent-runtime": "0.1.0",
+    "@vinko/feishu-gateway": "0.1.0",
+    "@vinko/knowledge-base": "0.1.0",
+    "@vinko/protocol": "0.1.0",
+    "@vinko/shared": "0.1.0",
+    "express": "^5.1.0",
+    "nodemailer": "^7.0.5"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --root ../.."
+  }
+}

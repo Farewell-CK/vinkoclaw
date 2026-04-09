@@ -1,0 +1,34 @@
+{
+  "id": "code-executor",
+  "name": "Code Executor",
+  "version": "1.0.0",
+  "kind": "skill",
+  "description": "Plan and approval-gate development and code execution tasks",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "approvalRequired": {
+        "type": "boolean",
+        "description": "Require approval before code execution",
+        "default": true
+      },
+      "timeoutMs": {
+        "type": "number",
+        "description": "Maximum execution time in milliseconds",
+        "default": 60000,
+        "minimum": 1000,
+        "maximum": 300000
+      }
+    },
+    "required": []
+  },
+  "allowedRoles": [
+    "cto",
+    "frontend",
+    "backend",
+    "algorithm",
+    "developer",
+    "engineering"
+  ],
+  "entry": "./src/index.ts"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "@vinko/plugin-vector-memory",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Vector Memory Plugin for VinkoClaw",
+  "dependencies": {
+    "@vinko/plugin-sdk": "../../plugin-sdk"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

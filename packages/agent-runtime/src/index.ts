@@ -1,0 +1,1069 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  getRoleProfile,
+  loadEnv,
+  type Citation,
+  type ReflectionNote,
+  type RoleId,
+  type RuntimeConfig,
+  type SkillBindingRecord,
+  type TaskAttachment,
+  type TaskRecord,
+  type TaskResult
+} from "@vinko/shared";
+import {
+  buildToolDefinitions,
+  buildWorkDir,
+  collectArtifactFiles,
+  executeTool,
+  type ToolContext,
+  type ToolDefinition
+} from "./tool-executor.js";
+
+const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+const PROMPTS_ROOT = path.join(PROJECT_ROOT, "prompts", "roles");
+
+export interface TaskContextSnippet extends Citation {
+  score?: number;
+}
+
+export interface RuntimeExecutionInput {
+  task: TaskRecord;
+  config: RuntimeConfig;
+  skills: SkillBindingRecord[];
+  snippets: TaskContextSnippet[];
+  /** Optional tool context — enables function calling loop */
+  toolContext?: ToolContext;
+  /**
+   * Prior conversation turns from the same session, ordered oldest-first.
+   * Injected as real user/assistant message pairs before the current task message,
+   * giving the model genuine multi-turn coherence instead of JSON snippets.
+   */
+  conversationHistory?: Array<{ role: "user" | "assistant"; content: string }>;
+}
+
+export interface RuntimeExecutionOutput {
+  result: TaskResult;
+  reflection: ReflectionNote;
+  backendUsed: "sglang" | "ollama" | "zhipu" | "fallback";
+  modelUsed: string;
+  /** Files produced by tool execution during this task */
+  artifactFiles: string[];
+}
+
+interface ModelMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content: ModelMessageContent | null;
+  tool_call_id?: string;
+  tool_calls?: Array<{
+    id: string;
+    type: "function";
+    function: { name: string; arguments: string };
+  }>;
+}
+
+interface ModelCompletion {
+  text: string;
+  backendUsed: "sglang" | "ollama" | "zhipu" | "fallback";
+  modelUsed: string;
+}
+
+interface ChatCompletionResponse {
+  choices?: Array<{
+    message?: {
+      content?: unknown;
+      reasoning?: unknown;
+      tool_calls?: Array<{
+        id: string;
+        type: "function";
+        function: { name: string; arguments: string };
+      }>;
+    };
+    finish_reason?: string;
+  }>;
+}
+
+interface ChatCompletionMessage {
+  content?: unknown;
+  reasoning?: unknown;
+  tool_calls?: Array<{
+    id: string;
+    type: "function";
+    function: { name: string; arguments: string };
+  }>;
+}
+
+interface TextContentPart {
+  type: "text";
+  text: string;
+}
+
+interface ImageContentPart {
+  type: "image_url";
+  image_url: {
+    url: string;
+    detail?: "auto" | "low" | "high";
+  };
+}
+
+interface VideoContentPart {
+  type: "video_url";
+  video_url: {
+    url: string;
+  };
+}
+
+type ModelMessageContentPart = TextContentPart | ImageContentPart | VideoContentPart;
+type ModelMessageContent = string | ModelMessageContentPart[];
+
+function parseModelContent(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((entry) => {
+        if (typeof entry === "string") {
+          return entry;
+        }
+
+        if (typeof entry === "object" && entry) {
+          if ("text" in entry && typeof entry.text === "string") {
+            return entry.text;
+          }
+
+          if ("type" in entry && entry.type === "output_text" && "text" in entry && typeof entry.text === "string") {
+            return entry.text;
+          }
+        }
+
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  return "";
+}
+
+function stringifyMessageContent(content: ModelMessageContent | null): string {
+  if (!content) return "";
+  if (typeof content === "string") {
+    return content;
+  }
+
+  return content
+    .map((part) => {
+      if (part.type === "text") {
+        return part.text;
+      }
+
+      if (part.type === "image_url") {
+        return `[image] ${part.image_url.url}`;
+      }
+
+      return `[video] ${part.video_url.url}`;
+    })
+    .join("\n");
+}
+
+function parseAttachments(task: TaskRecord): TaskAttachment[] {
+  const rawAttachments = task.metadata.attachments;
+  if (!Array.isArray(rawAttachments)) {
+    return [];
+  }
+
+  return rawAttachments
+    .map((entry) => {
+      if (typeof entry !== "object" || entry === null) {
+        return undefined;
+      }
+
+      const kind = "kind" in entry ? entry.kind : undefined;
+      const url = "url" in entry ? entry.url : undefined;
+      const detail = "detail" in entry ? entry.detail : undefined;
+      const name = "name" in entry ? entry.name : undefined;
+
+      if ((kind !== "image" && kind !== "video") || typeof url !== "string" || !url.trim()) {
+        return undefined;
+      }
+
+      const normalized: TaskAttachment = {
+        kind,
+        url: url.trim()
+      };
+
+      if ((detail === "auto" || detail === "low" || detail === "high") && kind === "image") {
+        normalized.detail = detail;
+      }
+
+      if (typeof name === "string" && name.trim()) {
+        normalized.name = name.trim();
+      }
+
+      return normalized;
+    })
+    .filter((entry): entry is TaskAttachment => Boolean(entry));
+}
+
+function buildUserMessageContent(task: TaskRecord, contextBlock: string): ModelMessageContent {
+  const textBlock = [
+    `Task title: ${task.title}`,
+    `Task instruction:\n${task.instruction}`,
+    "",
+    "Relevant local context:",
+    contextBlock,
+    "",
+    "Be concrete. Cite local files in citations when they influenced the answer."
+  ].join("\n");
+
+  const attachments = parseAttachments(task);
+  if (attachments.length === 0) {
+    return textBlock;
+  }
+
+  const content: ModelMessageContentPart[] = [
+    {
+      type: "text",
+      text: [
+        textBlock,
+        "",
+        "Attachments:",
+        ...attachments.map((attachment, index) => {
+          const label = attachment.name ? ` (${attachment.name})` : "";
+          return `${index + 1}. ${attachment.kind}: ${attachment.url}${label}`;
+        })
+      ].join("\n")
+    }
+  ];
+
+  for (const attachment of attachments) {
+    if (attachment.kind === "image") {
+      content.push({
+        type: "image_url",
+        image_url: {
+          url: attachment.url,
+          ...(attachment.detail ? { detail: attachment.detail } : {})
+        }
+      });
+      continue;
+    }
+
+    content.push({
+      type: "video_url",
+      video_url: {
+        url: attachment.url
+      }
+    });
+  }
+
+  return content;
+}
+
+function stripCodeFence(value: string): string {
+  const trimmed = value.trim();
+  const match = trimmed.match(/^```(?:json)?\s*([\s\S]+?)\s*```$/i);
+  return match?.[1]?.trim() ?? trimmed;
+}
+
+function clampScore(value: unknown, fallback = 3): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(1, Math.min(10, Math.round(parsed)));
+}
+
+function extractFirstJsonObject(raw: string): string | undefined {
+  const source = raw.trim();
+  if (!source) {
+    return undefined;
+  }
+
+  const firstBrace = source.indexOf("{");
+  if (firstBrace < 0) {
+    return undefined;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaping = false;
+  for (let index = firstBrace; index < source.length; index += 1) {
+    const char = source[index];
+    if (escaping) {
+      escaping = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaping = true;
+      continue;
+    }
+    if (char === "\"") {
+      inString = !inString;
+      continue;
+    }
+    if (inString) {
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return source.slice(firstBrace, index + 1);
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function toNonEmptyText(value: unknown): string {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  if (value && typeof value === "object") {
+    try {
+      return JSON.stringify(value, null, 2).trim();
+    } catch {
+      return "";
+    }
+  }
+
+  return "";
+}
+
+function normalizeCitations(value: unknown): Citation[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => {
+      if (typeof entry === "string") {
+        return {
+          path: "model-output",
+          excerpt: entry
+        };
+      }
+
+      if (typeof entry === "object" && entry) {
+        const path = "path" in entry ? toNonEmptyText(entry.path) : "";
+        const excerpt = "excerpt" in entry ? toNonEmptyText(entry.excerpt) : "";
+        if (path || excerpt) {
+          return {
+            path: path || "model-output",
+            excerpt: excerpt || path
+          };
+        }
+      }
+
+      return undefined;
+    })
+    .filter((entry): entry is Citation => Boolean(entry));
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.map((entry) => toNonEmptyText(entry)).filter(Boolean);
+}
+
+function safeParseTaskResponse(raw: string): { result: TaskResult; reflection: ReflectionNote } | undefined {
+  const cleaned = stripCodeFence(raw);
+  if (!cleaned) {
+    return undefined;
+  }
+
+  const tryParseObject = (input: string): Record<string, unknown> | undefined => {
+    try {
+      const parsed = JSON.parse(input) as unknown;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const parsed =
+    tryParseObject(cleaned) ??
+    (() => {
+      const candidate = extractFirstJsonObject(cleaned);
+      return candidate ? tryParseObject(candidate) : undefined;
+    })();
+
+  if (!parsed) {
+    const normalizedRaw = cleaned.trim();
+    if (!normalizedRaw) {
+      return undefined;
+    }
+    return {
+      result: {
+        summary: "Model output required JSON normalization",
+        deliverable: normalizedRaw,
+        citations: [],
+        followUps: []
+      },
+      reflection: {
+        score: 3,
+        confidence: "medium",
+        assumptions: [],
+        risks: ["The model output was not valid JSON and was preserved as plain text."],
+        improvements: ["Prefer strict JSON-only output for this role prompt."]
+      }
+    };
+  }
+
+  const reflectionRaw =
+    parsed.reflection && typeof parsed.reflection === "object" && !Array.isArray(parsed.reflection)
+      ? (parsed.reflection as Record<string, unknown>)
+      : {};
+  const deliverableText = toNonEmptyText(parsed.deliverable);
+  const summaryText =
+    toNonEmptyText(parsed.summary) ||
+    (deliverableText ? deliverableText.slice(0, 120) : "Model response normalized");
+
+  const confidenceRaw = toNonEmptyText(reflectionRaw.confidence).toLowerCase();
+  const confidence =
+    confidenceRaw === "low" || confidenceRaw === "medium" || confidenceRaw === "high"
+      ? confidenceRaw
+      : "medium";
+
+  const assumptions = normalizeStringList(reflectionRaw.assumptions);
+  const risks = normalizeStringList(reflectionRaw.risks);
+  const improvements = normalizeStringList(reflectionRaw.improvements);
+
+  const safeDeliverable = deliverableText || cleaned;
+  if (!safeDeliverable.trim()) {
+    return undefined;
+  }
+
+  return {
+    result: {
+      summary: summaryText,
+      deliverable: safeDeliverable,
+      citations: normalizeCitations(parsed.citations),
+      followUps: normalizeStringList(parsed.followUps)
+    },
+    reflection: {
+      score: clampScore(reflectionRaw.score),
+      confidence,
+      assumptions,
+      risks,
+      improvements
+    }
+  };
+}
+
+async function loadRolePrompt(roleId: RoleId): Promise<string> {
+  try {
+    return await readFile(path.join(PROMPTS_ROOT, `${roleId}.md`), "utf8");
+  } catch {
+    const profile = getRoleProfile(roleId);
+    return `${profile.name}\n\n${profile.responsibility}`;
+  }
+}
+
+const SYSTEM_PROMPT_VERSION = "v2.1-layered-2026-04-02";
+
+function resolvePreferredLanguage(task: TaskRecord): "zh-CN" | "en-US" {
+  const sample = `${task.title}\n${task.instruction}`;
+  return /[\u4e00-\u9fff]/.test(sample) ? "zh-CN" : "en-US";
+}
+
+function buildLayeredSystemPrompt(input: {
+  rolePrompt: string;
+  profileName: string;
+  skillList: string;
+  memoryBackend: string;
+  preferredLanguage: "zh-CN" | "en-US";
+  availableTools?: string[];
+}): string {
+  const toolSection =
+    input.availableTools && input.availableTools.length > 0
+      ? [
+          "",
+          "## Available Tools",
+          "You have function-calling tools you MUST use proactively instead of producing text-only answers:",
+          ...input.availableTools.map((t) => `- ${t}`),
+          "Guidelines:",
+          "- Use `run_code` (python/bash) for ANY computation, file generation (PDF, Excel, CSV, images), data processing, or installing packages. Do NOT describe code — run it.",
+          "- Use `web_search` whenever you need real-time information, current docs, prices, news, or anything beyond training data.",
+          "- Use `write_file` to persist deliverable text artifacts. Default to Markdown (.md) for documents and reports; use JSON for data; use CSV for tabular data. Only use HTML/CSS/JS when the task explicitly requires a web page.",
+          "- Chain tools across multiple rounds: search → run code → write file.",
+          "- If a tool does not exist for a task, write Python code that implements it via `run_code`.",
+          "- After all tool work is complete, emit the final JSON output contract."
+        ].join("\n")
+      : "";
+
+  return [
+    `Prompt version: ${SYSTEM_PROMPT_VERSION}`,
+    "",
+    "## Global Rules",
+    "You are an internal VinkoClaw execution agent running on a DGX Spark machine.",
+    "Use only facts grounded in provided context and repository evidence.",
+    "Never invent config keys, API fields, endpoints, or capabilities.",
+    "When context is insufficient, explicitly say 'insufficient context' and list missing fields.",
+    "Always respond in the same language as the user's instruction.",
+    "If preferred language is zh-CN, write summary, deliverable, followUps, assumptions, risks, improvements in Simplified Chinese.",
+    "For chat channels, keep wording natural and concise; avoid robotic template phrases.",
+    "",
+    "## Runtime Context",
+    `Role: ${input.profileName}`,
+    `Active skills: ${input.skillList}`,
+    `Memory backend: ${input.memoryBackend}`,
+    `Preferred language: ${input.preferredLanguage}`,
+    toolSection,
+    "",
+    "## Role Prompt",
+    input.rolePrompt.trim(),
+    "",
+    "## Output Contract",
+    "Return strict JSON with keys: summary, deliverable, citations, followUps, reflection.",
+    "reflection must contain: score, confidence, assumptions, risks, improvements.",
+    "Do not include prose outside JSON."
+  ]
+    .filter((line) => line !== undefined)
+    .join("\n");
+}
+
+function buildFallbackOutput(input: RuntimeExecutionInput): RuntimeExecutionOutput {
+  const profile = getRoleProfile(input.task.roleId);
+  const citationLines = input.snippets.map((snippet) => `- ${snippet.path}: ${snippet.excerpt}`).join("\n");
+  const skillList = input.skills.map((skill) => skill.skillId).join(", ") || "none";
+  const memoryBackend =
+    input.config.memory.roleBackends[input.task.roleId] ?? input.config.memory.defaultBackend;
+  const preferredLanguage = resolvePreferredLanguage(input.task);
+  const isZh = preferredLanguage === "zh-CN";
+
+  return {
+    backendUsed: "fallback",
+    modelUsed: "deterministic-fallback",
+    result: {
+      summary: isZh
+        ? `${profile.name} 已生成本地降级响应`
+        : `${profile.name} produced a local fallback response`,
+      deliverable: [
+        isZh ? `角色：${profile.name}` : `Role: ${profile.name}`,
+        isZh ? `任务指令：${input.task.instruction}` : `Instruction: ${input.task.instruction}`,
+        isZh ? `已启用技能：${skillList}` : `Active skills: ${skillList}`,
+        isZh ? `记忆后端：${memoryBackend}` : `Memory backend: ${memoryBackend}`,
+        isZh
+          ? "当前模型后端不可用，以下为确定性降级输出。"
+          : "Model backend was unavailable, so this response is a deterministic fallback.",
+        citationLines
+          ? isZh
+            ? `相关本地上下文：\n${citationLines}`
+            : `Relevant local context:\n${citationLines}`
+          : isZh
+            ? "相关本地上下文：无"
+            : "Relevant local context: none"
+      ].join("\n\n"),
+      citations: input.snippets.map((snippet) => ({
+        path: snippet.path,
+        excerpt: snippet.excerpt
+      })),
+      followUps: isZh
+        ? [
+            "检查主推理后端是否已正常加载当前配置的模型。",
+            "若主后端不可用，确认兜底后端（Ollama / Zhipu）是否可用。",
+            "模型服务恢复后重新执行该任务。"
+          ]
+        : [
+            "Check whether the primary inference backend is serving the configured model.",
+            "If the primary backend is down, verify the fallback backend (Ollama / Zhipu) is available.",
+            "Retry the task after the model backend is healthy."
+          ]
+    },
+    reflection: {
+      score: 2,
+      confidence: "low",
+      assumptions: isZh
+        ? [
+            "目标能力可在无在线推理时做近似处理。",
+            "当前任务可依赖本地仓库上下文先行推进。"
+          ]
+        : [
+            "The requested capability can still be approximated without live inference.",
+            "The current task can proceed with local repository context only."
+          ],
+      risks: isZh
+        ? [
+            "本次输出并非来自预期的 Qwen 3.5 后端。",
+            "在模型服务恢复前，推理深度会受限。"
+          ]
+        : [
+            "The response is not generated by the intended Qwen 3.5 backend.",
+            "Reasoning depth is reduced until the local model server is online."
+          ],
+      improvements: isZh
+        ? ["恢复主推理后端。", "模型恢复后按完整角色提示词重试任务。"]
+        : [
+            "Restore the primary inference backend.",
+            "Retry with the full role prompt once the local model is available."
+          ]
+    },
+    artifactFiles: []
+  };
+}
+
+export class LocalModelClient {
+  private readonly env = loadEnv();
+
+  private isVllmQwen35A3B(baseUrl: string, model: string): boolean {
+    return baseUrl.includes(":8000") && model.includes("Qwen3.5-35B-A3B");
+  }
+
+  private async requestChatCompletion(
+    baseUrl: string,
+    requestBody: Record<string, unknown>,
+    apiKey?: string
+  ): Promise<ChatCompletionMessage | undefined> {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (apiKey) {
+      headers["authorization"] = `Bearer ${apiKey}`;
+    }
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(120_000)
+    });
+
+    if (!response.ok) {
+      throw new Error(`backend responded with ${response.status}`);
+    }
+
+    const payload = (await response.json()) as ChatCompletionResponse;
+    return payload.choices?.[0]?.message;
+  }
+
+  private async finalizeReasoningToContent(
+    baseUrl: string,
+    model: string,
+    messages: ModelMessage[],
+    reasoningText: string
+  ): Promise<string | undefined> {
+    const finalizePrompt = [
+      "You are a response finalizer.",
+      "Convert the draft reasoning into the final assistant answer.",
+      "Output only the final answer text with no extra preface."
+    ].join("\n");
+
+    const originalContext = messages
+      .map((message) => `${message.role.toUpperCase()}:\n${stringifyMessageContent(message.content)}`)
+      .join("\n\n");
+
+    const finalizeBody: Record<string, unknown> = {
+      model,
+      temperature: 0.1,
+      max_tokens: 16384,
+      chat_template_kwargs: {
+        enable_thinking: false
+      },
+      messages: [
+        {
+          role: "system",
+          content: finalizePrompt
+        },
+        {
+          role: "user",
+          content: [
+            "Original conversation:",
+            originalContext,
+            "",
+            "Reasoning draft:",
+            reasoningText,
+            "",
+            "Now return the final answer."
+          ].join("\n")
+        }
+      ]
+    };
+
+    const finalizedMessage = await this.requestChatCompletion(baseUrl, finalizeBody);
+    const finalizedText = parseModelContent(finalizedMessage?.content);
+    return finalizedText || undefined;
+  }
+
+  private async callZhipu(messages: ModelMessage[]): Promise<ModelCompletion | undefined> {
+    const apiKey = this.env.zhipuApiKey;
+    if (!apiKey) {
+      return undefined;
+    }
+    const baseUrl = this.env.zhipuBaseUrl.replace(/\/$/, "");
+    const model = this.env.zhipuModel;
+
+    const requestBody: Record<string, unknown> = {
+      model,
+      temperature: 0.2,
+      max_tokens: 16384,
+      messages
+    };
+
+    // GLM-5 supports thinking mode — enable it for richer reasoning
+    if (model === "glm-5" || model === "glm-5-turbo") {
+      requestBody.thinking = { type: "enabled" };
+    }
+
+    const message = await this.requestChatCompletion(baseUrl, requestBody, apiKey);
+    const contentText = parseModelContent(message?.content);
+    const reasoningText = parseModelContent(message?.reasoning);
+    const text = contentText || reasoningText;
+    if (!text) {
+      return undefined;
+    }
+
+    return {
+      text,
+      backendUsed: "zhipu",
+      modelUsed: model
+    };
+  }
+
+  private async callBackend(
+    backend: "sglang" | "ollama" | "zhipu",
+    messages: ModelMessage[]
+  ): Promise<ModelCompletion | undefined> {
+    if (backend === "zhipu") {
+      return this.callZhipu(messages);
+    }
+
+    const baseUrl =
+      backend === "sglang" ? this.env.sglangBaseUrl.replace(/\/$/, "") : this.env.ollamaBaseUrl.replace(/\/$/, "");
+    const model = backend === "sglang" ? this.env.sglangModel : this.env.ollamaModel;
+
+    const useThinkingFirst = this.isVllmQwen35A3B(baseUrl, model);
+    const requestBody: Record<string, unknown> = {
+      model,
+      temperature: 0.2,
+      messages,
+      max_tokens: 16384
+    };
+
+    if (useThinkingFirst) {
+      requestBody.chat_template_kwargs = {
+        enable_thinking: true
+      };
+    }
+
+    const message = await this.requestChatCompletion(baseUrl, requestBody);
+    const contentText = parseModelContent(message?.content);
+    const reasoningText = parseModelContent(message?.reasoning);
+    const text =
+      contentText ||
+      (useThinkingFirst && reasoningText
+        ? await this.finalizeReasoningToContent(baseUrl, model, messages, reasoningText)
+        : reasoningText);
+    if (!text) {
+      return undefined;
+    }
+
+    return {
+      text,
+      backendUsed: backend,
+      modelUsed: model
+    };
+  }
+
+  /** Call the model with tool definitions. Returns the raw message (may contain tool_calls). */
+  async completeWithTools(
+    messages: ModelMessage[],
+    tools: ToolDefinition[]
+  ): Promise<{ message: ChatCompletionMessage; backendUsed: "sglang" | "ollama" | "zhipu" | "fallback"; modelUsed: string }> {
+    const env = this.env;
+    // Only zhipu (GLM-5) and sglang (Qwen3.5) reliably support tool calling
+    const backends: Array<"zhipu" | "sglang" | "ollama"> =
+      env.primaryBackend === "zhipu"
+        ? ["zhipu", "sglang"]
+        : ["sglang", "zhipu"];
+
+    for (const backend of backends) {
+      try {
+        const baseUrl =
+          backend === "zhipu"
+            ? env.zhipuBaseUrl.replace(/\/$/, "")
+            : backend === "sglang"
+              ? env.sglangBaseUrl.replace(/\/$/, "")
+              : env.ollamaBaseUrl.replace(/\/$/, "");
+        const model =
+          backend === "zhipu"
+            ? env.zhipuModel
+            : backend === "sglang"
+              ? env.sglangModel
+              : env.ollamaModel;
+        const apiKey = backend === "zhipu" ? (env.zhipuApiKey || undefined) : undefined;
+
+        const body: Record<string, unknown> = {
+          model,
+          temperature: 0.2,
+          max_tokens: 16384,
+          messages,
+          tools,
+          tool_choice: "auto"
+        };
+
+        // Disable thinking mode for tool-calling rounds — the model must emit
+        // a tool_calls response, not spend tokens on CoT before acting.
+        if (backend === "sglang" && this.isVllmQwen35A3B(baseUrl, model)) {
+          body.chat_template_kwargs = { enable_thinking: false };
+        }
+
+        const msg = await this.requestChatCompletion(baseUrl, body, apiKey);
+        if (msg) {
+          return { message: msg, backendUsed: backend, modelUsed: model };
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return {
+      message: {},
+      backendUsed: "fallback",
+      modelUsed: "deterministic-fallback"
+    };
+  }
+
+  async complete(messages: ModelMessage[]): Promise<ModelCompletion> {
+    const backends: Array<"sglang" | "ollama" | "zhipu"> =
+      this.env.primaryBackend === "zhipu"
+        ? ["zhipu", "sglang", "ollama"]
+        : this.env.primaryBackend === "sglang"
+          ? ["sglang", "ollama"]
+          : ["ollama", "sglang"];
+
+    for (const backend of backends) {
+      try {
+        const completion = await this.callBackend(backend, messages);
+        if (completion) {
+          return completion;
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return {
+      text: "",
+      backendUsed: "fallback",
+      modelUsed: "deterministic-fallback"
+    };
+  }
+}
+
+export class AgentRuntime {
+  private readonly client = new LocalModelClient();
+
+  async execute(input: RuntimeExecutionInput): Promise<RuntimeExecutionOutput> {
+    const systemPrompt = await loadRolePrompt(input.task.roleId);
+    const profile = getRoleProfile(input.task.roleId);
+    const memoryBackend =
+      input.config.memory.roleBackends[input.task.roleId] ?? input.config.memory.defaultBackend;
+    const preferredLanguage = resolvePreferredLanguage(input.task);
+    const skillList = input.skills.map((skill) => skill.skillId).join(", ") || "none";
+    const contextBlock =
+      input.snippets.length === 0
+        ? "No local context retrieved."
+        : input.snippets
+            .map((snippet) => `- ${snippet.path}\n${snippet.excerpt}`)
+            .join("\n\n");
+
+    // ── Tool calling loop ──────────────────────────────────────────────────
+    const toolCtx = input.toolContext;
+    const allArtifactPaths: string[] = [];
+
+    const toolDefs = toolCtx ? buildToolDefinitions(toolCtx) : [];
+    const availableTools =
+      toolDefs.length > 0 ? toolDefs.map((t) => `${t.function.name}: ${t.function.description.split(".")[0]}`) : undefined;
+
+    const messages: ModelMessage[] = [
+      {
+        role: "system",
+        content: buildLayeredSystemPrompt({
+          rolePrompt: systemPrompt,
+          profileName: profile.name,
+          skillList,
+          memoryBackend,
+          preferredLanguage,
+          ...(availableTools ? { availableTools } : {})
+        })
+      },
+      // Inject prior conversation turns as real message pairs for multi-turn coherence
+      ...(input.conversationHistory ?? []).map((turn) => ({
+        role: turn.role as "user" | "assistant",
+        content: turn.content as ModelMessageContent
+      })),
+      {
+        role: "user",
+        content: buildUserMessageContent(input.task, contextBlock)
+      }
+    ];
+
+    if (toolCtx && toolDefs.length > 0) {
+      const tools = toolDefs;
+      const MAX_TOOL_ROUNDS = 8;
+      let backendUsed: RuntimeExecutionOutput["backendUsed"] = "fallback";
+      let modelUsed = "deterministic-fallback";
+
+      for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+        const { message, backendUsed: bu, modelUsed: mu } = await this.client.completeWithTools(messages, tools);
+        backendUsed = bu;
+        modelUsed = mu;
+
+        if (bu === "fallback") break;
+
+        const toolCalls = message.tool_calls ?? [];
+
+        if (toolCalls.length === 0) {
+          // Model finished — parse the final text response.
+          // Thinking models (Qwen3) may return content=null with reasoning populated;
+          // in that case finalize the reasoning into content first.
+          const contentText = parseModelContent(message.content);
+          const reasoningText = parseModelContent(message.reasoning);
+          let text = contentText;
+          if (!text && reasoningText) {
+            text = await this.finalizeReasoningToContent(
+              backendUsed === "sglang"
+                ? this.env.sglangBaseUrl.replace(/\/$/, "")
+                : this.env.ollamaBaseUrl.replace(/\/$/, ""),
+              backendUsed === "sglang" ? this.env.sglangModel : this.env.ollamaModel,
+              messages,
+              reasoningText
+            ) ?? reasoningText;
+          }
+          if (!text) break;
+
+          const parsed = safeParseTaskResponse(text);
+          if (!parsed) {
+            // Not JSON yet — push the assistant response and ask for JSON output in next round
+            messages.push({ role: "assistant", content: text });
+            messages.push({
+              role: "user",
+              content:
+                "Good. Now output the final result as strict JSON with keys: summary, deliverable, citations, followUps, reflection. reflection must contain: score, confidence, assumptions, risks, improvements. Do not include any prose outside JSON."
+            });
+            // Try one more round to get structured output
+            const retry = await this.client.completeWithTools(messages, tools);
+            const retryText = parseModelContent(retry.message.content);
+            const retryParsed = retryText ? safeParseTaskResponse(retryText) : undefined;
+
+            if (retryParsed) {
+              return {
+                result: retryParsed.result,
+                reflection: retryParsed.reflection,
+                backendUsed: retry.backendUsed,
+                modelUsed: retry.modelUsed,
+                artifactFiles: collectArtifactFiles(toolCtx.workDir, input.task.id)
+              };
+            }
+
+            // Still not JSON — synthesize result from the plain text
+            const fallback = buildFallbackOutput(input);
+            fallback.backendUsed = backendUsed;
+            fallback.modelUsed = modelUsed;
+            fallback.result.summary = text.slice(0, 120);
+            fallback.result.deliverable = text;
+            fallback.reflection.score = 5;
+            fallback.reflection.confidence = "medium";
+            fallback.artifactFiles = collectArtifactFiles(toolCtx.workDir, input.task.id);
+            return fallback;
+          }
+
+          return {
+            result: parsed.result,
+            reflection: parsed.reflection,
+            backendUsed,
+            modelUsed,
+            artifactFiles: collectArtifactFiles(toolCtx.workDir, input.task.id)
+          };
+        }
+
+        // Execute tool calls, inject results back into conversation
+        const assistantMsg: ModelMessage = {
+          role: "assistant",
+          content: null,
+          tool_calls: toolCalls
+        };
+        messages.push(assistantMsg);
+
+        for (const tc of toolCalls) {
+          const result = await executeTool(toolCtx, tc.id, tc.function.name, tc.function.arguments);
+          allArtifactPaths.push(...result.artifactPaths);
+          const toolMsg: ModelMessage = {
+            role: "tool",
+            tool_call_id: tc.id,
+            content: result.error ? `ERROR: ${result.error}` : result.output
+          };
+          messages.push(toolMsg);
+        }
+      }
+
+      // Fell through MAX_TOOL_ROUNDS or all backends failed — use fallback
+      const fallback = buildFallbackOutput(input);
+      fallback.artifactFiles = collectArtifactFiles(toolCtx.workDir, input.task.id);
+      return fallback;
+    }
+
+    // ── Plain completion (no tools / tools not configured) ─────────────────
+    const completion = await this.client.complete(messages);
+    if (completion.backendUsed === "fallback" || !completion.text) {
+      return buildFallbackOutput(input);
+    }
+
+    const parsed = safeParseTaskResponse(completion.text);
+    if (!parsed) {
+      // Single JSON-repair retry: ask the model to reformat as strict JSON
+      const retryMessages: ModelMessage[] = [
+        ...messages,
+        { role: "assistant", content: completion.text },
+        {
+          role: "user",
+          content:
+            "Your previous response was not valid JSON. Output ONLY a JSON object with keys: summary, deliverable, citations, followUps, reflection. No extra text or markdown fences. reflection must contain: score (1–10), confidence (low/medium/high), assumptions (string[]), risks (string[]), improvements (string[])."
+        }
+      ];
+      const retryCompletion = await this.client.complete(retryMessages);
+      const retryParsed = retryCompletion.text ? safeParseTaskResponse(retryCompletion.text) : undefined;
+      if (retryParsed) {
+        return {
+          result: retryParsed.result,
+          reflection: retryParsed.reflection,
+          backendUsed: retryCompletion.backendUsed,
+          modelUsed: retryCompletion.modelUsed,
+          artifactFiles: []
+        };
+      }
+      // Still no JSON — surface the plain-text deliverable with reduced confidence
+      const fallback = buildFallbackOutput(input);
+      fallback.backendUsed = completion.backendUsed;
+      fallback.modelUsed = completion.modelUsed;
+      fallback.result.summary = completion.text.slice(0, 180);
+      fallback.result.deliverable = completion.text;
+      fallback.reflection.score = 4;
+      fallback.reflection.confidence = "medium";
+      return fallback;
+    }
+
+    return {
+      result: parsed.result,
+      reflection: parsed.reflection,
+      backendUsed: completion.backendUsed,
+      modelUsed: completion.modelUsed,
+      artifactFiles: []
+    };
+  }
+}

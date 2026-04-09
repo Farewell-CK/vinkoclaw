@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VinkoClaw Command Room</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="background"></div>
+    <main class="shell">
+      <section class="topbar">
+        <button type="button" class="menu-toggle" aria-label="Toggle navigation menu">
+          <span></span>
+        </button>
+        <nav id="view-nav" class="view-nav">
+          <button type="button" class="ghost nav-btn" data-view="workbench" data-i18n="nav.workbench">
+            工作台
+          </button>
+          <button type="button" class="ghost nav-btn" data-view="routing" data-i18n="nav.routing">
+            模板与队列
+          </button>
+          <button type="button" class="ghost nav-btn" data-view="config" data-i18n="nav.config">
+            团队与渠道
+          </button>
+          <button type="button" class="ghost nav-btn" data-view="execution" data-i18n="nav.execution">
+            审批与执行
+          </button>
+          <button type="button" class="ghost nav-btn" data-view="audit" data-i18n="nav.audit">
+            审计
+          </button>
+        </nav>
+        <div class="lang-switch">
+          <button type="button" class="ghost lang-btn" data-lang-switch="zh">中文</button>
+          <button type="button" class="ghost lang-btn" data-lang-switch="en">EN</button>
+        </div>
+        <div class="user-menu">
+          <span id="user-display-name" class="user-name"></span>
+          <button type="button" class="ghost logout-btn" id="logout-btn" data-i18n="nav.logout">Logout</button>
+        </div>
+      </section>
+
+      <!-- 指标卡片独立成行 -->
+      <section class="hero-meta">
+        <div class="meta-card">
+          <span data-i18n="meta.execution">Execution</span>
+          <strong id="meta-tasks">0 tasks</strong>
+        </div>
+        <div class="meta-card">
+          <span data-i18n="meta.approvals">Approvals</span>
+          <strong id="meta-approvals">0 pending</strong>
+        </div>
+        <div class="meta-card">
+          <span data-i18n="meta.memory">Memory</span>
+          <strong id="meta-memory">sqlite</strong>
+        </div>
+      </section>
+
+      <section class="hero">
+        <div>
+          <p class="eyebrow">VinkoClaw</p>
+          <h1 data-i18n="hero.title">OPC Command Room</h1>
+          <p class="lede" data-i18n="hero.lede">
+            One Feishu command room. One DGX Spark headquarters. A multi-role internal agent team with role-scoped
+            skills, approvals, memory policy, and reflective execution.
+          </p>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="panel panel-command view-panel" data-view="workbench">
+          <header>
+            <h2 data-i18n="panel.natural.title">Natural Command</h2>
+            <p data-i18n="panel.natural.desc">Send a command as if it came from Feishu. Operator actions will become approvals.</p>
+          </header>
+          <form id="message-form" class="stack">
+            <textarea
+              id="message-text"
+              name="text"
+              data-i18n-placeholder="panel.natural.placeholder"
+              placeholder="例如：请配置研究助理的记忆为向量数据库"
+              rows="5"
+            ></textarea>
+            <div class="row">
+              <input
+                id="message-user"
+                name="requestedBy"
+                data-i18n-placeholder="panel.natural.requestedByPlaceholder"
+                placeholder="requestedBy"
+                value="owner"
+              />
+              <button type="submit" data-i18n="panel.natural.submit">Dispatch</button>
+            </div>
+          </form>
+          <div id="message-result" class="feedback"></div>
+        </article>
+
+        <article class="panel view-panel" data-view="workbench">
+          <header>
+            <h2 data-i18n="panel.task.title">Direct Task</h2>
+            <p data-i18n="panel.task.desc">Queue a task to a specific internal agent.</p>
+          </header>
+          <form id="task-form" class="stack">
+            <div class="row">
+              <select id="task-role" name="roleId"></select>
+              <input
+                id="task-requested-by"
+                name="requestedBy"
+                data-i18n-placeholder="panel.task.requestedByPlaceholder"
+                placeholder="requestedBy"
+                value="owner"
+              />
+            </div>
+            <input id="task-title" name="title" data-i18n-placeholder="panel.task.titlePlaceholder" placeholder="Task title" />
+            <textarea
+              id="task-instruction"
+              name="instruction"
+              data-i18n-placeholder="panel.task.instructionPlaceholder"
+              placeholder="Describe the outcome you want from this agent."
+              rows="5"
+            ></textarea>
+            <textarea
+              id="task-image-urls"
+              name="imageUrls"
+              data-i18n-placeholder="panel.task.imagePlaceholder"
+              placeholder="Image URL(s), one per line. Optional."
+              rows="3"
+            ></textarea>
+            <textarea
+              id="task-video-urls"
+              name="videoUrls"
+              data-i18n-placeholder="panel.task.videoPlaceholder"
+              placeholder="Video URL(s), one per line. Optional."
+              rows="3"
+            ></textarea>
+            <button type="submit" data-i18n="panel.task.submit">Queue Task</button>
+          </form>
+          <div id="task-result" class="feedback"></div>
+        </article>
+
+        <article class="panel span-2 view-panel" data-view="routing">
+          <header>
+            <h2 data-i18n="panel.routing.title">Routing Templates</h2>
+            <p data-i18n="panel.routing.desc">Manage task-routing templates with create, update, and delete operations.</p>
+          </header>
+          <form id="template-form" class="stack">
+            <input id="template-id" type="hidden" />
+            <div class="row">
+              <input id="template-name" data-i18n-placeholder="panel.routing.templateNamePlaceholder" placeholder="Template name" />
+              <select id="template-mode">
+                <option value="any" data-i18n="panel.routing.mode.any">match any keyword</option>
+                <option value="all" data-i18n="panel.routing.mode.all">match all keywords</option>
+              </select>
+            </div>
+            <input
+              id="template-description"
+              data-i18n-placeholder="panel.routing.descriptionPlaceholder"
+              placeholder="Description (optional)"
+            />
+            <input
+              id="template-keywords"
+              data-i18n-placeholder="panel.routing.keywordsPlaceholder"
+              placeholder="Keywords (comma separated)"
+            />
+            <textarea
+              id="template-tasks"
+              data-i18n-placeholder="panel.routing.tasksPlaceholder"
+              placeholder='Tasks JSON, e.g. [{"roleId":"frontend","titleTemplate":"...","instructionTemplate":"..."}]'
+              rows="5"
+            ></textarea>
+            <div class="row">
+              <select id="template-import-mode">
+                <option value="merge" data-i18n="panel.routing.importMode.merge">import merge</option>
+                <option value="replace" data-i18n="panel.routing.importMode.replace">import replace</option>
+              </select>
+              <div class="row">
+                <button type="button" class="ghost" id="template-export" data-i18n="panel.routing.export">Export JSON</button>
+                <button type="button" class="ghost" id="template-import" data-i18n="panel.routing.import">Import JSON</button>
+              </div>
+            </div>
+            <textarea
+              id="template-json-io"
+              data-i18n-placeholder="panel.routing.jsonIoPlaceholder"
+              placeholder='Template JSON import/export area, e.g. {"templates":[...]}'
+              rows="4"
+            ></textarea>
+            <div class="row">
+              <button type="submit" data-i18n="panel.routing.save">Save Template</button>
+              <button type="button" class="ghost" id="template-reset" data-i18n="panel.routing.new">New Template</button>
+            </div>
+          </form>
+          <div id="template-result" class="feedback"></div>
+          <div id="routing-templates" class="list"></div>
+        </article>
+
+        <article class="panel span-2 view-panel" data-view="routing">
+          <header>
+            <h2 data-i18n="panel.queue.title">Queue Metrics</h2>
+            <p data-i18n="panel.queue.desc">Queue depth and throughput for the last 24h, split by role and routing template.</p>
+          </header>
+          <form id="queue-sla-form" class="stack">
+            <div class="row">
+              <input
+                id="queue-warning-min"
+                type="number"
+                min="0"
+                step="1"
+                data-i18n-placeholder="panel.queue.warningPlaceholder"
+                placeholder="warning wait (minutes)"
+              />
+              <input
+                id="queue-critical-min"
+                type="number"
+                min="1"
+                step="1"
+                data-i18n-placeholder="panel.queue.criticalPlaceholder"
+                placeholder="critical wait (minutes)"
+              />
+              <button type="submit" data-i18n="panel.queue.updateSla">Update SLA</button>
+            </div>
+          </form>
+          <div id="queue-sla-result" class="feedback"></div>
+          <div id="queue-overview" class="list"></div>
+          <div id="queue-alerts" class="list"></div>
+          <div id="queue-by-role" class="list"></div>
+          <div id="queue-by-template" class="list"></div>
+        </article>
+
+        <article class="panel span-2 view-panel" data-view="config">
+          <header>
+            <h2 data-i18n="panel.channel.title">Channel Readiness</h2>
+            <p data-i18n="panel.channel.desc">Feishu / Email configuration completeness and tool provider availability.</p>
+          </header>
+          <div id="channels-status" class="list"></div>
+          <div id="providers-status" class="list"></div>
+        </article>
+
+        <article class="panel span-2 view-panel" data-view="config">
+          <header>
+            <h2 data-i18n="panel.team.title">Team State</h2>
+            <p data-i18n="panel.team.desc">Role ownership, installed skills, and memory backend policy.</p>
+          </header>
+          <div id="roles" class="roles"></div>
+        </article>
+
+        <article class="panel view-panel" data-view="execution">
+          <header>
+            <h2 data-i18n="panel.approvals.title">Approvals</h2>
+            <p data-i18n="panel.approvals.desc">Config changes and external actions stop here before execution.</p>
+          </header>
+          <div id="approvals" class="list"></div>
+        </article>
+
+        <article class="panel view-panel" data-view="execution">
+          <header>
+            <h2 data-i18n="panel.tasks.title">Tasks</h2>
+            <p data-i18n="panel.tasks.desc">Live execution feed with reflective outputs.</p>
+          </header>
+          <div id="tasks" class="list"></div>
+        </article>
+
+        <article class="panel view-panel" data-view="execution">
+          <header>
+            <h2 data-i18n="panel.toolRuns.title">Tool Runs</h2>
+            <p data-i18n="panel.toolRuns.desc">Developer/code-executor task runs through opencode, codex, or claude.</p>
+          </header>
+          <div id="tool-runs" class="list"></div>
+        </article>
+
+        <article class="panel span-2 view-panel" data-view="audit">
+          <header>
+            <h2 data-i18n="panel.audit.title">Audit Trail</h2>
+            <p data-i18n="panel.audit.desc">Every operator action, approval, and task transition stays visible.</p>
+          </header>
+          <div id="audit" class="list audit"></div>
+        </article>
+      </section>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+  </html>

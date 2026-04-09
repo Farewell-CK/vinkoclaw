@@ -1,0 +1,23 @@
+{
+  "name": "@vinko/plugin-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "VinkoClaw Plugin SDK - Public API for developing plugins",
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types.ts",
+    "./entry": "./src/entry.ts",
+    "./config": "./src/config.ts",
+    "./logger": "./src/logger.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --root ../.."
+  },
+  "keywords": [
+    "vinkoclaw",
+    "plugin",
+    "sdk"
+  ]
+}
