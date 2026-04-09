@@ -101,6 +101,7 @@ const FEISHU_SENDER_NAME_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const feishuCardActionTokenDeduper = new ExpiringTokenDeduper(FEISHU_CARD_ACTION_TOKEN_TTL_MS);
 const feishuInboundMessageDeduper = new ExpiringTokenDeduper(FEISHU_INBOUND_MESSAGE_DEDUP_TTL_MS);
 const feishuNotifiedApprovalSteps = new Set<string>();
+const feishuRequesterApprovalReminders = new Set<string>();
 const feishuSenderNameCache = new Map<string, { name: string; expiresAt: number }>();
 
 type AuthenticatedUser = {
@@ -348,8 +349,99 @@ function isFeishuApprovalCardEnabled(): boolean {
   return parseRuntimeBoolean("FEISHU_APPROVAL_CARD_ENABLED", true);
 }
 
+function isFeishuApprovalRequesterNotifyEnabled(): boolean {
+  return parseRuntimeBoolean("FEISHU_APPROVAL_REQUESTER_NOTIFY_ENABLED", true);
+}
+
 function shouldResolveFeishuSenderNames(): boolean {
   return parseRuntimeBoolean("FEISHU_RESOLVE_SENDER_NAMES", true);
+}
+
+function isLikelyFeishuOpenId(value: string): boolean {
+  return /^ou_[a-z0-9]{8,}$/i.test(value.trim());
+}
+
+function resolveApprovalRequesterOpenId(requestedBy?: string | undefined): string | undefined {
+  const normalized = requestedBy?.trim() ?? "";
+  if (isLikelyFeishuOpenId(normalized)) {
+    return normalized;
+  }
+  if (normalized.toLowerCase() !== "owner") {
+    return undefined;
+  }
+  return resolveFeishuOwnerOpenIds().find((openId) => isLikelyFeishuOpenId(openId));
+}
+
+function buildApprovalRequesterReminderText(input: {
+  approvalId: string;
+  summary: string;
+  failureReason?: string | undefined;
+}): string {
+  const approvalShortId = input.approvalId.slice(0, 8);
+  if (!input.failureReason) {
+    return `审批提醒：审批单 ${approvalShortId} 已创建（${input.summary}）。请在飞书审批卡或控制台处理。`;
+  }
+  return [
+    `审批提醒：审批单 ${approvalShortId} 已创建（${input.summary}）。`,
+    "当前审批卡发送给审批人失败，请先在控制台处理审批。",
+    `失败原因：${input.failureReason.slice(0, 160)}`,
+    "请检查 FEISHU_APPROVER_OPEN_IDS_JSON / FEISHU_OWNER_OPEN_IDS 配置。"
+  ].join("\n");
+}
+
+async function notifyApprovalRequesterViaFeishu(input: {
+  client: FeishuClient;
+  approvalId: string;
+  stepId: string;
+  summary: string;
+  requestedBy?: string | undefined;
+  failureReason?: string | undefined;
+}): Promise<void> {
+  if (!isFeishuApprovalRequesterNotifyEnabled()) {
+    return;
+  }
+  const requesterOpenId = resolveApprovalRequesterOpenId(input.requestedBy);
+  if (!requesterOpenId) {
+    return;
+  }
+  const dedupeKey = `${input.stepId}:${requesterOpenId}`;
+  if (feishuRequesterApprovalReminders.has(dedupeKey)) {
+    return;
+  }
+
+  try {
+    await input.client.sendTextToUser(
+      requesterOpenId,
+      buildApprovalRequesterReminderText({
+        approvalId: input.approvalId,
+        summary: input.summary,
+        ...(input.failureReason ? { failureReason: input.failureReason } : {})
+      })
+    );
+    feishuRequesterApprovalReminders.add(dedupeKey);
+    store.appendAuditEvent({
+      category: "feishu",
+      entityType: "approval",
+      entityId: input.approvalId,
+      message: "Sent Feishu approval reminder to requester",
+      payload: {
+        stepId: input.stepId,
+        requesterOpenId
+      }
+    });
+  } catch (error) {
+    store.appendAuditEvent({
+      category: "feishu",
+      entityType: "approval",
+      entityId: input.approvalId,
+      message: "Failed to send Feishu approval reminder to requester",
+      payload: {
+        stepId: input.stepId,
+        requesterOpenId,
+        error: error instanceof Error ? error.message : String(error)
+      }
+    });
+  }
 }
 
 function resolveFeishuApproverOpenIdsForRole(roleId: RoleId): string[] {
@@ -454,6 +546,7 @@ async function notifyApprovalStepViaFeishu(approvalId: string, stepId?: string):
     return;
   }
 
+  const client = createFeishuClient();
   const approverOpenIds = resolveFeishuApproverOpenIdsForRole(pending.step.roleId);
   if (approverOpenIds.length === 0) {
     store.appendAuditEvent({
@@ -465,11 +558,19 @@ async function notifyApprovalStepViaFeishu(approvalId: string, stepId?: string):
         roleId: pending.step.roleId
       }
     });
+    await notifyApprovalRequesterViaFeishu({
+      client,
+      approvalId: approval.id,
+      stepId: pending.step.id,
+      summary: approval.summary,
+      requestedBy: approval.requestedBy,
+      failureReason: "No approver configured for this approval step"
+    });
     return;
   }
 
-  const client = createFeishuClient();
   let deliveredCount = 0;
+  let firstDeliveryError = "";
   for (const approverOpenId of approverOpenIds) {
     try {
       const card = buildFeishuApprovalDecisionCard({
@@ -483,6 +584,9 @@ async function notifyApprovalStepViaFeishu(approvalId: string, stepId?: string):
       await client.sendCardToUser(approverOpenId, card);
       deliveredCount += 1;
     } catch (error) {
+      if (!firstDeliveryError) {
+        firstDeliveryError = error instanceof Error ? error.message : String(error);
+      }
       store.appendAuditEvent({
         category: "feishu",
         entityType: "approval",
@@ -496,6 +600,15 @@ async function notifyApprovalStepViaFeishu(approvalId: string, stepId?: string):
       });
     }
   }
+
+  await notifyApprovalRequesterViaFeishu({
+    client,
+    approvalId: approval.id,
+    stepId: pending.step.id,
+    summary: approval.summary,
+    requestedBy: approval.requestedBy,
+    ...(deliveredCount === 0 ? { failureReason: firstDeliveryError || "Unknown delivery error" } : {})
+  });
 
   if (deliveredCount > 0) {
     feishuNotifiedApprovalSteps.add(pending.step.id);
