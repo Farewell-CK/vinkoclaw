@@ -34,7 +34,7 @@ vinkoclaw/
 
 ### `docs/`
 
-All product, architecture, research, and hackathon delivery documents live here.
+All product, architecture, research, and delivery documents live here.
 
 ### `apps/`
 
@@ -81,6 +81,6 @@ Developer tooling, startup scripts, and deployment helpers.
 - Product definition goes into `docs/01-product/`
 - System and repository design goes into `docs/02-architecture/`
 - Reference learning notes go into `docs/03-research/`
-- Submission assets and demo materials go into `docs/04-delivery/`
+- Delivery assets and walkthrough materials go into `docs/04-delivery/`
 
 Do not put long-form planning notes in random source directories.

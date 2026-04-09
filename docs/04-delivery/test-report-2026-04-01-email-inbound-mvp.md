@@ -8,7 +8,7 @@
 - Scope:
   - 新增 `email-inbound` 收件服务（IMAP -> `/api/messages`）
   - 渠道状态接口扩展（收件配置可观测）
-  - 控制台渠道面板展示收件状态
+  - 控制台渠道面板显示收件状态
 
 ## 2. Environment
 

@@ -47,7 +47,7 @@ VinkoClaw 的目标不是做另一个聊天框，而是做一个“OPC AI 团队
 - 工具执行流（tool runs + 风险分级 + 批准后重入）
 - 本地知识检索
 - 本地模型接口：vLLM（OpenAI 兼容）主路由，SGLang / Ollama 可选兜底
-- 无模型时 deterministic fallback，保证可演示
+- 无模型时 deterministic fallback，保证可运行验证
 
 ### Should Have
 
@@ -108,7 +108,7 @@ Skill 不是全局装在一个 Agent 身上，而是三层结构：
 - risks
 - improvements
 
-这部分是竞赛里的差异化点，因为它不只是“能做”，而是“知道自己哪里不确定”。
+这部分是产品差异化点，因为它不只是“能做”，而是“知道自己哪里不确定”。
 
 ### 7.4 Approval System
 
@@ -130,7 +130,7 @@ Skill 不是全局装在一个 Agent 身上，而是三层结构：
 
 ## 8. Success Metrics
 
-- 10 分钟内完成一套端到端 Demo
+- 10 分钟内完成一套端到端流程验证
 - 飞书或控制台都能下发任务
 - 至少 2 条 operator action 成功走完审批并生效
 - 至少 1 条普通任务成功执行并写回反思结果

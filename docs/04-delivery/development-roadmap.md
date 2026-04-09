@@ -2,7 +2,7 @@
 
 ## Phase 0: Running MVP
 
-目标：先做出可演示主链。
+目标：先做出可运行主链。
 
 - 本地控制台
 - Orchestrator API
@@ -12,18 +12,18 @@
 - Feishu webhook
 - Qwen 3.5 本地推理接口
 
-## Phase 1: Hackathon Demo Polish
+## Phase 1: Reliability And UX Polish
 
-目标：冲击一等奖所需的完成度和展示度。
+目标：提升完成度、稳定性和可操作性。
 
-- 接入真实飞书群演示
+- 接入真实飞书群联调
 - 配置本地 Qwen 3.5 模型
-- 演示一条普通任务
-- 演示一条 memory 配置变更
-- 演示一条 skill 安装变更
-- 演示一条邮件草稿 + 审批发送
+- 验证一条普通任务
+- 验证一条 memory 配置变更
+- 验证一条 skill 安装变更
+- 验证一条邮件草稿 + 审批发送
 - 控制台可视化优化
-- 录制 3 分钟视频
+- 录制 3 分钟功能讲解视频
 
 ## Phase 2: DGX Spark Differentiation
 
@@ -37,7 +37,7 @@
 
 ## Phase 3: OPC Productization
 
-目标：从黑客松项目走向真正的 OPC 产品。
+目标：从原型走向长期可维护的 OPC 产品。
 
 - CRM / 邮件 / 日历 / 飞书群协同
 - 客户线索与内容生产闭环
@@ -51,8 +51,8 @@
 2. 已完成：Developer 工具执行链（tool_runs + 风险审批 + dashboard）
 3. 已完成：opencode + `zhipuai/glm-5` 接入与错误事件 fail-fast 处理
 4. 已完成：渠道可观测性（`/api/channels/status` + 控制台 readiness 面板）
-5. 进行中：飞书真实群演示打磨（多角色群内协同）
-6. 待完成：项目说明文档与演示视频定稿
+5. 进行中：飞书真实群联调（多角色群内协同）
+6. 待完成：项目说明文档与功能讲解视频定稿
 
 ## Next Sprint (Tooling)
 

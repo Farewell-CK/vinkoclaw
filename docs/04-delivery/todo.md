@@ -14,7 +14,7 @@
 
 - [ ] Add optional reasoning observability mode:
   - Persist thinking-stage metadata (length/hash/latency) without storing sensitive full chain-of-thought by default.
-  - Expose a debug-only switch for local trusted demos.
+  - Expose a debug-only switch for local trusted debugging.
 - [ ] Harden runtime JSON schema validation for `citations` / `followUps` to avoid model drift affecting structure.
 - [x] Add queue throughput metrics in dashboard:
   - queue depth, avg wait time, avg runtime by role/template
@@ -36,11 +36,11 @@
   - provider readiness + key status exposed via `/api/tool-providers`
 - [x] Add channel readiness visibility:
   - `/api/channels/status` returns missing env keys for Feishu / Email
-  - control-center now renders `Channel Readiness` panel for demo
+  - control-center now renders `Channel Readiness` panel for operations visibility
 
 ## Next Sprint (V3+)
 
 - [ ] Add optional reasoning observability metadata (hash/latency/length, no raw CoT by default)
 - [ ] Add strict runtime output schema guard + repair for `reflection` fields
 - [ ] Add real Feishu webhook + SMTP E2E tests with production-like env
-- [ ] Add stale approval/tool-run cleanup utility for demo reset
+- [ ] Add stale approval/tool-run cleanup utility for environment reset

@@ -11,7 +11,7 @@ This folder is the single source of truth for product and technical planning.
 - `03-research/`
   Reference project notes, platform research, and competitive analysis.
 - `04-delivery/`
-  Hackathon submission assets, demo scripts, and release checklists.
+  Delivery assets, walkthrough scripts, and release checklists.
 
 ## Writing Rule
 
@@ -25,4 +25,4 @@ Put documents here instead of scattering notes in chat history or temporary file
 4. `02-architecture/goal-run-v1.md`
 5. `03-research/openclaw-vs-nemoclaw.md`
 6. `04-delivery/model-compute-plan.md`
-7. `04-delivery/hackathon-submission.md`
+7. `04-delivery/project-overview.md`

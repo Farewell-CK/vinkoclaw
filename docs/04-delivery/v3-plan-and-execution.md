@@ -2,7 +2,7 @@
 
 ## 1. V3 目标
 
-围绕黑客松一等奖目标，V3 聚焦三件事：
+围绕版本稳定与可用性目标，V3 聚焦三件事：
 
 1. 把“本地算力 + 多角色团队 + 可审计执行”链路打磨完整。
 2. 把 opencode + `glm-5` 真正接入到 developer 执行路径。
@@ -20,11 +20,11 @@
   - 支持 OpenAI-compatible base URL + API key 注入
 - 渠道可观测：
   - 增加 `/api/channels/status`
-  - 控制台展示 Feishu/Email 缺失项
+  - 控制台显示 Feishu/Email 缺失项
 
-### P1（演示增强）
+### P1（可观测增强）
 
-- 控制台展示 tool provider readiness 与策略（order/approval/timeout）
+- 控制台显示 tool provider readiness 与策略（order/approval/timeout）
 - 邮件审批失败可视化（返回明确错误 + 审计事件）
 
 ### P2（下一版预留）
@@ -60,7 +60,7 @@
 
 1. 接入真实飞书群 + SMTP 账户，跑一次完整外部 E2E。
 2. 增加工具执行结果结构化产物（改动文件、测试结果、耗时）。
-3. 增加“演示重置”脚本，清理历史 approvals/tool-runs，降低现场噪声。
+3. 增加“环境重置”脚本，清理历史 approvals/tool-runs，降低联调噪声。
 
 ## 6. 泛化能力补充（2026-04-01）
 
@@ -112,7 +112,7 @@
   - 发件人每分钟限流
 - 可观测性：
   - `/api/channels/status` 增加 `status.email.inbound`
-  - 控制台 `Channel Readiness` 展示 inbound 状态（enabled/configured/missing/mailbox/rate）
+  - 控制台 `Channel Readiness` 显示 inbound 状态（enabled/configured/missing/mailbox/rate）
 - 交付补充：
   - 新增测试报告 `test-report-2026-04-01-email-inbound-mvp.md`
 

@@ -183,7 +183,7 @@ MVP 阶段使用 Node 内置 `node:sqlite`，原因是：
 - 无需引入独立数据库服务
 - 状态模型足够清晰
 - 任务、审批、审计、skill binding 都能统一管理
-- 更适合桌面级 DGX Spark 单机演示
+- 更适合桌面级 DGX Spark 单机运行验证
 
 ## 4. Skill Accuracy Model
 

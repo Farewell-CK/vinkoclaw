@@ -1,19 +1,19 @@
 # Delivery Folder
 
-This folder will hold hackathon submission materials:
+This folder holds project delivery materials:
 
 - long-form project description
-- demo script
+- walkthrough script
 - video outline
 - submission checklist
 - platform and model disclosure
 
 Current files:
 
-- `hackathon-submission.md`
+- `project-overview.md`
 - `model-compute-plan.md`
 - `development-roadmap.md`
-- `demo-script.md`
+- `walkthrough-script.md`
 - `todo.md`
 - `test-report-2026-03-31-vllm.md`
 - `test-report-2026-04-01-control-center-and-observability.md`

@@ -261,7 +261,7 @@ Key parameters:
 
 ### 8.5 Notes / Known Limits
 
-- Some public image URLs may timeout when fetched by backend runtime (`curl --max-time 45` timed out once); data URI/local-accessible URLs are stable for demos.
+- Some public image URLs may timeout when fetched by backend runtime (`curl --max-time 45` timed out once); data URI/local-accessible URLs are stable for validation runs.
 - Model occasionally emits non-schema fields in JSON (`citations` shape can drift). Runtime currently only guarantees core keys; stronger schema validation can be added next.
 
 ## 9. Retest (Role Refinement + Routing Template CRUD)
@@ -338,7 +338,7 @@ Key parameters:
 ### 9.4 Notes
 
 - During this retest window, queue throughput can fluctuate when several long-running multimodal/template tasks accumulate.
-- This does not block CRUD or routing fan-out correctness, but full queue-drain timing should be measured separately for demo SLA.
+- This does not block CRUD or routing fan-out correctness, but full queue-drain timing should be measured separately for validation SLA.
 
 ## 10. Retest (Template Import/Export + Queue Throughput Panel)
 
@@ -677,7 +677,7 @@ Key parameters:
 
 - Request:
   - `POST /api/messages`
-  - text: `设置 openai api-key 为 sk-test-openai-demo`
+  - text: `设置 openai api-key 为 sk-test-openai-check`
 - Observed:
   - operator action created with `kind=set_tool_provider_config`
   - approval created and can be approved through `/api/approvals/:id/decision`
