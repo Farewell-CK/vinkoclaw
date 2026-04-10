@@ -375,7 +375,6 @@ function buildFeishuApprovalDecisionCard(input: {
     expiresAt
   };
   return {
-    schema: "2.0",
     config: {
       wide_screen_mode: true
     },
@@ -386,48 +385,46 @@ function buildFeishuApprovalDecisionCard(input: {
       },
       template: "orange"
     },
-    body: {
-      elements: [
-        {
-          tag: "markdown",
-          content: [
-            `**审批单**: ${input.approvalId.slice(0, 8)}`,
-            `**步骤角色**: ${input.roleId}`,
-            `**摘要**: ${input.summary}`,
-            `**发起人**: ${input.requestedBy?.trim() || "unknown"}`
-          ].join("\n")
-        },
-        {
-          tag: "action",
-          actions: [
-            {
-              tag: "button",
-              text: {
-                tag: "plain_text",
-                content: "批准"
-              },
-              type: "primary",
-              value: {
-                ...decisionValue,
-                decision: "approved"
-              }
+    elements: [
+      {
+        tag: "markdown",
+        content: [
+          `**审批单**: ${input.approvalId.slice(0, 8)}`,
+          `**步骤角色**: ${input.roleId}`,
+          `**摘要**: ${input.summary}`,
+          `**发起人**: ${input.requestedBy?.trim() || "unknown"}`
+        ].join("\n")
+      },
+      {
+        tag: "action",
+        actions: [
+          {
+            tag: "button",
+            text: {
+              tag: "plain_text",
+              content: "批准"
             },
-            {
-              tag: "button",
-              text: {
-                tag: "plain_text",
-                content: "拒绝"
-              },
-              type: "danger",
-              value: {
-                ...decisionValue,
-                decision: "rejected"
-              }
+            type: "primary",
+            value: {
+              ...decisionValue,
+              decision: "approved"
             }
-          ]
-        }
-      ]
-    }
+          },
+          {
+            tag: "button",
+            text: {
+              tag: "plain_text",
+              content: "拒绝"
+            },
+            type: "danger",
+            value: {
+              ...decisionValue,
+              decision: "rejected"
+            }
+          }
+        ]
+      }
+    ]
   };
 }
 
@@ -1281,9 +1278,9 @@ async function processCodeExecutionTask(task: TaskRecord): Promise<boolean> {
   let lastError = "";
 
   for (const provider of providers) {
-    const instructions = [buildWorkspaceConstrainedInstruction(task.instruction)];
+    const instructions = [buildWorkspaceConstrainedInstruction(task)];
     if (provider.providerId === "opencode") {
-      instructions.push(buildWorkspaceStrictRetryInstruction(task.instruction));
+      instructions.push(buildWorkspaceStrictRetryInstruction(task));
     }
     for (let attemptIndex = 0; attemptIndex < instructions.length; attemptIndex += 1) {
       const instruction = instructions[attemptIndex] ?? task.instruction;
@@ -1438,7 +1435,7 @@ function normalizeSmalltalkInstruction(text: string): string {
   }
   const stripPatterns = [
     /^@[\w\u4e00-\u9fa5-]{1,32}\s*/i,
-    /^[\w\u4e00-\u9fa5-]{1,32}\s*[:：]\s*/i
+    /^[a-z][\w-]{0,31}\s*[:：]\s*/i
   ];
   for (const pattern of stripPatterns) {
     const next = normalized.replace(pattern, "").trim();
@@ -1449,28 +1446,69 @@ function normalizeSmalltalkInstruction(text: string): string {
   return normalized;
 }
 
-function buildWorkspaceConstrainedInstruction(instruction: string): string {
+function isMiniGameLikeInstruction(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) {
+    return false;
+  }
+  return /(?:小游戏|game|canvas|网页游戏|web\s*game|h5\s*game)/i.test(normalized);
+}
+
+function resolveMiniGameTargetDir(task: TaskRecord): string {
+  const match = task.instruction.match(/\/home\/xsuper\/workspace\/playground\/[^\s"'`)]*/i)?.[0];
+  if (match) {
+    const cleaned = match.replace(/[),.;]+$/g, "");
+    const asDir = /\.[a-z0-9]{1,8}$/i.test(cleaned) ? path.dirname(cleaned) : cleaned;
+    return path.normalize(asDir);
+  }
+  return path.join(env.workspaceRoot, "playground", `game-${task.id.slice(0, 8)}`);
+}
+
+function buildMiniGameExecutionConstraints(task: TaskRecord): string[] {
+  const targetDir = resolveMiniGameTargetDir(task);
+  const relativeDir = path.relative(env.workspaceRoot, targetDir).replaceAll(path.sep, "/");
+  const safeRelativeDir = relativeDir.startsWith("..") ? "playground" : relativeDir || "playground";
   return [
-    instruction.trim(),
     "",
-    `执行约束:`,
+    "小游戏专项约束:",
+    `- 目标目录固定为 ${targetDir}（相对 workspace: ${safeRelativeDir}）。`,
+    "- 仅允许在该目录内创建/修改文件，禁止在其他目录写入。",
+    "- 默认文件白名单：index.html、style.css、game.js、README.md。",
+    "- 如需新增额外文件，最多 2 个，且必须在结论中说明新增理由。",
+    `- 完成后必须给出可访问地址：http://127.0.0.1:${env.port}/playground/${safeRelativeDir}/index.html`
+  ];
+}
+
+function buildWorkspaceConstrainedInstruction(task: TaskRecord): string {
+  const lines = [
+    task.instruction.trim(),
+    "",
+    "执行约束:",
     "- 输出结构必须包含：结论、关键依据、下一步行动（不超过 3 条）。",
     `- 仅可在工作目录 ${env.workspaceRoot} 内读写文件。`,
     "- 严禁访问或操作任何目录外路径。",
     "- 完成后必须输出实际变更文件路径（相对工作目录）。"
-  ].join("\n");
+  ];
+  if (isMiniGameLikeInstruction(task.instruction)) {
+    lines.push(...buildMiniGameExecutionConstraints(task));
+  }
+  return lines.join("\n");
 }
 
-function buildWorkspaceStrictRetryInstruction(instruction: string): string {
-  return [
-    instruction.trim(),
+function buildWorkspaceStrictRetryInstruction(task: TaskRecord): string {
+  const lines = [
+    task.instruction.trim(),
     "",
-    `重试约束(严格):`,
+    "重试约束(严格):",
     "- 输出结构必须包含：结论、关键依据、下一步行动（不超过 3 条）。",
     `- 只允许使用当前目录 ${env.workspaceRoot}。`,
     "- 禁止请求 external_directory 权限。",
     "- 如果无法完成，直接说明阻塞原因并停止。"
-  ].join("\n");
+  ];
+  if (isMiniGameLikeInstruction(task.instruction)) {
+    lines.push(...buildMiniGameExecutionConstraints(task));
+  }
+  return lines.join("\n");
 }
 
 function detectWorkspaceBoundaryError(stdout: string, stderr: string): string | undefined {

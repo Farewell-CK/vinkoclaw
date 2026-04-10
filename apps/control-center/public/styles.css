@@ -478,6 +478,27 @@ button.ghost:hover { background: rgba(0,0,0,0.04); color: var(--ink); }
   border-radius: var(--radius-sm);
 }
 
+.task-artifact-links {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.task-artifact-links a {
+  font-size: 0.78rem;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--accent-soft);
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.task-artifact-links a:hover {
+  text-decoration: underline;
+}
+
 /* ===================================
    Code Blocks
    =================================== */
@@ -513,6 +534,40 @@ pre {
   margin-bottom: 4px;
 }
 .collab-section p { color: var(--ink); font-size: 0.84rem; }
+
+.markdown-body {
+  margin-top: 8px;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin: 10px 0 6px;
+  color: var(--ink);
+  line-height: 1.35;
+}
+
+.markdown-body p,
+.markdown-body li {
+  color: var(--ink);
+  font-size: 0.84rem;
+  line-height: 1.55;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 8px 0 8px 18px;
+}
+
+.markdown-body code {
+  font-family: "SF Mono", "Fira Code", monospace;
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
 
 /* ===================================
    Filter tabs for approvals/tasks

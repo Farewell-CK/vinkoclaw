@@ -470,6 +470,188 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;");
 }
 
+const PLAYGROUND_PREFIX = "/home/xsuper/workspace/playground/";
+
+function normalizeArtifactPath(input) {
+  if (!input) {
+    return "";
+  }
+  return String(input)
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/[),.;]+$/g, "");
+}
+
+function toPlaygroundUrl(pathValue) {
+  const normalized = normalizeArtifactPath(pathValue);
+  if (!normalized.startsWith(PLAYGROUND_PREFIX)) {
+    return "";
+  }
+  const relative = normalized.slice(PLAYGROUND_PREFIX.length);
+  if (!relative) {
+    return "";
+  }
+  return `/playground/${encodeURI(relative)}`;
+}
+
+function extractWorkspacePaths(text) {
+  const source = String(text || "");
+  if (!source) {
+    return [];
+  }
+  const matches = source.match(/\/home\/xsuper\/workspace\/[^\s"'`]+/g) || [];
+  return matches.map((value) => normalizeArtifactPath(value)).filter(Boolean);
+}
+
+function collectTaskArtifactPaths(task) {
+  const fromEvidence = Array.isArray(task?.completionEvidence?.artifactFiles)
+    ? task.completionEvidence.artifactFiles
+    : [];
+  const fromMetadata = Array.isArray(task?.metadata?.toolChangedFiles) ? task.metadata.toolChangedFiles : [];
+  const fromText = [
+    ...extractWorkspacePaths(task?.result?.deliverable),
+    ...extractWorkspacePaths(task?.result?.summary)
+  ];
+  return Array.from(
+    new Set([...fromEvidence, ...fromMetadata, ...fromText].map((value) => normalizeArtifactPath(value)).filter(Boolean))
+  );
+}
+
+function renderTaskArtifactLinks(task) {
+  const links = collectTaskArtifactPaths(task)
+    .map((artifactPath) => {
+      const url = toPlaygroundUrl(artifactPath);
+      if (!url) {
+        return "";
+      }
+      const baseName = artifactPath.split("/").pop() || artifactPath;
+      const openLabel =
+        baseName.toLowerCase().endsWith(".html") || baseName.toLowerCase().endsWith(".htm")
+          ? currentLang === "zh"
+            ? "打开页面"
+            : "Open page"
+          : currentLang === "zh"
+            ? "打开文件"
+            : "Open file";
+      return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${openLabel}: ${escapeHtml(baseName)}</a>`;
+    })
+    .filter(Boolean)
+    .slice(0, 8);
+  if (links.length === 0) {
+    return "";
+  }
+  return `<div class="task-artifact-links">${links.join("")}</div>`;
+}
+
+function renderInlineMarkdown(text) {
+  let html = escapeHtml(text);
+  html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_match, label, url) => {
+    const safeLabel = escapeHtml(label);
+    const safeUrl = escapeHtml(url);
+    return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeLabel}</a>`;
+  });
+  html = html.replace(/(https?:\/\/[^\s<]+)/g, (match) => {
+    const safeUrl = escapeHtml(match);
+    return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeUrl}</a>`;
+  });
+  html = html.replace(/(\/home\/xsuper\/workspace\/playground\/[^\s<]+)/g, (match) => {
+    const url = toPlaygroundUrl(match);
+    if (!url) {
+      return escapeHtml(match);
+    }
+    const safeUrl = escapeHtml(url);
+    const safeLabel = escapeHtml(match);
+    return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeLabel}</a>`;
+  });
+  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  return html;
+}
+
+function renderMarkdown(rawValue, maxLength = 6000) {
+  const raw = String(rawValue || "").slice(0, maxLength);
+  if (!raw.trim()) {
+    return "";
+  }
+
+  const lines = raw.split(/\r?\n/g);
+  const html = [];
+  let inCode = false;
+  let codeLines = [];
+  let listType = "";
+
+  const closeList = () => {
+    if (listType) {
+      html.push(`</${listType}>`);
+      listType = "";
+    }
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("```")) {
+      closeList();
+      if (inCode) {
+        html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+        codeLines = [];
+        inCode = false;
+      } else {
+        inCode = true;
+      }
+      continue;
+    }
+    if (inCode) {
+      codeLines.push(line);
+      continue;
+    }
+    if (!trimmed) {
+      closeList();
+      continue;
+    }
+
+    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      closeList();
+      const level = heading[1].length;
+      html.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+      continue;
+    }
+
+    const unordered = trimmed.match(/^[-*]\s+(.+)$/);
+    if (unordered) {
+      if (listType !== "ul") {
+        closeList();
+        listType = "ul";
+        html.push("<ul>");
+      }
+      html.push(`<li>${renderInlineMarkdown(unordered[1])}</li>`);
+      continue;
+    }
+
+    const ordered = trimmed.match(/^\d+\.\s+(.+)$/);
+    if (ordered) {
+      if (listType !== "ol") {
+        closeList();
+        listType = "ol";
+        html.push("<ol>");
+      }
+      html.push(`<li>${renderInlineMarkdown(ordered[1])}</li>`);
+      continue;
+    }
+
+    closeList();
+    html.push(`<p>${renderInlineMarkdown(trimmed)}</p>`);
+  }
+
+  if (inCode) {
+    html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+  }
+  closeList();
+  return `<div class="markdown-body">${html.join("")}</div>`;
+}
+
 function formatDuration(ms) {
   const value = Number(ms || 0);
   if (value <= 0) {
@@ -637,23 +819,11 @@ function renderTasks(tasks) {
         ? `<p class="muted">${t("task.reflection", { score: task.reflection.score, confidence: task.reflection.confidence })}</p>`
         : "";
 
-      // Format collaboration output by role sections
-      let deliverable = "";
-      const raw = task.result?.deliverable || "";
-      if (raw) {
-        const sections = raw.split(/\n(?=\【[^\]]+\】)/);
-        if (sections.length > 1) {
-          deliverable = sections.map((sec) => {
-            const match = sec.match(/^\【([^\]]+)\】\s*(.*)/s);
-            if (match) {
-              return `<div class="collab-section"><div class="collab-role">${escapeHtml(match[1])}</div><p>${escapeHtml(match[2].trim())}</p></div>`;
-            }
-            return `<pre>${escapeHtml(sec.slice(0, 450))}</pre>`;
-          }).join("");
-        } else {
-          deliverable = `<pre>${escapeHtml(raw.slice(0, 450))}</pre>`;
-        }
-      }
+      const summary = task.result?.summary
+        ? `<p><strong>${currentLang === "zh" ? "结论" : "Summary"}:</strong> ${escapeHtml(task.result.summary)}</p>`
+        : "";
+      const deliverable = renderMarkdown(task.result?.deliverable || "");
+      const artifactLinks = renderTaskArtifactLinks(task);
 
       return `
         <article class="list-card">
@@ -664,6 +834,8 @@ function renderTasks(tasks) {
           <p class="muted">${escapeHtml(task.roleId)} · ${escapeHtml(task.source)} · ${attachmentCount} ${t("task.attachments")}</p>
           <p>${escapeHtml(task.instruction)}</p>
           ${reflection}
+          ${summary}
+          ${artifactLinks}
           ${deliverable}
         </article>
       `;

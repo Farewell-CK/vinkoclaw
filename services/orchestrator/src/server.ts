@@ -2091,7 +2091,7 @@ function normalizeConversationCandidate(text: string): string {
   }
   const stripPatterns = [
     /^@[\w\u4e00-\u9fa5-]{1,32}\s*/i,
-    /^[\w\u4e00-\u9fa5-]{1,32}\s*[:：]\s*/i
+    /^[a-z][\w-]{0,31}\s*[:：]\s*/i
   ];
   for (const pattern of stripPatterns) {
     const next = normalized.replace(pattern, "").trim();
@@ -3897,6 +3897,15 @@ async function handleFeishuEventsWebhook(request: express.Request, response: exp
 app.post("/api/feishu/events", handleFeishuEventsWebhook);
 app.post("/feishu/events", handleFeishuEventsWebhook);
 app.post("/api/channels/feishu/events", handleFeishuEventsWebhook);
+
+const playgroundRoot = path.resolve(env.workspaceRoot, "playground");
+app.use(
+  "/playground",
+  express.static(playgroundRoot, {
+    dotfiles: "deny",
+    index: ["index.html"]
+  })
+);
 
 app.use(express.static(controlCenterRoot));
 
