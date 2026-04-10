@@ -14,21 +14,11 @@
           <span></span>
         </button>
         <nav id="view-nav" class="view-nav">
-          <button type="button" class="ghost nav-btn" data-view="workbench" data-i18n="nav.workbench">
-            工作台
-          </button>
-          <button type="button" class="ghost nav-btn" data-view="routing" data-i18n="nav.routing">
-            模板与队列
-          </button>
-          <button type="button" class="ghost nav-btn" data-view="config" data-i18n="nav.config">
-            团队与渠道
-          </button>
-          <button type="button" class="ghost nav-btn" data-view="execution" data-i18n="nav.execution">
-            审批与执行
-          </button>
-          <button type="button" class="ghost nav-btn" data-view="audit" data-i18n="nav.audit">
-            审计
-          </button>
+          <button type="button" class="ghost nav-btn" data-view="workbench" data-i18n="nav.workbench">工作台</button>
+          <button type="button" class="ghost nav-btn" data-view="routing" data-i18n="nav.routing">模板与队列</button>
+          <button type="button" class="ghost nav-btn" data-view="config" data-i18n="nav.config">团队与渠道</button>
+          <button type="button" class="ghost nav-btn" data-view="execution" data-i18n="nav.execution">审批与执行</button>
+          <button type="button" class="ghost nav-btn" data-view="audit" data-i18n="nav.audit">审计</button>
         </nav>
         <div class="lang-switch">
           <button type="button" class="ghost lang-btn" data-lang-switch="zh">中文</button>
@@ -40,7 +30,7 @@
         </div>
       </section>
 
-      <!-- 指标卡片独立成行 -->
+      <!-- Meta Cards -->
       <section class="hero-meta">
         <div class="meta-card">
           <span data-i18n="meta.execution">Execution</span>
@@ -56,6 +46,7 @@
         </div>
       </section>
 
+      <!-- Hero -->
       <section class="hero">
         <div>
           <p class="eyebrow">VinkoClaw</p>
@@ -68,6 +59,7 @@
       </section>
 
       <section class="grid">
+        <!-- Workbench: Natural Command -->
         <article class="panel panel-command view-panel" data-view="workbench">
           <header>
             <h2 data-i18n="panel.natural.title">Natural Command</h2>
@@ -95,6 +87,7 @@
           <div id="message-result" class="feedback"></div>
         </article>
 
+        <!-- Workbench: Direct Task -->
         <article class="panel view-panel" data-view="workbench">
           <header>
             <h2 data-i18n="panel.task.title">Direct Task</h2>
@@ -138,6 +131,7 @@
           <div id="task-result" class="feedback"></div>
         </article>
 
+        <!-- Routing: Templates -->
         <article class="panel span-2 view-panel" data-view="routing">
           <header>
             <h2 data-i18n="panel.routing.title">Routing Templates</h2>
@@ -193,6 +187,7 @@
           <div id="routing-templates" class="list"></div>
         </article>
 
+        <!-- Routing: Queue Metrics -->
         <article class="panel span-2 view-panel" data-view="routing">
           <header>
             <h2 data-i18n="panel.queue.title">Queue Metrics</h2>
@@ -226,6 +221,7 @@
           <div id="queue-by-template" class="list"></div>
         </article>
 
+        <!-- Config: Channels -->
         <article class="panel span-2 view-panel" data-view="config">
           <header>
             <h2 data-i18n="panel.channel.title">Channel Readiness</h2>
@@ -235,6 +231,7 @@
           <div id="providers-status" class="list"></div>
         </article>
 
+        <!-- Config: Team State -->
         <article class="panel span-2 view-panel" data-view="config">
           <header>
             <h2 data-i18n="panel.team.title">Team State</h2>
@@ -243,22 +240,37 @@
           <div id="roles" class="roles"></div>
         </article>
 
+        <!-- Execution: Approvals (with filter tabs) -->
         <article class="panel view-panel" data-view="execution">
           <header>
             <h2 data-i18n="panel.approvals.title">Approvals</h2>
             <p data-i18n="panel.approvals.desc">Config changes and external actions stop here before execution.</p>
           </header>
+          <div class="filter-tabs" id="approval-filters">
+            <button class="filter-tab active" data-filter="all">全部</button>
+            <button class="filter-tab" data-filter="pending">待审批</button>
+            <button class="filter-tab" data-filter="approved">已通过</button>
+            <button class="filter-tab" data-filter="rejected">已拒绝</button>
+          </div>
           <div id="approvals" class="list"></div>
         </article>
 
+        <!-- Execution: Tasks -->
         <article class="panel view-panel" data-view="execution">
           <header>
             <h2 data-i18n="panel.tasks.title">Tasks</h2>
             <p data-i18n="panel.tasks.desc">Live execution feed with reflective outputs.</p>
           </header>
+          <div class="filter-tabs" id="task-filters">
+            <button class="filter-tab active" data-filter="all">全部</button>
+            <button class="filter-tab" data-filter="running">执行中</button>
+            <button class="filter-tab" data-filter="completed">已完成</button>
+            <button class="filter-tab" data-filter="failed">失败</button>
+          </div>
           <div id="tasks" class="list"></div>
         </article>
 
+        <!-- Execution: Tool Runs -->
         <article class="panel view-panel" data-view="execution">
           <header>
             <h2 data-i18n="panel.toolRuns.title">Tool Runs</h2>
@@ -267,6 +279,7 @@
           <div id="tool-runs" class="list"></div>
         </article>
 
+        <!-- Audit -->
         <article class="panel span-2 view-panel" data-view="audit">
           <header>
             <h2 data-i18n="panel.audit.title">Audit Trail</h2>
@@ -279,4 +292,4 @@
 
     <script type="module" src="/app.js"></script>
   </body>
-  </html>
+</html>

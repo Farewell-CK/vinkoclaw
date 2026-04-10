@@ -325,6 +325,10 @@ const VIEW_IDS = new Set(["workbench", "routing", "config", "execution", "audit"
 let currentLang = localStorage.getItem("vinkoclaw.lang") === "en" ? "en" : "zh";
 let currentView = VIEW_IDS.has(localStorage.getItem("vinkoclaw.view")) ? localStorage.getItem("vinkoclaw.view") : "workbench";
 
+// Filter state
+let approvalFilter = "all";
+let taskFilter = "all";
+
 function t(key, params = {}) {
   const primary = I18N[currentLang] || I18N.en;
   const fallback = I18N.en;
@@ -533,60 +537,131 @@ function renderRoles(payload) {
     .join("");
 }
 
+function statusBadge(status) {
+  const s = String(status || "").toLowerCase();
+  const cls = `badge badge-${s}`;
+  return `<span class="${cls}">${translateStatus(status)}</span>`;
+}
+
 function renderApprovals(approvals) {
-  const pending = approvals.filter((approval) => approval.status === "pending");
+  window._lastApprovals = approvals;
+  const pending = approvals.filter((a) => a.status === "pending");
   document.querySelector("#meta-approvals").textContent = t("meta.pending", { count: pending.length });
 
-  approvalsContainer.innerHTML = approvals
-    .map((approval) => {
-      const actions =
-        approval.status === "pending"
-          ? `
-              <div class="action-row">
-                <button data-approve="${approval.id}">${t("approval.approve")}</button>
-                <button class="ghost" data-reject="${approval.id}">${t("approval.reject")}</button>
-              </div>
-            `
-          : `<p class="muted">${t("approval.status")}: ${escapeHtml(translateStatus(approval.status))}</p>`;
+  let filtered = approvals;
+  if (approvalFilter !== "all") {
+    filtered = approvals.filter((a) => a.status === approvalFilter);
+  }
 
-      return `
-        <article class="list-card">
-          <div class="list-head">
-            <strong>${escapeHtml(approval.kind)}</strong>
-            <span>${escapeHtml(translateStatus(approval.status))}</span>
-          </div>
-          <p>${escapeHtml(approval.summary)}</p>
-          ${actions}
-        </article>
-      `;
-    })
-    .join("");
+  if (filtered.length === 0) {
+    approvalsContainer.innerHTML = `<p class="muted" style="text-align:center;padding:24px 0;">${approvalFilter === "all" ? "暂无审批" : `无${translateStatus(approvalFilter)}状态的审批`}</p>`;
+    return;
+  }
+
+  // Group by kind
+  const grouped = {};
+  filtered.forEach((a) => {
+    (grouped[a.kind] = grouped[a.kind] || []).push(a);
+  });
+
+  let html = "";
+  for (const [kind, items] of Object.entries(grouped)) {
+    if (items.length <= 1) {
+      // Single item, no group needed
+      html += items.map((approval) => renderApprovalCard(approval)).join("");
+    } else {
+      // Group with collapsible header
+      const isPending = approvalFilter === "all" && items.some((i) => i.status === "pending");
+      const defaultCollapsed = !isPending;
+      html += `<div class="collapsible-group">
+        <div class="collapsible-header ${defaultCollapsed ? "is-collapsed" : ""}" onclick="this.classList.toggle('is-collapsed');this.nextElementSibling.classList.toggle('is-collapsed');">
+          <strong>${escapeHtml(kind)}</strong>
+          <span class="muted">${items.length} 项 <span class="chevron">▼</span></span>
+        </div>
+        <div class="collapsible-body ${defaultCollapsed ? "is-collapsed" : ""}">
+          ${items.map((approval) => renderApprovalCard(approval)).join("")}
+        </div>
+      </div>`;
+    }
+  }
+
+  approvalsContainer.innerHTML = html;
+}
+
+function renderApprovalCard(approval) {
+  const actions =
+    approval.status === "pending"
+      ? `<div class="action-row">
+          <button data-approve="${approval.id}">${t("approval.approve")}</button>
+          <button class="ghost" data-reject="${approval.id}">${t("approval.reject")}</button>
+        </div>`
+      : `<p class="muted">${statusBadge(approval.status)}</p>`;
+
+  return `<article class="list-card">
+    <div class="list-head">
+      <strong>${escapeHtml(approval.kind)}</strong>
+      ${statusBadge(approval.status)}
+    </div>
+    <p>${escapeHtml(approval.summary)}</p>
+    ${actions}
+  </article>`;
+}
+
+function taskStatusKey(status) {
+  const s = String(status || "").toLowerCase();
+  if (s === "completed") return "completed";
+  if (s === "running" || s === "in_progress") return "running";
+  if (s === "failed" || s === "error") return "failed";
+  return s;
 }
 
 function renderTasks(tasks) {
+  window._lastTasks = tasks;
   document.querySelector("#meta-tasks").textContent = t("meta.tasks", { count: tasks.length });
 
-  tasksContainer.innerHTML = tasks
+  let filtered = tasks;
+  if (taskFilter !== "all") {
+    filtered = tasks.filter((t) => taskStatusKey(t.status) === taskFilter);
+  }
+
+  if (filtered.length === 0) {
+    tasksContainer.innerHTML = `<p class="muted" style="text-align:center;padding:24px 0;">${taskFilter === "all" ? "暂无任务" : `无${translateStatus(taskFilter)}状态的任务`}</p>`;
+    return;
+  }
+
+  tasksContainer.innerHTML = filtered
     .map((task) => {
       const attachmentCount = Array.isArray(task.metadata?.attachments) ? task.metadata.attachments.length : 0;
-      const deliverable = task.result?.deliverable
-        ? `<pre>${escapeHtml(task.result.deliverable.slice(0, 450))}</pre>`
-        : "";
+      const status = statusBadge(task.status);
       const reflection = task.reflection
-        ? `<p class="muted">${t("task.reflection", {
-            score: task.reflection.score,
-            confidence: task.reflection.confidence
-          })}</p>`
+        ? `<p class="muted">${t("task.reflection", { score: task.reflection.score, confidence: task.reflection.confidence })}</p>`
         : "";
+
+      // Format collaboration output by role sections
+      let deliverable = "";
+      const raw = task.result?.deliverable || "";
+      if (raw) {
+        const sections = raw.split(/\n(?=\【[^\]]+\】)/);
+        if (sections.length > 1) {
+          deliverable = sections.map((sec) => {
+            const match = sec.match(/^\【([^\]]+)\】\s*(.*)/s);
+            if (match) {
+              return `<div class="collab-section"><div class="collab-role">${escapeHtml(match[1])}</div><p>${escapeHtml(match[2].trim())}</p></div>`;
+            }
+            return `<pre>${escapeHtml(sec.slice(0, 450))}</pre>`;
+          }).join("");
+        } else {
+          deliverable = `<pre>${escapeHtml(raw.slice(0, 450))}</pre>`;
+        }
+      }
 
       return `
         <article class="list-card">
           <div class="list-head">
             <strong>${escapeHtml(task.title)}</strong>
-            <span>${escapeHtml(translateStatus(task.status))}</span>
+            ${status}
           </div>
-          <p>${escapeHtml(task.roleId)} · ${escapeHtml(task.source)}</p>
-          <p class="muted">${t("task.attachments")}: ${attachmentCount}</p>
+          <p class="muted">${escapeHtml(task.roleId)} · ${escapeHtml(task.source)} · ${attachmentCount} ${t("task.attachments")}</p>
           <p>${escapeHtml(task.instruction)}</p>
           ${reflection}
           ${deliverable}
@@ -600,20 +675,24 @@ function renderToolRuns(toolRuns) {
   toolRunsContainer.innerHTML = toolRuns
     .map((run) => {
       const command = [run.command, ...(run.args || [])].join(" ");
+      const isError = run.status === "failed" || run.errorText;
+      const status = statusBadge(run.status);
+      const approval = statusBadge(run.approvalStatus);
+
       const output = run.outputText
         ? `<pre>${escapeHtml(String(run.outputText).slice(0, 450))}</pre>`
-        : run.errorText
-          ? `<pre>${escapeHtml(String(run.errorText).slice(0, 450))}</pre>`
+        : isError && run.errorText
+          ? `<pre style="background:var(--red-soft);color:var(--red);border:1px solid rgba(255,59,48,0.2);">${escapeHtml(String(run.errorText).slice(0, 450))}</pre>`
           : "";
 
       return `
-        <article class="list-card">
+        <article class="list-card" ${isError ? 'style="border-left:3px solid var(--red);"' : ""}>
           <div class="list-head">
             <strong>${escapeHtml(run.title)}</strong>
-            <span>${escapeHtml(translateStatus(run.status))} / ${escapeHtml(translateStatus(run.approvalStatus))}</span>
+            <span>${status} ${approval}</span>
           </div>
-          <p>${escapeHtml(run.providerId)} · ${escapeHtml(run.riskLevel)} · ${t("tool.task")} ${escapeHtml(run.taskId)}</p>
-          <p class="muted">${escapeHtml(command.slice(0, 220))}</p>
+          <p class="muted">${escapeHtml(run.providerId)} · ${escapeHtml(run.riskLevel)} · ${t("tool.task")} ${escapeHtml(run.taskId)}</p>
+          <p class="muted" style="font-size:0.8rem;">${escapeHtml(command.slice(0, 200))}</p>
           ${output}
         </article>
       `;
@@ -904,6 +983,26 @@ langButtons.forEach((button) => {
   button.addEventListener("click", async () => {
     const lang = button.getAttribute("data-lang-switch");
     await setLanguage(lang);
+  });
+});
+
+// Filter tabs — approvals
+document.querySelectorAll("#approval-filters .filter-tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    document.querySelectorAll("#approval-filters .filter-tab").forEach((t) => t.classList.remove("active"));
+    tab.classList.add("active");
+    approvalFilter = tab.getAttribute("data-filter");
+    renderApprovals(window._lastApprovals || []);
+  });
+});
+
+// Filter tabs — tasks
+document.querySelectorAll("#task-filters .filter-tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    document.querySelectorAll("#task-filters .filter-tab").forEach((t) => t.classList.remove("active"));
+    tab.classList.add("active");
+    taskFilter = tab.getAttribute("data-filter");
+    renderTasks(window._lastTasks || []);
   });
 });
 
