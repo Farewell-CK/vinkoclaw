@@ -1,118 +1,162 @@
 # VinkoClaw
 
-VinkoClaw 是一个面向 DGX Spark 的本地优先 AI 团队操作系统。  
-目标不是做聊天机器人，而是让一个 Owner 通过飞书/控制台指挥一支多角色 AI 团队，在本地机器上完成任务拆解、执行、协作、审批与交付。
+> A local-first AI team operating system for NVIDIA DGX Spark.
 
-## 为什么做这个
+One owner. One Feishu message. An AI team that plans, builds, and delivers — on your own machine.
 
-VinkoClaw 的核心竞争力是三点：
+[![Node.js](https://img.shields.io/badge/Node.js-18+-green)]()
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-blue)]()
+[![License](https://img.shields.io/badge/License-MIT-yellow)]()
 
-- 本地优先：核心编排与知识在本地运行，不依赖纯云端闭源流程。
-- 多角色协作：不是单 agent 问答，而是可追踪的团队式执行链路。
-- 可验证闭环：从指令到执行到结果与审计，形成稳定可复用流程。
+---
 
-## 当前能力
+## What is VinkoClaw
 
-- 任务编排：Orchestrator + 多 Runner 并行执行
-- 多角色路由：CEO/CTO/Engineering/Backend/Frontend 等角色分工
-- 工具执行：代码运行、文件写入、网页检索等工具链
-- 协作可观测：任务/协作轨迹、审批与审计记录
-- 通道接入：飞书事件入口 + 邮件通道
-- 本地推理优先：主后端不可用时可降级到确定性本地输出，保证流程连续性
+VinkoClaw is **not another chatbot**. It's a multi-agent orchestration engine that lets you manage an AI team through Feishu (or a web console) — while all execution runs locally on a DGX Spark / GB10 machine.
 
-## 仓库结构
+```
+You → Feishu Group Chat → VinkoClaw Orchestrator
+                              ↓
+                Intent Classification (LLM + keywords)
+                              ↓
+                Route to the right role:
+                Product / Backend / Frontend / CTO / Research / QA / ...
+                              ↓
+                Task Runner executes with native tools
+                (read → write → verify → deliver)
+```
 
-- `apps/`: 网关与前端入口
-- `services/`: orchestrator、task-runner、email-inbound 等长驻服务
-- `packages/`: 运行时、共享模块、插件 SDK
-- `prompts/`: 角色提示词与行为约束
-- `scripts/`: 自检、拟人测试、Runner 管理脚本
-- `config/`: 环境变量模板
-- `docs/`: 产品、架构、交付与测试文档
+## Why It Matters
 
-## 5 分钟启动
+| | Traditional LLM Chat | VinkoClaw |
+|---|---|---|
+| **Execution** | Suggests code, you copy-paste | Writes files, runs tests, delivers artifacts |
+| **Roles** | One generalist assistant | Specialized roles (CEO, CTO, Frontend, Backend, QA, Research...) |
+| **Traceability** | Ephemeral conversation | Task records, collaboration timelines, approval audit trail |
+| **Privacy** | Data leaves your machine | Local-first — models, knowledge, and execution stay on your hardware |
+| **Channels** | Web UI only | Feishu group chat + web console + email |
 
-1. 安装依赖
+## Core Features
+
+### Intent & Routing
+
+- **LLM-based intent classifier** with keyword fallback — correctly routes to `task`, `goalrun`, `collaboration`, or `operator_config`
+- **12 role types** with scoped prompts: CEO, CTO, Product, Frontend, Backend, Engineering, Developer, QA, Research, Algorithm, UI/UX, Operations
+- **Routing templates** — predefined multi-task workflows (e.g., "internet launch")
+- **Smalltalk detection** — greetings and chitchat don't create tasks
+
+### Task Execution
+
+- **Native tool pipeline** — `run_code`, `write_file`, `read_file` — no external CLI dependency
+- **Read → Write → Verify → Deliver** workflow enforced in role prompts
+- **Risk-graded tool execution** — CTO auto-approval + owner fallback for high-risk operations
+- **Approval-gated operator actions** — config changes, model switches, agent management
+
+### Multi-Agent Collaboration
+
+- **Goal Run** — end-to-end autonomous pipeline for complex projects
+- **Collaboration mode** — multi-role task execution with virtual teammates per role
+- **Collaboration timeline** — persistent query API for process trajectory
+- **Team management** — add/remove agent instances, adjust tone policy
+
+### Channels & Integrations
+
+- **Feishu** (primary) — group chat, webhooks, approval cards, interactive buttons
+- **Web console** — dashboard at `http://127.0.0.1:8098` with queue metrics, SLA alerts, channel status
+- **Email** (optional) — IMAP inbound with whitelist, prefix dedup, rate limiting
+
+### Local-First Inference
+
+- **SGLang / vLLM** — Qwen3.5-35B-A3B on local DGX Spark
+- **Deterministic fallback** — system remains functional when model backend is unavailable
+- **Thinking model support** — `enable_thinking: false` for latency-critical paths (classification, tool calling)
+- **Multi-backend** — SGLang, Zhipu API, Ollama
+
+## Quick Start
+
+### Prerequisites
+
+- Node.js 18+
+- NVIDIA DGX Spark / GB10 (or any machine with model access)
+- SGLang / vLLM serving Qwen3.5-35B-A3B (optional — system degrades gracefully)
+
+### Setup
 
 ```bash
+# 1. Clone
+git clone git@github.com:Farewell-CK/vinkoclaw.git
+cd vinkoclaw
+
+# 2. Install
 npm install
-```
 
-2. 准备环境变量（使用模板）
-
-```bash
+# 3. Configure
 cp config/.env.example .env
-```
+# Edit .env — at minimum set your model backend URL
 
-3. 按需修改 `.env`（至少确认以下项）
-
-- `VINKOCLAW_PORT`
-- `PRIMARY_BACKEND` / `SGLANG_BASE_URL` / `SGLANG_MODEL`
-- `OPENAI_API_KEY` 或 `ZHIPUAI_API_KEY`（如果使用外部模型服务）
-- 飞书与邮件相关变量（如需启用对应通道）
-
-4. 启动系统
-
-```bash
+# 4. Run
 npm run dev
+
+# 5. Open console
+# http://127.0.0.1:8098
 ```
 
-5. 打开控制台
+### Feishu Integration
 
-`http://127.0.0.1:8098`
+For Feishu webhook callbacks, configure your Feishu app with one of:
 
-## 常用运行命令
+- `/api/feishu/events` (primary)
+- `/feishu/events` (compatibility)
+- `/api/channels/feishu/events` (compatibility)
 
-```bash
-# 只启动 orchestrator
-npm run dev:orchestrator
+Expose port `8098` to a public address if running in a constrained network.
 
-# 只启动单个 runner
-npm run dev:task-runner
+## Example Commands
 
-# 启动多 runner（默认 dev 为多 runner）
-npm run dev:task-runner:multi
+Try these in Feishu or the web console:
 
-# 基础自检
-npm run self-check
+| Command | What Happens |
+|---|---|
+| `你好` | Instant greeting reply, no task created |
+| `帮我写个用户登录功能的PRD` | Routes to **Product** role |
+| `帮我做一个登录页，用React写` | Routes to **Frontend** role |
+| `帮我写一个后端API，实现用户注册，用Node.js` | Routes to **Backend** role |
+| `帮我分析一下具身智能的市场现状和发展趋势` | Routes to **Research** role |
+| `我们系统的技术架构该如何设计` | Routes to **CTO** role |
+| `团队执行：做一个带登录和仪表盘的SaaS MVP` | Triggers **multi-agent collaboration** mode |
+| `请配置研究助理的记忆为向量数据库` | Operator config flow with approval |
+| `暂停模板 tpl-opc-internet-launch` | Template management command |
 
-# 产品行为自检
-npm run self-check:product
+## Architecture
 
-# 拟人化端到端测试
-npm run persona-test
+```
+apps/
+  feishu-gateway/      Feishu webhook receiver
+  control-center/      Web dashboard + console
+
+services/
+  orchestrator/        Central routing, intent classification, task queue
+  task-runner/         Parallel task execution with native tools
+  email-inbound/       IMAP email processing (optional)
+
+packages/
+  agent-runtime/       LLM inference, tool calling, thinking model support
+  knowledge-base/      Workspace knowledge retrieval
+  shared/              Auth, plugins, observability, operator actions
+  plugin-sdk/          Plugin system for extensions
+
+prompts/
+  roles/               12 role-scoped system prompts
 ```
 
-## 示例命令
+## Key Documents
 
-可直接在飞书/控制台使用以下中文指令：
+- [Product Definition](docs/01-product/project-definition.md)
+- [Runtime Flow](docs/02-architecture/runtime-flow.md)
+- [OpenClaw vs NemoClaw](docs/03-research/openclaw-vs-nemoclaw.md)
+- [Model Compute Plan](docs/04-delivery/model-compute-plan.md)
+- [Development Roadmap](docs/04-delivery/development-roadmap.md)
 
-- `团队执行：做一个带登录和仪表盘的SaaS MVP`
-- `请配置研究助理的记忆为向量数据库`
-- `给 ceo 安装向量记忆 skill`
-- `请帮我调研一下 DGX Spark 对个人超级计算机 OPC 的差异化价值`
-- `帮我起草一封发给客户的邮件`
+## License
 
-## 通道与回调
-
-飞书回调路径：
-
-- `/api/feishu/events`（主路径）
-- `/feishu/events`（兼容）
-- `/api/channels/feishu/events`（兼容）
-
-如果在内网环境部署，需要把 `8098` 端口映射到可访问公网地址，并将回调 URL 指向以上任一路径。
-
-## 已知限制
-
-- 外部工具链（如第三方 CLI）在权限交互配置不当时可能卡住，使用前需确认权限模式。
-- 若主模型后端不可用，系统会走本地降级路径，能保证流程可用，但推理质量会下降。
-- 不同通道依赖不同环境变量，建议启用通道前先跑一次 `npm run self-check:product`。
-
-## 关键文档
-
-- `docs/01-product/project-definition.md`
-- `docs/01-product/prd-v1.md`
-- `docs/02-architecture/runtime-flow.md`
-- `docs/03-research/openclaw-vs-nemoclaw.md`
-- `docs/04-delivery/project-overview.md`
+MIT

@@ -379,12 +379,16 @@ function buildApprovalRequesterReminderText(input: {
 }): string {
   const approvalShortId = input.approvalId.slice(0, 8);
   if (!input.failureReason) {
-    return `审批提醒：审批单 ${approvalShortId} 已创建（${input.summary}）。请在飞书审批卡或控制台处理。`;
+    return [
+      `审批提醒：审批单 ${approvalShortId} 已创建（${input.summary}）。请在飞书审批卡或控制台处理。`,
+      `若卡片按钮不可用，可直接回复：1（同意）或 0（拒绝）。若存在多个待审批，再补编号：1 ${approvalShortId} / 0 ${approvalShortId}。`
+    ].join("\n");
   }
   return [
     `审批提醒：审批单 ${approvalShortId} 已创建（${input.summary}）。`,
     "当前审批卡发送给审批人失败，请先在控制台处理审批。",
     `失败原因：${input.failureReason.slice(0, 160)}`,
+    `可直接回复：1（同意）或 0（拒绝）。若存在多个待审批，再补编号：1 ${approvalShortId} / 0 ${approvalShortId}。`,
     "请检查 FEISHU_APPROVER_OPEN_IDS_JSON / FEISHU_OWNER_OPEN_IDS 配置。"
   ].join("\n");
 }
@@ -470,7 +474,6 @@ function buildFeishuApprovalDecisionCard(input: {
     expiresAt
   };
   return {
-    schema: "2.0",
     config: {
       wide_screen_mode: true
     },
@@ -481,48 +484,46 @@ function buildFeishuApprovalDecisionCard(input: {
       },
       template: "orange"
     },
-    body: {
-      elements: [
-        {
-          tag: "markdown",
-          content: [
-            `**审批单**: ${input.approvalId.slice(0, 8)}`,
-            `**步骤角色**: ${input.roleId}`,
-            `**摘要**: ${input.summary}`,
-            `**发起人**: ${input.requestedBy?.trim() || "unknown"}`
-          ].join("\n")
-        },
-        {
-          tag: "action",
-          actions: [
-            {
-              tag: "button",
-              text: {
-                tag: "plain_text",
-                content: "批准"
-              },
-              type: "primary",
-              value: {
-                ...decisionValue,
-                decision: "approved"
-              }
+    elements: [
+      {
+        tag: "markdown",
+        content: [
+          `**审批单**: ${input.approvalId.slice(0, 8)}`,
+          `**步骤角色**: ${input.roleId}`,
+          `**摘要**: ${input.summary}`,
+          `**发起人**: ${input.requestedBy?.trim() || "unknown"}`
+        ].join("\n")
+      },
+      {
+        tag: "action",
+        actions: [
+          {
+            tag: "button",
+            text: {
+              tag: "plain_text",
+              content: "批准"
             },
-            {
-              tag: "button",
-              text: {
-                tag: "plain_text",
-                content: "拒绝"
-              },
-              type: "danger",
-              value: {
-                ...decisionValue,
-                decision: "rejected"
-              }
+            type: "primary",
+            value: {
+              ...decisionValue,
+              decision: "approved"
             }
-          ]
-        }
-      ]
-    }
+          },
+          {
+            tag: "button",
+            text: {
+              tag: "plain_text",
+              content: "拒绝"
+            },
+            type: "danger",
+            value: {
+              ...decisionValue,
+              decision: "rejected"
+            }
+          }
+        ]
+      }
+    ]
   };
 }
 
@@ -1554,7 +1555,248 @@ function formatOperatorActionPendingMessage(
   if (source !== "feishu") {
     return `已创建审批单（${approvalId.slice(0, 8)}）：${summary}`;
   }
-  return `👌 收到。这个操作需要先审批，我已发出审批卡（${approvalId.slice(0, 8)}）。通过后我会马上继续并同步结果。`;
+  return `👌 收到。这个操作需要先审批，我已发出审批卡（${approvalId.slice(0, 8)}）。你也可直接回复 1 同意或 0 拒绝。通过后我会马上继续并同步结果。`;
+}
+
+type ParsedApprovalDecisionCommand = {
+  status: "approved" | "rejected";
+  approvalToken?: string | undefined;
+  decisionNote?: string | undefined;
+};
+
+function parseApprovalDecisionCommand(text: string): ParsedApprovalDecisionCommand | undefined {
+  const normalized = text.trim().replace(/\s+/g, " ");
+  if (!normalized) {
+    return undefined;
+  }
+
+  const quickMatch = normalized.match(
+    /^([01０１])(?:\s+([a-f0-9-]{6,36}))?(?:\s*(?:原因|备注|note)\s*[:：]\s*(.+))?$/i
+  );
+  if (quickMatch?.[1]) {
+    const rawDecision = quickMatch[1].trim();
+    const status = rawDecision === "1" || rawDecision === "１" ? "approved" : "rejected";
+    const approvalToken = (quickMatch[2] ?? "").trim().toLowerCase();
+    const decisionNote = (quickMatch[3] ?? "").trim();
+    return {
+      status,
+      ...(approvalToken ? { approvalToken } : {}),
+      ...(decisionNote ? { decisionNote } : {})
+    };
+  }
+
+  const token = "([a-f0-9-]{6,36})";
+  const suffix = "(?:\\s*(?:原因|备注|note)\\s*[:：]\\s*(.+))?$";
+  const patterns: Array<{ regex: RegExp; status: "approved" | "rejected" }> = [
+    {
+      regex: new RegExp(`^(?:批准|同意|通过|approve)\\s*(?:审批单|审批|approval)?\\s*${token}${suffix}`, "i"),
+      status: "approved"
+    },
+    {
+      regex: new RegExp(`^(?:审批单|审批|approval)\\s*${token}\\s*(?:批准|同意|通过|approve)${suffix}`, "i"),
+      status: "approved"
+    },
+    {
+      regex: new RegExp(`^(?:拒绝|驳回|否决|reject)\\s*(?:审批单|审批|approval)?\\s*${token}${suffix}`, "i"),
+      status: "rejected"
+    },
+    {
+      regex: new RegExp(`^(?:审批单|审批|approval)\\s*${token}\\s*(?:拒绝|驳回|否决|reject)${suffix}`, "i"),
+      status: "rejected"
+    }
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern.regex);
+    if (!match) {
+      continue;
+    }
+    const approvalToken = (match[1] ?? "").trim().toLowerCase();
+    if (!approvalToken) {
+      continue;
+    }
+    const decisionNote = (match[2] ?? "").trim();
+    return {
+      status: pattern.status,
+      approvalToken,
+      ...(decisionNote ? { decisionNote } : {})
+    };
+  }
+
+  return undefined;
+}
+
+function resolvePendingApprovalByToken(approvalToken: string): {
+  approval?: ReturnType<typeof store.getApproval> | undefined;
+  message?: string | undefined;
+} {
+  const token = approvalToken.trim().toLowerCase();
+  if (!token) {
+    return {
+      message: "审批单编号为空，请发送：批准审批单 <编号> 或 拒绝审批单 <编号>。"
+    };
+  }
+
+  const approvals = store.listApprovals(500);
+  const pending = approvals.filter((item) => item.status === "pending");
+  const matchedPending = pending.filter((item) => item.id.toLowerCase().startsWith(token));
+  if (matchedPending.length === 1) {
+    return { approval: matchedPending[0] };
+  }
+  if (matchedPending.length > 1) {
+    return {
+      message: `命中多个待审批单，请补充更多编号位数：${matchedPending
+        .slice(0, 5)
+        .map((item) => item.id.slice(0, 8))
+        .join("、")}`
+    };
+  }
+
+  const historical = approvals.find((item) => item.id.toLowerCase().startsWith(token));
+  if (historical) {
+    return {
+      message: `审批单 ${historical.id.slice(0, 8)} 当前状态是 ${historical.status}，不在待审批状态。`
+    };
+  }
+
+  return {
+    message: `未找到审批单 ${token}，请确认编号后重试。`
+  };
+}
+
+function resolvePendingApprovalForRequester(requestedBy?: string | undefined): {
+  approval?: ReturnType<typeof store.getApproval> | undefined;
+  message?: string | undefined;
+} {
+  const pending = store.listApprovals(500).filter((item) => item.status === "pending");
+  if (pending.length === 0) {
+    return {
+      message: "当前没有待审批单。"
+    };
+  }
+
+  const requester = (requestedBy ?? "").trim();
+  if (requester) {
+    const mine = pending.filter((item) => (item.requestedBy ?? "").trim() === requester);
+    if (mine.length === 1) {
+      return { approval: mine[0] };
+    }
+    if (mine.length > 1) {
+      return {
+        message: `你当前有多个待审批单：${mine
+          .slice(0, 5)
+          .map((item) => item.id.slice(0, 8))
+          .join("、")}。请回复 1 <编号> 或 0 <编号>。`
+      };
+    }
+  }
+
+  if (pending.length === 1) {
+    return { approval: pending[0] };
+  }
+  return {
+    message: `当前有多个待审批单：${pending
+      .slice(0, 5)
+      .map((item) => item.id.slice(0, 8))
+      .join("、")}。请回复 1 <编号> 或 0 <编号>。`
+  };
+}
+
+async function applyApprovalDecisionFromCommand(input: {
+  approvalToken?: string | undefined;
+  status: "approved" | "rejected";
+  decidedBy?: string | undefined;
+  decisionNote?: string | undefined;
+  requestedBy?: string | undefined;
+}): Promise<{ ok: true; approvalId: string; message: string } | { ok: false; message: string }> {
+  const resolved = input.approvalToken
+    ? resolvePendingApprovalByToken(input.approvalToken)
+    : resolvePendingApprovalForRequester(input.requestedBy);
+  if (!resolved.approval) {
+    return {
+      ok: false,
+      message: resolved.message ?? "未找到待审批单。"
+    };
+  }
+
+  const approval = resolved.approval;
+  const ensured = ensureApprovalWorkflowForRecord(approval.id);
+  if (!ensured) {
+    return {
+      ok: false,
+      message: `审批单 ${approval.id.slice(0, 8)} 缺少审批流程数据，请在控制台处理。`
+    };
+  }
+  const pendingStep = store.getPendingApprovalWorkflowStep(approval.id);
+  if (!pendingStep) {
+    return {
+      ok: false,
+      message: `审批单 ${approval.id.slice(0, 8)} 当前没有待处理步骤。`
+    };
+  }
+
+  const decidedBy = (input.decidedBy ?? "owner").trim() || "owner";
+  await safeEmitApprovalLifecycleEvent({
+    phase: "before_approval_decision",
+    approvalId: approval.id,
+    kind: approval.kind,
+    status: approval.status,
+    requestedBy: approval.requestedBy,
+    decidedBy
+  });
+
+  let decisionResult:
+    | ReturnType<typeof store.decideApprovalWorkflowStep>
+    | undefined;
+  try {
+    decisionResult = store.decideApprovalWorkflowStep({
+      approvalId: approval.id,
+      stepId: pendingStep.step.id,
+      status: input.status,
+      decidedBy,
+      decisionNote: input.decisionNote
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      message: `审批处理失败：${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+
+  const decidedApproval = decisionResult.approval ?? store.getApproval(approval.id) ?? approval;
+  await safeEmitApprovalLifecycleEvent({
+    phase: "after_approval_decision",
+    approvalId: decidedApproval.id,
+    kind: decidedApproval.kind,
+    status: decidedApproval.status,
+    requestedBy: decidedApproval.requestedBy,
+    decidedBy: decidedApproval.decidedBy
+  });
+
+  try {
+    await applyApprovalDecisionEffects(decidedApproval);
+  } catch (error) {
+    return {
+      ok: false,
+      message: `审批已记录，但执行动作失败：${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+
+  await notifyApprovalStepViaFeishu(approval.id);
+  const stillPending = store.getPendingApprovalWorkflowStep(approval.id);
+  if (stillPending) {
+    return {
+      ok: true,
+      approvalId: approval.id,
+      message: `已${input.status === "approved" ? "批准" : "拒绝"}审批单 ${approval.id.slice(0, 8)} 当前步骤，下一审批步骤已推送。`
+    };
+  }
+
+  return {
+    ok: true,
+    approvalId: approval.id,
+    message: `已${input.status === "approved" ? "批准" : "拒绝"}审批单 ${approval.id.slice(0, 8)}。`
+  };
 }
 
 function resolveAwaitingGoalRunForInbound(input: {
@@ -2295,6 +2537,30 @@ async function handleInboundMessage(input: {
         message: formatActiveTaskStatusMessage(activeTask)
       });
     }
+  }
+
+  const approvalDecisionCommand = parseApprovalDecisionCommand(inboundText);
+  if (approvalDecisionCommand) {
+    const decisionResult = await applyApprovalDecisionFromCommand({
+      ...(approvalDecisionCommand.approvalToken ? { approvalToken: approvalDecisionCommand.approvalToken } : {}),
+      status: approvalDecisionCommand.status,
+      decidedBy: input.requestedBy,
+      decisionNote: approvalDecisionCommand.decisionNote,
+      requestedBy: input.requestedBy
+    });
+    if (!decisionResult.ok) {
+      return finalize({
+        type: "config_input_required",
+        message: decisionResult.message,
+        missingField: "approvalId",
+        expectedCommand: "回复 1 同意（或 0 拒绝）；若有多个待审批，回复 1 <编号> 或 0 <编号>"
+      });
+    }
+    return finalize({
+      type: "operator_action_applied",
+      message: decisionResult.message,
+      actionId: decisionResult.approvalId
+    });
   }
 
   const awaitingGoalRun = resolveAwaitingGoalRunForInbound({

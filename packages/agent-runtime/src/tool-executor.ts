@@ -280,13 +280,40 @@ async function executeWriteFile(
   ctx: ToolContext,
   args: { path: string; content: string }
 ): Promise<{ output: string; artifactPaths: string[] }> {
-  // Sanitize path — stay within workDir
-  const normalized = path.normalize(args.path).replace(/^(\.\.\/|\/)+/, "");
-  const fullPath = path.join(ctx.workDir, normalized);
+  const rawPath = String(args.path ?? "").trim();
+  if (!rawPath) {
+    throw new Error("write_file requires a non-empty path");
+  }
+
+  const workspaceRoot = path.resolve(ctx.workDir, "..", "..", "..");
+  const isWithin = (candidate: string, root: string): boolean => {
+    const rel = path.relative(root, candidate);
+    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  };
+
+  let fullPath = "";
+  let displayPath = "";
+
+  if (path.isAbsolute(rawPath)) {
+    const normalizedAbsolute = path.resolve(rawPath);
+    if (!isWithin(normalizedAbsolute, workspaceRoot)) {
+      throw new Error(`absolute path outside workspace is not allowed: ${rawPath}`);
+    }
+    fullPath = normalizedAbsolute;
+    displayPath = path.relative(workspaceRoot, fullPath).replaceAll(path.sep, "/");
+  } else {
+    const resolved = path.resolve(ctx.workDir, rawPath);
+    if (!isWithin(resolved, ctx.workDir)) {
+      throw new Error(`path escapes task workspace: ${rawPath}`);
+    }
+    fullPath = resolved;
+    displayPath = path.relative(ctx.workDir, fullPath).replaceAll(path.sep, "/");
+  }
+
   await mkdir(path.dirname(fullPath), { recursive: true });
   await writeFile(fullPath, args.content, "utf8");
   return {
-    output: `File written: ${normalized} (${args.content.length} bytes)`,
+    output: `File written: ${displayPath} (${args.content.length} bytes)`,
     artifactPaths: [fullPath]
   };
 }
