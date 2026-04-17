@@ -46,6 +46,7 @@ import {
   type ToolRunRecord
 } from "@vinko/shared";
 import { CollaborationManager } from "./collaboration-manager.js";
+import { buildCompanionArtifacts } from "./artifact-export.js";
 import { resolveDeliverableMode, validateDeliverableArtifacts } from "./deliverable-contract.js";
 import { notifyGoalRunProgressSafely } from "./goal-run-progress.js";
 
@@ -705,7 +706,23 @@ async function ensureTextDeliverableArtifact(
   await writeFile(absolutePath, deliverableText.endsWith("\n") ? deliverableText : `${deliverableText}\n`, "utf8");
 
   const relPath = path.relative(env.workspaceRoot, absolutePath);
-  const nextArtifactFiles = Array.from(new Set([...existingArtifactFiles, relPath])).sort((a, b) => a.localeCompare(b));
+  const nextArtifactFiles = new Set([...existingArtifactFiles, relPath]);
+  const companionArtifacts = buildCompanionArtifacts({
+    relativePath: relPath,
+    content: deliverableText,
+    title: task.title
+  });
+  for (const artifact of companionArtifacts) {
+    const artifactAbsolutePath = path.join(env.workspaceRoot, artifact.relativePath);
+    await mkdir(path.dirname(artifactAbsolutePath), { recursive: true });
+    await writeFile(
+      artifactAbsolutePath,
+      artifact.content.endsWith("\n") ? artifact.content : `${artifact.content}\n`,
+      "utf8"
+    );
+    nextArtifactFiles.add(artifact.relativePath);
+  }
+  const sortedArtifactFiles = Array.from(nextArtifactFiles).sort((a, b) => a.localeCompare(b));
   const fileNotice = `\n\n已落地产物文件：\n- ${relPath}`;
   const nextResult: TaskResult = {
     ...result,
@@ -713,7 +730,7 @@ async function ensureTextDeliverableArtifact(
   };
 
   return {
-    artifactFiles: nextArtifactFiles,
+    artifactFiles: sortedArtifactFiles,
     result: nextResult
   };
 }
