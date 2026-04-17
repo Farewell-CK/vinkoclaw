@@ -35,6 +35,11 @@ const SUITES = {
     command: ["npm", "run", "self-check:founder-recap"],
     budgetMs: 5 * 60_000
   },
+  "founder-implementation": {
+    label: "Founder Implementation Task",
+    command: ["npm", "run", "self-check:founder-implementation"],
+    budgetMs: 5 * 60_000
+  },
   persona: {
     label: "Persona Test",
     command: ["npm", "run", "persona-test"],
