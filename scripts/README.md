@@ -9,12 +9,14 @@ Development, bootstrap, and deployment scripts live here.
   - `PERSONA_MAX_WALL_CLOCK_MS`: max wall-clock for a full run (default 1800000).
 - `product-selfcheck.mjs`: end-to-end product behavior check (smalltalk fast-path, routing, continue semantics, cancel APIs, stale task/goal-run/approval cleanup).
 - `founder-delivery-selfcheck.mjs`: end-to-end founder delivery workflow check (`PRD -> implementation -> QA -> recap`).
+- `self-check-founder-ops.mjs`: founder ops follow-up workflow check (`ops checklist -> reminders -> ownership`).
 - `self-check-collaboration.mjs`: collaboration-focused self-check for execute-stage real collaboration creation.
 - `self-check-skill-lifecycle.mjs`: skill marketplace lifecycle check (`search -> install -> verify-task`).
 - Founder / collaboration / skill-lifecycle self-checks now start a temporary `@vinko/task-runner` process themselves, so harness runs do not depend on an external `tsx watch` runner staying healthy.
 - `harness-runner.mjs`: unified harness runner that executes a named suite and writes standardized reports to `.run/harness/<suite>/`.
   - `npm run harness:product`: writes `.run/harness/product/latest.json`.
   - `npm run harness:founder-delivery`: writes `.run/harness/founder-delivery/latest.json`.
+  - `npm run harness:founder-ops`: writes `.run/harness/founder-ops/latest.json`.
   - `npm run harness:collaboration`: writes `.run/harness/collaboration/latest.json`.
   - `npm run harness:skill-lifecycle`: writes `.run/harness/skill-lifecycle/latest.json`.
   - By default, harness records whether a suite exceeded its budget but does not kill it.

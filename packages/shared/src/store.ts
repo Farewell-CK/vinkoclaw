@@ -31,9 +31,11 @@ import type {
   DashboardSnapshot,
   GoalRunInputRecord,
   GoalRunRecord,
+  GoalRunTraceRecord,
   GoalRunResult,
   GoalRunStage,
   GoalRunStatus,
+  GoalRunHarnessGradeRecord,
   GoalRunTimelineEventRecord,
   OperatorActionRecord,
   QueueMetricItem,
@@ -46,6 +48,7 @@ import type {
   RunAuthTokenRecord,
   SessionMessageRecord,
   SessionRecord,
+  StageHandoffArtifact,
   SkillBindingRecord,
   TaskRelationRecord,
   TaskMetadata,
@@ -64,6 +67,9 @@ import { getSkillDefinition, roleCanUseSkill } from "./skills.js";
 import { listRoles } from "./roles.js";
 import { type RoleId } from "./types.js";
 import { DEFAULT_TOOL_EXEC_POLICY, normalizeToolExecPolicy } from "./tool-exec.js";
+import { mergeProjectMemory, normalizeProjectMemory } from "./project-memory.js";
+import { WorkspaceMemoryManager, type WorkspaceMemoryRecord } from "./workspace-memory.js";
+import type { ProjectMemoryUpdate } from "./types.js";
 
 const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
   memory: {
@@ -71,8 +77,8 @@ const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
     roleBackends: {}
   },
   routing: {
-    primaryBackend: "sglang",
-    fallbackBackend: "ollama"
+    primaryBackend: "openai",
+    fallbackBackend: "zhipu"
   },
   channels: {
     feishuEnabled: true,
@@ -92,7 +98,7 @@ const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
   collaboration: {
     enabled: true,
     triggerKeywords: ["团队协作执行", "全流程交付", "协作分析"],
-    defaultParticipants: ["product", "uiux", "frontend", "backend", "qa", "ceo"],
+    defaultParticipants: ["product", "uiux", "frontend", "backend", "qa", "cto"],
     defaultConfig: {
       maxRounds: 3,
       discussionTimeoutMs: 30 * 60 * 1000,
@@ -274,6 +280,15 @@ function normalizeRoutingTasks(tasks: RoutingTaskTemplate[]): RoutingTaskTemplat
       roleId: task.roleId,
       titleTemplate: String(task.titleTemplate ?? "").trim(),
       instructionTemplate: String(task.instructionTemplate ?? "").trim(),
+      ...(typeof task.deliverableMode === "string" ? { deliverableMode: task.deliverableMode } : {}),
+      ...(Array.isArray(task.deliverableSections)
+        ? {
+            deliverableSections: task.deliverableSections
+              .filter((entry): entry is string => typeof entry === "string")
+              .map((entry) => entry.trim())
+              .filter(Boolean)
+          }
+        : {}),
       ...(typeof task.priority === "number" ? { priority: task.priority } : {})
     }))
     .filter((task) => task.titleTemplate && task.instructionTemplate);
@@ -302,6 +317,8 @@ function defaultRoutingTemplates(): RoutingTemplate[] {
           titleTemplate: "PM 拆解: {{input_short}}",
           instructionTemplate:
             "基于原始需求生成 PRD 摘要、验收标准、版本切分和优先级。原始需求：{{input}}",
+          deliverableMode: "artifact_required",
+          deliverableSections: ["背景", "目标用户", "核心流程", "范围", "验收标准", "风险", "下一步"],
           priority: 95
         },
         {
@@ -309,6 +326,8 @@ function defaultRoutingTemplates(): RoutingTemplate[] {
           titleTemplate: "UI/UX 方案: {{input_short}}",
           instructionTemplate:
             "输出信息架构、关键页面草案、交互细节和视觉规范建议。原始需求：{{input}}",
+          deliverableMode: "artifact_preferred",
+          deliverableSections: ["信息架构", "关键页面", "交互规则", "视觉规范", "待确认项"],
           priority: 88
         },
         {
@@ -316,6 +335,8 @@ function defaultRoutingTemplates(): RoutingTemplate[] {
           titleTemplate: "前端实现: {{input_short}}",
           instructionTemplate:
             "给出前端实现计划、组件边界、状态管理和性能注意点。原始需求：{{input}}",
+          deliverableMode: "artifact_required",
+          deliverableSections: ["变更文件", "组件边界", "状态管理", "启动命令", "验证结果"],
           priority: 85
         },
         {
@@ -323,6 +344,8 @@ function defaultRoutingTemplates(): RoutingTemplate[] {
           titleTemplate: "后端实现: {{input_short}}",
           instructionTemplate:
             "给出后端 API、数据模型、鉴权、观测性和发布策略。原始需求：{{input}}",
+          deliverableMode: "artifact_required",
+          deliverableSections: ["接口设计", "数据模型", "鉴权", "观测性", "发布方案"],
           priority: 85
         },
         {
@@ -330,6 +353,8 @@ function defaultRoutingTemplates(): RoutingTemplate[] {
           titleTemplate: "算法/模型方案: {{input_short}}",
           instructionTemplate:
             "评估模型/检索/推理方案，输出延迟、成本、质量权衡及参数建议。原始需求：{{input}}",
+          deliverableMode: "artifact_preferred",
+          deliverableSections: ["方案对比", "延迟与成本", "质量权衡", "参数建议", "风险"],
           priority: 82
         },
         {
@@ -337,7 +362,186 @@ function defaultRoutingTemplates(): RoutingTemplate[] {
           titleTemplate: "测试与验收: {{input_short}}",
           instructionTemplate:
             "产出测试矩阵（功能/回归/性能/异常）、验收用例和上线风险清单。原始需求：{{input}}",
+          deliverableMode: "artifact_required",
+          deliverableSections: ["测试矩阵", "验收用例", "异常场景", "上线风险", "结论"],
           priority: 90
+        }
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    },
+    {
+      id: "tpl-founder-delivery-loop",
+      name: "Founder Delivery Loop",
+      description: "将创始人目标按 PRD → 实现 → QA → Recap 的顺序自动推进。",
+      triggerKeywords: ["从想法到交付", "交付闭环", "idea to delivery", "founder delivery", "产品交付闭环"],
+      matchMode: "any",
+      enabled: true,
+      tasks: [
+        {
+          roleId: "product",
+          titleTemplate: "Founder Delivery / PRD: {{input_short}}",
+          instructionTemplate:
+            "你正在启动 Founder Delivery Loop。请先将以下创始人目标沉淀成可执行 PRD，后续实现、验证和 recap 会基于这份产物继续推进。原始目标：{{input}}",
+          deliverableMode: "artifact_required",
+          deliverableSections: ["背景", "目标用户", "核心流程", "需求范围", "验收标准", "风险", "下一步"],
+          priority: 98
+        }
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    },
+    {
+      id: "tpl-founder-prd",
+      name: "Founder PRD",
+      description: "将创始人想法直接沉淀为可执行 PRD 文档。",
+      triggerKeywords: ["写prd", "产品需求文档", "需求文档", "prd", "产品方案"],
+      matchMode: "any",
+      enabled: true,
+      tasks: [
+        {
+          roleId: "product",
+          titleTemplate: "PRD: {{input_short}}",
+          instructionTemplate:
+            "请将以下创始人想法整理为结构化 PRD，包含背景、目标用户、核心流程、范围、验收标准、风险与下一步。原始需求：{{input}}",
+          deliverableMode: "artifact_required",
+          deliverableSections: ["背景", "目标用户", "核心流程", "需求范围", "验收标准", "风险", "下一步"],
+          priority: 96
+        }
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    },
+    {
+      id: "tpl-founder-research-report",
+      name: "Founder Research Report",
+      description: "产出结构化调研报告和结论摘要。",
+      triggerKeywords: ["调研报告", "研究报告", "竞品分析", "市场调研", "分析报告"],
+      matchMode: "any",
+      enabled: true,
+      tasks: [
+        {
+          roleId: "research",
+          titleTemplate: "调研报告: {{input_short}}",
+          instructionTemplate:
+            "请围绕以下主题输出结构化调研报告，包含结论、证据、对比、风险和建议。原始主题：{{input}}",
+          deliverableMode: "artifact_required",
+          deliverableSections: ["结论摘要", "关键证据", "对比分析", "风险", "建议动作"],
+          priority: 92
+        }
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    },
+    {
+      id: "tpl-founder-weekly-recap",
+      name: "Founder Weekly Recap",
+      description: "沉淀本周进展、阻塞与下周计划。",
+      triggerKeywords: ["周报", "weekly recap", "本周总结", "周总结", "每周复盘"],
+      matchMode: "any",
+      enabled: true,
+      tasks: [
+        {
+          roleId: "operations",
+          titleTemplate: "周报: {{input_short}}",
+          instructionTemplate:
+            "请将以下内容整理为创始人周报，包含已完成事项、关键指标/进展、阻塞问题、下周计划和待决策项。原始输入：{{input}}",
+          deliverableMode: "artifact_required",
+          deliverableSections: ["已完成事项", "关键进展", "阻塞问题", "下周计划", "待决策项"],
+          priority: 88
+        }
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    },
+    {
+      id: "tpl-founder-ops-followup",
+      name: "Founder Ops Follow-up",
+      description: "将创始人的待办、提醒、跟进与后续动作整理成可执行运营清单。",
+      triggerKeywords: ["提醒我", "跟进", "待办", "follow up", "follow-up", "reminder", "提醒事项", "后续动作"],
+      matchMode: "any",
+      enabled: true,
+      tasks: [
+        {
+          roleId: "operations",
+          titleTemplate: "运营跟进: {{input_short}}",
+          instructionTemplate:
+            "请将以下创始人请求整理为可执行运营跟进清单，包含当前目标、待办项、提醒时间/触发条件、责任归属、风险和下一步。原始输入：{{input}}",
+          deliverableMode: "artifact_required",
+          deliverableSections: ["当前目标", "待办清单", "提醒与触发条件", "责任归属", "风险", "下一步"],
+          priority: 86
+        }
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    },
+    {
+      id: "tpl-founder-implementation-task",
+      name: "Founder Implementation Task",
+      description: "将一个实现需求拆成开发与测试交付。",
+      triggerKeywords: ["实现功能", "写代码", "开发这个", "修复这个", "实现这个需求"],
+      matchMode: "any",
+      enabled: true,
+      tasks: [
+        {
+          roleId: "frontend",
+          titleTemplate: "实现任务: {{input_short}}",
+          instructionTemplate:
+            "请基于以下需求直接在 workspace 中落地实现，输出变更文件、启动/验证命令和关键说明。原始需求：{{input}}",
+          deliverableMode: "artifact_required",
+          deliverableSections: ["变更文件", "实现说明", "启动命令", "验证结果", "剩余风险"],
+          priority: 90
+        },
+        {
+          roleId: "qa",
+          titleTemplate: "验证任务: {{input_short}}",
+          instructionTemplate:
+            "请基于以下需求输出测试步骤、通过标准和失败场景覆盖，并校验开发交付是否满足要求。原始需求：{{input}}",
+          deliverableMode: "artifact_required",
+          deliverableSections: ["测试步骤", "通过标准", "失败场景", "验证结论", "待修复项"],
+          priority: 86
+        }
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    },
+    {
+      id: "tpl-skill-runtime-integration",
+      name: "Skill Runtime Integration",
+      description: "将 marketplace 中发现但尚未接入本地 runtime 的 skill 转成标准工程接入任务。",
+      triggerKeywords: ["skill接入", "接入runtime", "远端skill", "marketplace skill", "集成skill"],
+      matchMode: "any",
+      enabled: true,
+      tasks: [
+        {
+          roleId: "engineering",
+          titleTemplate: "接入 Skill Runtime: {{input_short}}",
+          instructionTemplate:
+            "请将以下 marketplace skill 接入本地 runtime，补齐技能定义、安装元数据、执行约束和必要测试，确保后续可直接安装与使用。原始信息：{{input}}",
+          deliverableMode: "artifact_required",
+          deliverableSections: ["接入方案", "技能定义", "代码改动", "安装验证", "剩余限制"],
+          priority: 91
+        }
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    },
+    {
+      id: "tpl-skill-smoke-verify",
+      name: "Skill Smoke Verify",
+      description: "安装 skill 后给目标角色派发一个最小验证任务，确认 skill 已真实生效。",
+      triggerKeywords: ["skill验证", "验证skill", "smoke verify", "验证已安装技能"],
+      matchMode: "any",
+      enabled: true,
+      tasks: [
+        {
+          roleId: "product",
+          titleTemplate: "验证 Skill: {{input_short}}",
+          instructionTemplate:
+            "请使用已安装的 skill 完成一个最小验证任务，明确说明 skill 如何影响输出内容、结构或执行方式。原始信息：{{input}}",
+          deliverableMode: "artifact_preferred",
+          deliverableSections: ["验证任务", "执行结果", "Skill 使用证据", "结论"],
+          priority: 84
         }
       ],
       createdAt: timestamp,
@@ -448,7 +652,8 @@ function toTaskRecord(row: JsonRow): TaskRecord {
     completedAt: maybeString(row.completed_at),
     result: jsonParse<TaskResult | undefined>(row.result_json, undefined),
     reflection: jsonParse<ReflectionNote | undefined>(row.reflection_json, undefined),
-    errorText: maybeString(row.error_text)
+    errorText: maybeString(row.error_text),
+    pendingInput: jsonParse<TaskRecord["pendingInput"]>(row.pending_input_json, undefined)
   };
 }
 
@@ -570,8 +775,17 @@ function toSkillBindingRecord(row: JsonRow): SkillBindingRecord {
     scopeId: String(row.scope_id),
     skillId: String(row.skill_id),
     status: row.status as SkillBindingRecord["status"],
+    verificationStatus:
+      typeof row.verification_status === "string" ? (row.verification_status as SkillBindingRecord["verificationStatus"]) : undefined,
     config: jsonParse<Record<string, unknown>>(row.config_json, {}),
     installedBy: maybeString(row.installed_by),
+    installedAt: maybeString(row.installed_at),
+    verifiedAt: maybeString(row.verified_at),
+    lastVerifiedTaskId: maybeString(row.last_verified_task_id),
+    source: maybeString(row.source),
+    sourceLabel: maybeString(row.source_label),
+    sourceUrl: maybeString(row.source_url),
+    version: maybeString(row.version),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   };
@@ -786,6 +1000,42 @@ function toGoalRunTimelineEventRecord(row: JsonRow): GoalRunTimelineEventRecord 
   };
 }
 
+function toStageHandoffArtifact(row: JsonRow): StageHandoffArtifact {
+  return {
+    stage: String(row.stage) as GoalRunStage,
+    taskId: maybeString(row.task_id),
+    taskTraceId: maybeString(row.task_trace_id),
+    summary: String(row.summary ?? ""),
+    artifacts: jsonParse<string[]>(row.artifacts_json, []),
+    decisions: jsonParse<string[]>(row.decisions_json, []),
+    unresolvedQuestions: jsonParse<string[]>(row.unresolved_questions_json, []),
+    nextActions: jsonParse<string[]>(row.next_actions_json, []),
+    approvalNeeds: jsonParse<string[]>(row.approval_needs_json, []),
+    createdAt: String(row.created_at)
+  };
+}
+
+function toGoalRunTraceRecord(row: JsonRow): GoalRunTraceRecord {
+  return {
+    id: String(row.id),
+    goalRunId: String(row.goal_run_id),
+    stage: String(row.stage) as GoalRunStage,
+    status: String(row.status) as GoalRunTraceRecord["status"],
+    taskId: maybeString(row.task_id),
+    taskTraceId: maybeString(row.task_trace_id),
+    inputSummary: String(row.input_summary ?? ""),
+    outputSummary: String(row.output_summary ?? ""),
+    artifactFiles: jsonParse<string[]>(row.artifact_files_json, []),
+    completedRoles: jsonParse<RoleId[]>(row.completed_roles_json, []),
+    failedRoles: jsonParse<RoleId[]>(row.failed_roles_json, []),
+    approvalGateHits: Number(row.approval_gate_hits ?? 0),
+    failureCategory: maybeString(row.failure_category),
+    handoffArtifactId: maybeString(row.handoff_artifact_id),
+    metadata: jsonParse<Record<string, unknown>>(row.metadata_json, {}),
+    createdAt: String(row.created_at)
+  };
+}
+
 function toGoalRunInputRecord(row: JsonRow): GoalRunInputRecord {
   return {
     id: String(row.id),
@@ -859,6 +1109,7 @@ function stripCredentialSecret(record: CredentialSecretRecord): CredentialRecord
 
 export class VinkoStore {
   readonly db: DatabaseSync;
+  private readonly workspaceMemoryManager: WorkspaceMemoryManager;
 
   constructor(dbFile: string) {
     mkdirSync(path.dirname(dbFile), { recursive: true });
@@ -869,6 +1120,7 @@ export class VinkoStore {
     this.db.exec("PRAGMA synchronous = NORMAL;");
     this.db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};`);
     this.initialize();
+    this.workspaceMemoryManager = new WorkspaceMemoryManager(this.db);
     ensureDefaultConfig(this);
     ensureDefaultRoutingTemplates(this);
     this.seedDefaultSkills();
@@ -896,6 +1148,7 @@ export class VinkoStore {
         result_json TEXT,
         reflection_json TEXT,
         error_text TEXT,
+        pending_input_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         started_at TEXT,
@@ -1006,8 +1259,16 @@ export class VinkoStore {
         scope_id TEXT NOT NULL,
         skill_id TEXT NOT NULL,
         status TEXT NOT NULL,
+        verification_status TEXT,
         config_json TEXT NOT NULL,
         installed_by TEXT,
+        installed_at TEXT,
+        verified_at TEXT,
+        last_verified_task_id TEXT,
+        source TEXT,
+        source_label TEXT,
+        source_url TEXT,
+        version TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE(scope, scope_id, skill_id)
@@ -1219,6 +1480,49 @@ export class VinkoStore {
       CREATE INDEX IF NOT EXISTS idx_goal_run_timeline_goal_run ON goal_run_timeline_events(goal_run_id);
       CREATE INDEX IF NOT EXISTS idx_goal_run_timeline_created_at ON goal_run_timeline_events(created_at);
 
+      CREATE TABLE IF NOT EXISTS goal_run_handoff_artifacts (
+        id TEXT PRIMARY KEY,
+        goal_run_id TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        task_id TEXT,
+        task_trace_id TEXT,
+        summary TEXT NOT NULL DEFAULT '',
+        artifacts_json TEXT NOT NULL DEFAULT '[]',
+        decisions_json TEXT NOT NULL DEFAULT '[]',
+        unresolved_questions_json TEXT NOT NULL DEFAULT '[]',
+        next_actions_json TEXT NOT NULL DEFAULT '[]',
+        approval_needs_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (goal_run_id) REFERENCES goal_runs(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_goal_run_handoff_goal_run ON goal_run_handoff_artifacts(goal_run_id);
+      CREATE INDEX IF NOT EXISTS idx_goal_run_handoff_stage ON goal_run_handoff_artifacts(goal_run_id, stage, created_at);
+
+      CREATE TABLE IF NOT EXISTS goal_run_traces (
+        id TEXT PRIMARY KEY,
+        goal_run_id TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        status TEXT NOT NULL,
+        task_id TEXT,
+        task_trace_id TEXT,
+        input_summary TEXT NOT NULL DEFAULT '',
+        output_summary TEXT NOT NULL DEFAULT '',
+        artifact_files_json TEXT NOT NULL DEFAULT '[]',
+        completed_roles_json TEXT NOT NULL DEFAULT '[]',
+        failed_roles_json TEXT NOT NULL DEFAULT '[]',
+        approval_gate_hits INTEGER NOT NULL DEFAULT 0,
+        failure_category TEXT,
+        handoff_artifact_id TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (goal_run_id) REFERENCES goal_runs(id),
+        FOREIGN KEY (handoff_artifact_id) REFERENCES goal_run_handoff_artifacts(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_goal_run_traces_goal_run ON goal_run_traces(goal_run_id);
+      CREATE INDEX IF NOT EXISTS idx_goal_run_traces_stage ON goal_run_traces(goal_run_id, stage, created_at);
+
       CREATE TABLE IF NOT EXISTS goal_run_inputs (
         id TEXT PRIMARY KEY,
         goal_run_id TEXT NOT NULL,
@@ -1277,6 +1581,60 @@ export class VinkoStore {
     if (!sessionIdColumn) {
       this.db.exec("ALTER TABLE tasks ADD COLUMN session_id TEXT;");
     }
+    const pendingInputJsonColumn = this.db
+      .prepare("SELECT 1 AS found FROM pragma_table_info('tasks') WHERE name = 'pending_input_json'")
+      .get() as JsonRow | undefined;
+    if (!pendingInputJsonColumn) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN pending_input_json TEXT;");
+    }
+    const skillBindingInstalledAtColumn = this.db
+      .prepare("SELECT 1 AS found FROM pragma_table_info('skill_bindings') WHERE name = 'installed_at'")
+      .get() as JsonRow | undefined;
+    if (!skillBindingInstalledAtColumn) {
+      this.db.exec("ALTER TABLE skill_bindings ADD COLUMN installed_at TEXT;");
+    }
+    const skillBindingSourceColumn = this.db
+      .prepare("SELECT 1 AS found FROM pragma_table_info('skill_bindings') WHERE name = 'source'")
+      .get() as JsonRow | undefined;
+    if (!skillBindingSourceColumn) {
+      this.db.exec("ALTER TABLE skill_bindings ADD COLUMN source TEXT;");
+    }
+    const skillBindingSourceLabelColumn = this.db
+      .prepare("SELECT 1 AS found FROM pragma_table_info('skill_bindings') WHERE name = 'source_label'")
+      .get() as JsonRow | undefined;
+    if (!skillBindingSourceLabelColumn) {
+      this.db.exec("ALTER TABLE skill_bindings ADD COLUMN source_label TEXT;");
+    }
+    const skillBindingSourceUrlColumn = this.db
+      .prepare("SELECT 1 AS found FROM pragma_table_info('skill_bindings') WHERE name = 'source_url'")
+      .get() as JsonRow | undefined;
+    if (!skillBindingSourceUrlColumn) {
+      this.db.exec("ALTER TABLE skill_bindings ADD COLUMN source_url TEXT;");
+    }
+    const skillBindingVersionColumn = this.db
+      .prepare("SELECT 1 AS found FROM pragma_table_info('skill_bindings') WHERE name = 'version'")
+      .get() as JsonRow | undefined;
+    if (!skillBindingVersionColumn) {
+      this.db.exec("ALTER TABLE skill_bindings ADD COLUMN version TEXT;");
+    }
+    const skillBindingVerificationStatusColumn = this.db
+      .prepare("SELECT 1 AS found FROM pragma_table_info('skill_bindings') WHERE name = 'verification_status'")
+      .get() as JsonRow | undefined;
+    if (!skillBindingVerificationStatusColumn) {
+      this.db.exec("ALTER TABLE skill_bindings ADD COLUMN verification_status TEXT;");
+    }
+    const skillBindingVerifiedAtColumn = this.db
+      .prepare("SELECT 1 AS found FROM pragma_table_info('skill_bindings') WHERE name = 'verified_at'")
+      .get() as JsonRow | undefined;
+    if (!skillBindingVerifiedAtColumn) {
+      this.db.exec("ALTER TABLE skill_bindings ADD COLUMN verified_at TEXT;");
+    }
+    const skillBindingLastVerifiedTaskIdColumn = this.db
+      .prepare("SELECT 1 AS found FROM pragma_table_info('skill_bindings') WHERE name = 'last_verified_task_id'")
+      .get() as JsonRow | undefined;
+    if (!skillBindingLastVerifiedTaskIdColumn) {
+      this.db.exec("ALTER TABLE skill_bindings ADD COLUMN last_verified_task_id TEXT;");
+    }
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id);");
   }
 
@@ -1284,8 +1642,8 @@ export class VinkoStore {
     const timestamp = now();
     const insert = this.db.prepare(`
       INSERT OR IGNORE INTO skill_bindings (
-        id, scope, scope_id, skill_id, status, config_json, installed_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, scope, scope_id, skill_id, status, verification_status, config_json, installed_by, installed_at, verified_at, last_verified_task_id, source, source_label, source_url, version, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const role of listRoles()) {
@@ -1296,8 +1654,16 @@ export class VinkoStore {
           role.id,
           skillId,
           "enabled",
+          "verified",
           jsonStringify(getSkillDefinition(skillId)?.defaultConfig ?? {}),
           "system",
+          timestamp,
+          timestamp,
+          null,
+          "catalog",
+          "catalog",
+          null,
+          null,
           timestamp,
           timestamp
         );
@@ -1950,6 +2316,20 @@ export class VinkoStore {
     }
 
     const sessionId = randomUUID();
+    // Inject workspace memory context into new session metadata
+    const workspaceMemory = this.getWorkspaceMemory();
+    const baseMetadata = input.metadata ?? {};
+    const enrichedMetadata: Record<string, unknown> = {
+      ...baseMetadata,
+      workspaceContext: {
+        preferredLanguage: workspaceMemory.userPreferences.preferredLanguage,
+        preferredTechStack: workspaceMemory.userPreferences.preferredTechStack,
+        communicationStyle: workspaceMemory.userPreferences.communicationStyle,
+        activeProjects: workspaceMemory.projectContext.activeProjects,
+        keyDecisions: workspaceMemory.keyDecisions.slice(-5) // Last 5 decisions for context
+      }
+    };
+
     this.db
       .prepare(`
         INSERT INTO sessions (
@@ -1961,7 +2341,7 @@ export class VinkoStore {
         input.source,
         sourceKey,
         title,
-        jsonStringify(input.metadata ?? {}),
+        jsonStringify(enrichedMetadata),
         timestamp,
         timestamp,
         timestamp
@@ -1993,6 +2373,42 @@ export class VinkoStore {
         WHERE id = ?
       `)
       .run(when, when, sessionId);
+  }
+
+  patchSessionMetadata(sessionId: string, patch: Record<string, unknown>): SessionRecord | undefined {
+    const session = this.getSession(sessionId);
+    if (!session) {
+      return undefined;
+    }
+    const merged = {
+      ...(session.metadata ?? {}),
+      ...patch
+    };
+    const timestamp = now();
+    this.db
+      .prepare(`
+        UPDATE sessions
+        SET metadata_json = ?, updated_at = ?, last_message_at = ?
+        WHERE id = ?
+      `)
+      .run(jsonStringify(merged), timestamp, timestamp, sessionId);
+    return this.getSession(sessionId);
+  }
+
+  updateSessionProjectMemory(
+    sessionId: string,
+    patch: ProjectMemoryUpdate,
+    metadataPatch?: Record<string, unknown>
+  ): SessionRecord | undefined {
+    const session = this.getSession(sessionId);
+    if (!session) {
+      return undefined;
+    }
+    const nextProjectMemory = mergeProjectMemory(session.metadata?.projectMemory, patch);
+    return this.patchSessionMetadata(sessionId, {
+      ...(metadataPatch ?? {}),
+      projectMemory: normalizeProjectMemory(nextProjectMemory)
+    });
   }
 
   listSessions(limit = 100): SessionRecord[] {
@@ -2579,6 +2995,174 @@ export class VinkoStore {
     return rows.map(toGoalRunTimelineEventRecord);
   }
 
+  appendGoalRunHandoffArtifact(input: {
+    goalRunId: string;
+    stage: GoalRunStage;
+    taskId?: string | undefined;
+    taskTraceId?: string | undefined;
+    summary: string;
+    artifacts?: string[] | undefined;
+    decisions?: string[] | undefined;
+    unresolvedQuestions?: string[] | undefined;
+    nextActions?: string[] | undefined;
+    approvalNeeds?: string[] | undefined;
+  }): { id: string; artifact: StageHandoffArtifact } {
+    const id = randomUUID();
+    const timestamp = now();
+    this.db
+      .prepare(`
+        INSERT INTO goal_run_handoff_artifacts (
+          id, goal_run_id, stage, task_id, task_trace_id, summary, artifacts_json,
+          decisions_json, unresolved_questions_json, next_actions_json, approval_needs_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        id,
+        input.goalRunId,
+        input.stage,
+        input.taskId ?? null,
+        input.taskTraceId ?? null,
+        input.summary.trim(),
+        jsonStringify(input.artifacts ?? []),
+        jsonStringify(input.decisions ?? []),
+        jsonStringify(input.unresolvedQuestions ?? []),
+        jsonStringify(input.nextActions ?? []),
+        jsonStringify(input.approvalNeeds ?? []),
+        timestamp
+      );
+    const row = this.db
+      .prepare("SELECT * FROM goal_run_handoff_artifacts WHERE id = ?")
+      .get(id) as JsonRow | undefined;
+    if (!row) {
+      throw new Error(`Goal run handoff artifact ${id} was created but could not be loaded`);
+    }
+    return {
+      id,
+      artifact: toStageHandoffArtifact(row)
+    };
+  }
+
+  listGoalRunHandoffArtifacts(
+    goalRunId: string,
+    limit = 100,
+    stage?: GoalRunStage | undefined
+  ): Array<{ id: string; artifact: StageHandoffArtifact }> {
+    const statement = stage
+      ? this.db.prepare(`
+          SELECT * FROM goal_run_handoff_artifacts
+          WHERE goal_run_id = ? AND stage = ?
+          ORDER BY created_at ASC
+          LIMIT ?
+        `)
+      : this.db.prepare(`
+          SELECT * FROM goal_run_handoff_artifacts
+          WHERE goal_run_id = ?
+          ORDER BY created_at ASC
+          LIMIT ?
+        `);
+    const rows = (
+      stage
+        ? statement.all(goalRunId, stage, Math.max(1, Math.min(500, Math.round(limit))))
+        : statement.all(goalRunId, Math.max(1, Math.min(500, Math.round(limit))))
+    ) as JsonRow[];
+    return rows.map((row) => ({
+      id: String(row.id),
+      artifact: toStageHandoffArtifact(row)
+    }));
+  }
+
+  getLatestGoalRunHandoff(goalRunId: string, stage?: GoalRunStage | undefined): { id: string; artifact: StageHandoffArtifact } | undefined {
+    const row = stage
+      ? (this.db
+          .prepare(`
+            SELECT * FROM goal_run_handoff_artifacts
+            WHERE goal_run_id = ? AND stage = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+          `)
+          .get(goalRunId, stage) as JsonRow | undefined)
+      : (this.db
+          .prepare(`
+            SELECT * FROM goal_run_handoff_artifacts
+            WHERE goal_run_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+          `)
+          .get(goalRunId) as JsonRow | undefined);
+    if (!row) {
+      return undefined;
+    }
+    return {
+      id: String(row.id),
+      artifact: toStageHandoffArtifact(row)
+    };
+  }
+
+  appendGoalRunTrace(input: {
+    goalRunId: string;
+    stage: GoalRunStage;
+    status: GoalRunTraceRecord["status"];
+    taskId?: string | undefined;
+    taskTraceId?: string | undefined;
+    inputSummary?: string | undefined;
+    outputSummary?: string | undefined;
+    artifactFiles?: string[] | undefined;
+    completedRoles?: RoleId[] | undefined;
+    failedRoles?: RoleId[] | undefined;
+    approvalGateHits?: number | undefined;
+    failureCategory?: string | undefined;
+    handoffArtifactId?: string | undefined;
+    metadata?: Record<string, unknown> | undefined;
+  }): GoalRunTraceRecord {
+    const id = randomUUID();
+    const timestamp = now();
+    this.db
+      .prepare(`
+        INSERT INTO goal_run_traces (
+          id, goal_run_id, stage, status, task_id, task_trace_id, input_summary, output_summary,
+          artifact_files_json, completed_roles_json, failed_roles_json, approval_gate_hits,
+          failure_category, handoff_artifact_id, metadata_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        id,
+        input.goalRunId,
+        input.stage,
+        input.status,
+        input.taskId ?? null,
+        input.taskTraceId ?? null,
+        input.inputSummary ?? "",
+        input.outputSummary ?? "",
+        jsonStringify(input.artifactFiles ?? []),
+        jsonStringify(input.completedRoles ?? []),
+        jsonStringify(input.failedRoles ?? []),
+        Math.max(0, Math.round(input.approvalGateHits ?? 0)),
+        input.failureCategory ?? null,
+        input.handoffArtifactId ?? null,
+        jsonStringify(input.metadata ?? {}),
+        timestamp
+      );
+    const row = this.db
+      .prepare("SELECT * FROM goal_run_traces WHERE id = ?")
+      .get(id) as JsonRow | undefined;
+    if (!row) {
+      throw new Error(`Goal run trace ${id} was created but could not be loaded`);
+    }
+    return toGoalRunTraceRecord(row);
+  }
+
+  listGoalRunTraces(goalRunId: string, limit = 200): GoalRunTraceRecord[] {
+    const rows = this.db
+      .prepare(`
+        SELECT * FROM goal_run_traces
+        WHERE goal_run_id = ?
+        ORDER BY created_at ASC
+        LIMIT ?
+      `)
+      .all(goalRunId, Math.max(1, Math.min(1000, Math.round(limit)))) as JsonRow[];
+    return rows.map(toGoalRunTraceRecord);
+  }
+
   upsertGoalRunInput(input: {
     goalRunId: string;
     inputKey: string;
@@ -2823,18 +3407,101 @@ export class VinkoStore {
     return this.getTask(taskId);
   }
 
-  cancelTask(taskId: string, reasonText?: string): TaskRecord | undefined {
+  pauseTask(taskId: string, input: { question: string; context?: string | undefined }): TaskRecord | undefined {
+    const timestamp = now();
+    const task = this.getTask(taskId);
+    if (!task || !task.pendingInput) {
+      this.db
+        .prepare(`
+          UPDATE tasks
+          SET status = 'paused_input',
+              pending_input_json = ?,
+              updated_at = ?
+          WHERE id = ? AND status IN ('running')
+        `)
+        .run(jsonStringify({ question: input.question, pausedAt: timestamp, context: input.context ?? null }), timestamp, taskId);
+    }
+
+    this.appendAuditEvent({
+      category: "task",
+      entityType: "task",
+      entityId: taskId,
+      message: "Paused task awaiting user input",
+      payload: {
+        question: input.question
+      }
+    });
+
+    return this.getTask(taskId);
+  }
+
+  resumeTask(taskId: string, updatedInstruction?: string): TaskRecord | undefined {
     const timestamp = now();
     this.db
       .prepare(`
         UPDATE tasks
+        SET status = 'running',
+            instruction = COALESCE(?, instruction),
+            pending_input_json = NULL,
+            updated_at = ?
+        WHERE id = ? AND status = 'paused_input'
+      `)
+      .run(updatedInstruction ?? null, timestamp, taskId);
+
+    this.appendAuditEvent({
+      category: "task",
+      entityType: "task",
+      entityId: taskId,
+      message: "Resumed task from paused_input",
+      payload: {
+        instructionUpdated: Boolean(updatedInstruction)
+      }
+    });
+
+    return this.getTask(taskId);
+  }
+
+  getPausedTask(source: TaskRecord["source"], requestedBy?: string | undefined, chatId?: string | undefined): TaskRecord | undefined {
+    const task = this.db
+      .prepare(`
+        SELECT * FROM tasks
+        WHERE status = 'paused_input'
+          AND source = ?
+          ${requestedBy ? "AND requested_by = ?" : ""}
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `)
+      .get(source, ...(requestedBy ? [requestedBy] : [])) as JsonRow | undefined;
+
+    if (!task) {
+      return undefined;
+    }
+
+    const record = toTaskRecord(task);
+    if (chatId && record.chatId !== chatId) {
+      return undefined;
+    }
+
+    return record;
+  }
+
+  cancelTask(taskId: string, reasonText?: string): TaskRecord | undefined {
+    const timestamp = now();
+    const result = this.db
+      .prepare(`
+        UPDATE tasks
         SET status = 'cancelled',
             error_text = COALESCE(?, error_text),
+            pending_input_json = NULL,
             completed_at = COALESCE(completed_at, ?),
             updated_at = ?
-        WHERE id = ? AND status IN ('queued', 'running', 'waiting_approval')
+        WHERE id = ? AND status IN ('queued', 'running', 'waiting_approval', 'paused_input')
       `)
       .run(reasonText ?? null, timestamp, timestamp, taskId);
+
+    if (result.changes === 0) {
+      return undefined;
+    }
 
     this.appendAuditEvent({
       category: "task",
@@ -2918,6 +3585,23 @@ export class VinkoStore {
       `)
       .run(jsonStringify(merged), timestamp, taskId);
     return this.getTask(taskId);
+  }
+
+  patchTaskRole(taskId: string, roleId: string): TaskRecord | undefined {
+    try {
+      const result = this.db
+        .prepare(`UPDATE tasks SET role_id = ?, updated_at = ? WHERE id = ?`)
+        .run(roleId, now(), taskId);
+      if (result.changes > 0) {
+        return this.getTask(taskId);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      if (!message.includes("database is locked")) {
+        throw error;
+      }
+    }
+    return undefined;
   }
 
   touchRunningTask(taskId: string, when: string = now()): TaskRecord | undefined {
@@ -3700,10 +4384,20 @@ export class VinkoStore {
     scopeId: string;
     skillId: string;
     status: SkillBindingRecord["status"];
+    verificationStatus?: SkillBindingRecord["verificationStatus"];
     config?: Record<string, unknown> | undefined;
     installedBy?: string | undefined;
+    installedAt?: string | undefined;
+    verifiedAt?: string | undefined;
+    lastVerifiedTaskId?: string | undefined;
+    source?: string | undefined;
+    sourceLabel?: string | undefined;
+    sourceUrl?: string | undefined;
+    version?: string | undefined;
   }): SkillBindingRecord {
     const timestamp = now();
+    const installedAt = input.installedAt ?? timestamp;
+    const verificationStatus = input.verificationStatus ?? "unverified";
     const existing = this.db
       .prepare("SELECT id FROM skill_bindings WHERE scope = ? AND scope_id = ? AND skill_id = ?")
       .get(input.scope, input.scopeId, input.skillId) as JsonRow | undefined;
@@ -3712,13 +4406,21 @@ export class VinkoStore {
       this.db
         .prepare(`
           UPDATE skill_bindings
-          SET status = ?, config_json = ?, installed_by = ?, updated_at = ?
+          SET status = ?, verification_status = ?, config_json = ?, installed_by = ?, installed_at = ?, verified_at = ?, last_verified_task_id = ?, source = ?, source_label = ?, source_url = ?, version = ?, updated_at = ?
           WHERE id = ?
         `)
         .run(
           input.status,
+          verificationStatus ?? null,
           jsonStringify(input.config ?? getSkillDefinition(input.skillId)?.defaultConfig ?? {}),
           input.installedBy ?? null,
+          installedAt,
+          input.verifiedAt ?? null,
+          input.lastVerifiedTaskId ?? null,
+          input.source ?? null,
+          input.sourceLabel ?? null,
+          input.sourceUrl ?? null,
+          input.version ?? null,
           timestamp,
           String(existing.id)
         );
@@ -3726,8 +4428,8 @@ export class VinkoStore {
       this.db
         .prepare(`
           INSERT INTO skill_bindings (
-            id, scope, scope_id, skill_id, status, config_json, installed_by, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, scope, scope_id, skill_id, status, verification_status, config_json, installed_by, installed_at, verified_at, last_verified_task_id, source, source_label, source_url, version, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `)
         .run(
           randomUUID(),
@@ -3735,8 +4437,16 @@ export class VinkoStore {
           input.scopeId,
           input.skillId,
           input.status,
+          verificationStatus ?? null,
           jsonStringify(input.config ?? getSkillDefinition(input.skillId)?.defaultConfig ?? {}),
           input.installedBy ?? null,
+          installedAt,
+          input.verifiedAt ?? null,
+          input.lastVerifiedTaskId ?? null,
+          input.source ?? null,
+          input.sourceLabel ?? null,
+          input.sourceUrl ?? null,
+          input.version ?? null,
           timestamp,
           timestamp
         );
@@ -3750,7 +4460,15 @@ export class VinkoStore {
       payload: {
         scope: input.scope,
         scopeId: input.scopeId,
-        installedBy: input.installedBy ?? ""
+        installedBy: input.installedBy ?? "",
+        installedAt,
+        verificationStatus: verificationStatus ?? "",
+        verifiedAt: input.verifiedAt ?? "",
+        lastVerifiedTaskId: input.lastVerifiedTaskId ?? "",
+        source: input.source ?? "",
+        sourceLabel: input.sourceLabel ?? "",
+        sourceUrl: input.sourceUrl ?? "",
+        version: input.version ?? ""
       }
     });
 
@@ -3765,6 +4483,37 @@ export class VinkoStore {
     }
 
     return record;
+  }
+
+  updateSkillBindingVerification(input: {
+    scopeId: string;
+    skillId: string;
+    verificationStatus: NonNullable<SkillBindingRecord["verificationStatus"]>;
+    verifiedAt?: string | undefined;
+    lastVerifiedTaskId?: string | undefined;
+  }): SkillBindingRecord | undefined {
+    const binding = this.listSkillBindings(input.scopeId).find(
+      (entry) => entry.scope === "role" && entry.scopeId === input.scopeId && entry.skillId === input.skillId
+    );
+    if (!binding) {
+      return undefined;
+    }
+    return this.setSkillBinding({
+      scope: binding.scope,
+      scopeId: binding.scopeId,
+      skillId: binding.skillId,
+      status: binding.status,
+      verificationStatus: input.verificationStatus,
+      config: binding.config,
+      installedBy: binding.installedBy,
+      installedAt: binding.installedAt,
+      verifiedAt: input.verifiedAt,
+      lastVerifiedTaskId: input.lastVerifiedTaskId,
+      source: binding.source,
+      sourceLabel: binding.sourceLabel,
+      sourceUrl: binding.sourceUrl,
+      version: binding.version
+    });
   }
 
   applyOperatorAction(actionId: string, decidedBy: string): OperatorActionRecord | undefined {
@@ -3800,8 +4549,13 @@ export class VinkoStore {
           scopeId: action.targetRoleId,
           skillId: action.skillId,
           status: "enabled",
+          verificationStatus: "unverified",
           config: action.payload.config as Record<string, unknown> | undefined,
-          installedBy: decidedBy
+          installedBy: decidedBy,
+          source: typeof action.payload.source === "string" ? action.payload.source : "catalog",
+          sourceLabel: typeof action.payload.sourceLabel === "string" ? action.payload.sourceLabel : "catalog",
+          sourceUrl: typeof action.payload.sourceUrl === "string" ? action.payload.sourceUrl : undefined,
+          version: typeof action.payload.version === "string" ? action.payload.version : undefined
         });
         break;
       }
@@ -3815,8 +4569,13 @@ export class VinkoStore {
           scopeId: action.targetRoleId,
           skillId: action.skillId,
           status: "disabled",
+          verificationStatus: "unverified",
           config: action.payload.config as Record<string, unknown> | undefined,
-          installedBy: decidedBy
+          installedBy: decidedBy,
+          source: typeof action.payload.source === "string" ? action.payload.source : undefined,
+          sourceLabel: typeof action.payload.sourceLabel === "string" ? action.payload.sourceLabel : undefined,
+          sourceUrl: typeof action.payload.sourceUrl === "string" ? action.payload.sourceUrl : undefined,
+          version: typeof action.payload.version === "string" ? action.payload.version : undefined
         });
         break;
       }
@@ -4475,8 +5234,10 @@ export class VinkoStore {
   updateAgentCollaboration(
     id: string,
     patch: Partial<
-      Pick<AgentCollaboration, "status" | "currentPhase" | "phaseResults" | "updatedAt" | "completedAt">
-    >
+      Omit<Pick<AgentCollaboration, "status" | "currentPhase" | "phaseResults" | "updatedAt">, never>
+    > & {
+      completedAt?: string | null;
+    }
   ): void {
     const updates: string[] = [];
     const values: (string | number | null)[] = [];
@@ -4722,5 +5483,28 @@ export class VinkoStore {
       status: "inactive",
       deactivatedAt: now()
     });
+  }
+
+  /**
+   * Workspace Memory: Cross-session persistence for user preferences and key decisions.
+   */
+  getWorkspaceMemory(): WorkspaceMemoryRecord {
+    return this.workspaceMemoryManager.get();
+  }
+
+  patchWorkspaceMemory(patch: Partial<WorkspaceMemoryRecord>): WorkspaceMemoryRecord {
+    return this.workspaceMemoryManager.patch(patch);
+  }
+
+  addWorkspaceDecision(decision: string, rationale: string, category?: string): void {
+    this.workspaceMemoryManager.addDecision(decision, rationale, category);
+  }
+
+  setWorkspacePreferences(prefs: Partial<WorkspaceMemoryRecord["userPreferences"]>): void {
+    this.workspaceMemoryManager.setPreferences(prefs);
+  }
+
+  updateWorkspaceProject(name: string, stage: string): void {
+    this.workspaceMemoryManager.updateProject(name, stage);
   }
 }

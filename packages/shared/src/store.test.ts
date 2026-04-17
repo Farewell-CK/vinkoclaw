@@ -47,14 +47,49 @@ describe("VinkoStore operator actions", () => {
       targetRoleId: "operations",
       skillId: "email-ops",
       summary: "Install email-ops for operations",
-      payload: {},
+      payload: {
+        source: "remote",
+        sourceLabel: "community-registry",
+        sourceUrl: "https://example.com/skills/email-ops",
+        version: "1.2.0"
+      },
       createdBy: "owner"
     });
 
     store.applyOperatorAction(action.id, "owner");
 
-    const operationsSkills = store.resolveSkillsForRole("operations");
-    expect(operationsSkills.some((entry) => entry.skillId === "email-ops")).toBe(true);
+    const installed = store.resolveSkillsForRole("operations").find((entry) => entry.skillId === "email-ops");
+    expect(installed).toBeTruthy();
+    expect(installed?.verificationStatus).toBe("unverified");
+    expect(installed?.source).toBe("remote");
+    expect(installed?.sourceLabel).toBe("community-registry");
+    expect(installed?.sourceUrl).toBe("https://example.com/skills/email-ops");
+    expect(installed?.version).toBe("1.2.0");
+    expect(installed?.installedAt).toBeTruthy();
+  });
+
+  it("updates skill verification state for installed role binding", () => {
+    const store = createTestStore();
+    store.setSkillBinding({
+      scope: "role",
+      scopeId: "product",
+      skillId: "prd-writer",
+      status: "enabled",
+      verificationStatus: "unverified",
+      installedBy: "owner"
+    });
+
+    const updated = store.updateSkillBindingVerification({
+      scopeId: "product",
+      skillId: "prd-writer",
+      verificationStatus: "verified",
+      verifiedAt: "2026-04-13T00:00:00.000Z",
+      lastVerifiedTaskId: "task_verify_1"
+    });
+
+    expect(updated?.verificationStatus).toBe("verified");
+    expect(updated?.verifiedAt).toBe("2026-04-13T00:00:00.000Z");
+    expect(updated?.lastVerifiedTaskId).toBe("task_verify_1");
   });
 
   it("seeds default active agent instances", () => {
@@ -129,7 +164,7 @@ describe("VinkoStore operator actions", () => {
       parentTaskId: parent.id,
       status: "active",
       participants: ["product", "backend", "qa"],
-      facilitator: "ceo",
+      facilitator: "cto",
       currentPhase: "assignment",
       phaseResults: [],
       config: {
@@ -215,6 +250,77 @@ describe("VinkoStore operator actions", () => {
     expect(completed?.status).toBe("completed");
   });
 
+  it("stores goal run handoff artifacts and traces", () => {
+    const store = createTestStore();
+    const run = store.createGoalRun({
+      source: "system",
+      objective: "build product landing page"
+    });
+
+    const handoff = store.appendGoalRunHandoffArtifact({
+      goalRunId: run.id,
+      stage: "execute",
+      taskId: "task_1",
+      taskTraceId: "task_1",
+      summary: "execution completed",
+      artifacts: ["apps/control-center/public/index.html"],
+      decisions: ["completed:frontend"],
+      unresolvedQuestions: [],
+      nextActions: ["verify the deliverable"],
+      approvalNeeds: []
+    });
+
+    const trace = store.appendGoalRunTrace({
+      goalRunId: run.id,
+      stage: "execute",
+      status: "completed",
+      taskId: "task_1",
+      taskTraceId: "task_1",
+      inputSummary: "objective=build product landing page",
+      outputSummary: "execution completed",
+      artifactFiles: ["apps/control-center/public/index.html"],
+      completedRoles: ["frontend"],
+      failedRoles: [],
+      approvalGateHits: 0,
+      handoffArtifactId: handoff.id,
+      metadata: {
+        collaborationEnabled: false
+      }
+    });
+
+    expect(trace.stage).toBe("execute");
+    expect(trace.handoffArtifactId).toBe(handoff.id);
+    expect(store.listGoalRunTraces(run.id, 10)).toHaveLength(1);
+    expect(store.getLatestGoalRunHandoff(run.id)?.id).toBe(handoff.id);
+    expect(store.listGoalRunHandoffArtifacts(run.id, 10)[0]?.artifact.summary).toBe("execution completed");
+  });
+
+  it("filters goal run handoff artifacts by stage", () => {
+    const store = createTestStore();
+    const run = store.createGoalRun({
+      source: "system",
+      objective: "build and deploy landing page"
+    });
+
+    store.appendGoalRunHandoffArtifact({
+      goalRunId: run.id,
+      stage: "execute",
+      summary: "execution completed",
+      nextActions: ["verify deliverable"]
+    });
+    const deployHandoff = store.appendGoalRunHandoffArtifact({
+      goalRunId: run.id,
+      stage: "deploy",
+      summary: "deployment preflight passed",
+      nextActions: ["accept release"]
+    });
+
+    const deployOnly = store.listGoalRunHandoffArtifacts(run.id, 10, "deploy");
+    expect(deployOnly).toHaveLength(1);
+    expect(deployOnly[0]?.id).toBe(deployHandoff.id);
+    expect(store.getLatestGoalRunHandoff(run.id, "deploy")?.id).toBe(deployHandoff.id);
+  });
+
   it("cancels in-flight goal-run tasks and descendants when goal run is cancelled", () => {
     const store = createTestStore();
     const run = store.createGoalRun({
@@ -286,6 +392,42 @@ describe("VinkoStore operator actions", () => {
     const defaults = store.listRoutingTemplates();
     expect(defaults.length).toBeGreaterThan(0);
     expect(defaults.some((template) => template.id === "tpl-opc-internet-launch")).toBe(true);
+    expect(defaults.some((template) => template.id === "tpl-founder-delivery-loop")).toBe(true);
+    expect(defaults.some((template) => template.id === "tpl-founder-prd")).toBe(true);
+    expect(defaults.some((template) => template.id === "tpl-founder-research-report")).toBe(true);
+    expect(defaults.some((template) => template.id === "tpl-founder-weekly-recap")).toBe(true);
+    expect(defaults.some((template) => template.id === "tpl-founder-ops-followup")).toBe(true);
+    expect(defaults.some((template) => template.id === "tpl-founder-implementation-task")).toBe(true);
+    expect(defaults.some((template) => template.id === "tpl-skill-runtime-integration")).toBe(true);
+    expect(defaults.some((template) => template.id === "tpl-skill-smoke-verify")).toBe(true);
+    expect(defaults.find((template) => template.id === "tpl-founder-prd")?.tasks[0]?.deliverableMode).toBe(
+      "artifact_required"
+    );
+    expect(defaults.find((template) => template.id === "tpl-founder-delivery-loop")?.tasks[0]?.deliverableMode).toBe(
+      "artifact_required"
+    );
+    expect(defaults.find((template) => template.id === "tpl-skill-runtime-integration")?.tasks[0]?.deliverableSections).toEqual([
+      "接入方案",
+      "技能定义",
+      "代码改动",
+      "安装验证",
+      "剩余限制"
+    ]);
+    expect(defaults.find((template) => template.id === "tpl-skill-smoke-verify")?.tasks[0]?.deliverableSections).toEqual([
+      "验证任务",
+      "执行结果",
+      "Skill 使用证据",
+      "结论"
+    ]);
+    expect(defaults.find((template) => template.id === "tpl-founder-prd")?.tasks[0]?.deliverableSections).toEqual([
+      "背景",
+      "目标用户",
+      "核心流程",
+      "需求范围",
+      "验收标准",
+      "风险",
+      "下一步"
+    ]);
 
     const created = store.createRoutingTemplate({
       name: "QA smoke template",
@@ -294,12 +436,16 @@ describe("VinkoStore operator actions", () => {
         {
           roleId: "qa",
           titleTemplate: "QA smoke: {{input_short}}",
-          instructionTemplate: "执行冒烟测试：{{input}}"
+          instructionTemplate: "执行冒烟测试：{{input}}",
+          deliverableMode: "artifact_preferred",
+          deliverableSections: ["测试范围", "执行结果"]
         }
       ]
     });
     expect(created.id).toBeTruthy();
     expect(store.getRoutingTemplate(created.id)?.name).toBe("QA smoke template");
+    expect(store.getRoutingTemplate(created.id)?.tasks[0]?.deliverableMode).toBe("artifact_preferred");
+    expect(store.getRoutingTemplate(created.id)?.tasks[0]?.deliverableSections).toEqual(["测试范围", "执行结果"]);
 
     const updated = store.updateRoutingTemplate(created.id, {
       name: "QA smoke template v2",
@@ -311,6 +457,13 @@ describe("VinkoStore operator actions", () => {
     const deleted = store.deleteRoutingTemplate(created.id);
     expect(deleted).toBe(true);
     expect(store.getRoutingTemplate(created.id)).toBeUndefined();
+  });
+
+  it("uses external API backends as the default runtime routing config", () => {
+    const store = createTestStore();
+    const config = store.getRuntimeConfig();
+    expect(config.routing.primaryBackend).toBe("openai");
+    expect(config.routing.fallbackBackend).toBe("zhipu");
   });
 
   it("supports routing template import and queue metrics snapshot", () => {
@@ -512,6 +665,30 @@ describe("VinkoStore operator actions", () => {
     expect(completed?.outputText).toBe("done");
   });
 
+  it("cancels paused_input tasks and clears pending input", () => {
+    const store = createTestStore();
+    const task = store.createTask({
+      source: "system",
+      roleId: "backend",
+      title: "need more info",
+      instruction: "请补充技术方案"
+    });
+
+    expect(store.claimNextQueuedTask()?.id).toBe(task.id);
+    const paused = store.pauseTask(task.id, {
+      question: "请确认技术栈",
+      context: "缺少实现约束"
+    });
+    expect(paused?.status).toBe("paused_input");
+    expect(paused?.pendingInput?.question).toBe("请确认技术栈");
+
+    const cancelled = store.cancelTask(task.id, "manual cleanup");
+    expect(cancelled?.status).toBe("cancelled");
+    expect(cancelled?.pendingInput).toBeUndefined();
+    expect(cancelled?.errorText).toBe("manual cleanup");
+    expect(cancelled?.completedAt).toBeTruthy();
+  });
+
   it("applies tool provider config action and stores runtime secret", () => {
     const store = createTestStore();
     const action = store.createOperatorAction({
@@ -661,6 +838,39 @@ describe("VinkoStore operator actions", () => {
     expect(messages.length).toBe(2);
     expect(messages[0]?.content).toBe("你好");
     expect(messages[1]?.content).toBe("已创建任务");
+  });
+
+  it("updates session project memory dynamically", () => {
+    const store = createTestStore();
+    const session = store.ensureSession({
+      source: "control-center",
+      sourceKey: "owner",
+      title: "owner session"
+    });
+
+    store.updateSessionProjectMemory(session.id, {
+      currentGoal: "Build founder console",
+      currentStage: "task_queued",
+      latestUserRequest: "做一个 CEO 面板",
+      nextActions: ["等待 frontend 输出页面方案"],
+      updatedBy: "owner"
+    });
+    store.updateSessionProjectMemory(session.id, {
+      currentStage: "artifact_delivered",
+      latestSummary: "前端页面和任务详情面板已交付",
+      latestArtifacts: ["apps/control-center/public/app.js"],
+      unresolvedQuestions: [],
+      updatedBy: "frontend"
+    });
+
+    const updated = store.getSession(session.id);
+    const memory = updated?.metadata.projectMemory as Record<string, unknown>;
+    expect(memory.currentGoal).toBe("Build founder console");
+    expect(memory.currentStage).toBe("artifact_delivered");
+    expect(memory.latestSummary).toBe("前端页面和任务详情面板已交付");
+    expect(memory.latestArtifacts).toEqual(["apps/control-center/public/app.js"]);
+    expect(memory.unresolvedQuestions).toEqual([]);
+    expect(memory.updatedBy).toBe("frontend");
   });
 
   it("stores task relations and returns children", () => {
