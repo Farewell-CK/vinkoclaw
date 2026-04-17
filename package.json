@@ -42,6 +42,7 @@
     "harness:collaboration": "node ./scripts/harness-runner.mjs collaboration",
     "harness:skill-lifecycle": "node ./scripts/harness-runner.mjs skill-lifecycle",
     "harness:all": "node ./scripts/harness-runner.mjs all",
+    "release:report": "node ./scripts/generate-release-report.mjs",
     "reset:runtime:drain": "node ./scripts/reset-runtime-state.mjs drain",
     "reset:runtime:wipe": "node ./scripts/reset-runtime-state.mjs wipe-runtime",
     "reset:runtime:rebuild-db": "node ./scripts/reset-runtime-state.mjs rebuild-db",

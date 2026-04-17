@@ -31,6 +31,8 @@ Development, bootstrap, and deployment scripts live here.
   - `stateCompleteness=false` now fails the suite grade and marks `failedInvariant=orchestration_state_complete`.
   - `HARNESS_SUITE_BUDGET_MS`: optional per-run budget override.
   - `HARNESS_KILL_ON_TIMEOUT=1` with `HARNESS_HARD_TIMEOUT_MS=<ms>`: optional hard-kill mode for explicit fail-fast debugging only.
+- `generate-release-report.mjs`: generate a Markdown release test report from current harness latest results.
+  - `npm run release:report`: writes `docs/04-delivery/test-report-YYYY-MM-DD-harness-baseline.md`.
 - `reset-runtime-state.mjs`: runtime cleanup / reset utility with three levels.
   - `npm run reset:runtime:drain`: online cleanup, cancels active tasks / goal runs / pending approvals and waits for queue to settle.
     - 现在会把 `paused_input` 任务也作为“未收干净的运行态”一起取消和收敛，避免 drain 假成功。
