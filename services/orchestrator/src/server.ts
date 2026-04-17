@@ -1,13 +1,20 @@
 import express from "express";
 import nodemailer from "nodemailer";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   createLogger,
   createRuntimeValueResolver,
+  buildWorkflowStatusSummary,
   getEmojiSelector,
   listRoles,
   listSkills,
+  searchMarketplaceSkills,
+  createOrchestrationState,
+  getMarketplaceSkillDetail,
+  getMarketplaceRecommendation,
+  getSkillDefinition,
   listToolProviderStatuses,
   loadEnv,
   renderPrometheusMetrics,
@@ -52,6 +59,9 @@ import {
   FeishuClient,
   FeishuWebSocketMonitor,
   parseFeishuEvent,
+  buildNeedsClarificationCard,
+  buildTaskQueuedCard,
+  buildApprovalResultCard,
   type FeishuConnectionMode,
   type FeishuCardActionEvent,
   type FeishuMessageEvent
@@ -60,6 +70,12 @@ import { registerTaskRoutes } from "./routes/tasks.js";
 import { registerApprovalRoutes } from "./routes/approvals.js";
 import { registerGoalRunRoutes } from "./routes/goal-runs.js";
 import { registerSelfCheckRoutes } from "./routes/self-check.js";
+import { registerAuthRoutes } from "./routes/auth.js";
+import { registerSystemRoutes } from "./routes/system.js";
+import { registerConfigRoutes } from "./routes/config.js";
+import { registerPluginRoutes } from "./routes/plugins.js";
+import { registerRoutingTemplateRoutes } from "./routes/routing-templates.js";
+import { registerSkillsMarketplaceRoutes } from "./routes/skills-marketplace.js";
 import { summarizeLatencyMetrics } from "./routes/response-utils.js";
 import {
   buildSmalltalkReply,
@@ -70,8 +86,27 @@ import {
   isSmalltalkMessage
 } from "./inbound-policy.js";
 import { shouldRouteToGoalRun } from "./goal-run-routing.js";
-import { classifyInboundIntent } from "./intent-classifier.js";
+import { initGlobalTelemetry } from "@vinko/agent-runtime";
+import { resolveDataPath } from "@vinko/shared";
+import {
+  formatSkillSearchResultsMessage,
+  isExactMarketplaceSkillMatch,
+  parseSkillInstallIntent,
+  parseSkillSearchIntent
+} from "./skills-marketplace-flow.js";
+import {
+  analyzeIntakeClarity,
+  isObviouslyClear,
+  mergeClarificationResponse,
+  formatClarificationMessage
+} from "./intake-analyzer.js";
+import { classifyInboundIntent, analyzeCollaborationNeed } from "./intent-classifier.js";
 import { selectRoleFromText } from "./role-selection.js";
+import {
+  formatAwaitingCollaborationMessage,
+  resolveAwaitingCollaborationTaskForInbound,
+  resumeAwaitingCollaborationTask
+} from "./inbound-collaboration.js";
 import {
   ExpiringTokenDeduper,
   parseFeishuCardDecisionPayload,
@@ -80,6 +115,8 @@ import {
 
 const env = loadEnv();
 const store = VinkoStore.fromEnv(env);
+const telemetryDb = resolveDataPath(env, "telemetry.db");
+initGlobalTelemetry(telemetryDb);
 const logger = createLogger("orchestrator");
 const runtimeValues = createRuntimeValueResolver({
   env,
@@ -89,6 +126,7 @@ const runtimeValues = createRuntimeValueResolver({
 const app = express();
 const controlCenterRoot = path.resolve(fileURLToPath(new URL("../../../apps/control-center/public", import.meta.url)));
 const productSelfcheckDir = path.resolve(fileURLToPath(new URL("../../../.run/product-selfcheck", import.meta.url)));
+const harnessReportDir = path.resolve(fileURLToPath(new URL("../../../.run/harness", import.meta.url)));
 const productSelfcheckLatestFile = path.join(productSelfcheckDir, "latest.json");
 const productSelfcheckHistoryFile = path.join(productSelfcheckDir, "history.jsonl");
 const productSelfcheckWatcherPidFile = path.join(productSelfcheckDir, "watch.pid");
@@ -898,6 +936,15 @@ function buildSystemHealthReport(): Record<string, unknown> {
     const updatedMs = parseIsoMs(approval.updatedAt);
     return updatedMs !== undefined && nowMs - updatedMs >= pendingApprovalStaleThresholdMs;
   });
+  const pausedInputTasks = store.listTasks(2000).filter((task) => task.status === "paused_input");
+  const stalePausedInputTasks = pausedInputTasks.filter((task) => {
+    const updatedMs = parseIsoMs(task.updatedAt);
+    return updatedMs !== undefined && nowMs - updatedMs >= taskStaleThresholdMs;
+  });
+  const queueBacklogWithoutRunningWorkers =
+    queueMetrics.queuedCount > 0 &&
+    getStatusCount(statusCounts.tasks, "running") === 0 &&
+    getStatusCount(statusCounts.goalRuns, "running") === 0;
 
   const alerts: Array<{
     level: "critical" | "warning";
@@ -934,6 +981,23 @@ function buildSystemHealthReport(): Record<string, unknown> {
       sampleIds: stalePendingApprovals.slice(0, 5).map((item) => item.id)
     });
   }
+  if (stalePausedInputTasks.length > 0) {
+    alerts.push({
+      level: "warning",
+      code: "stale_paused_input_tasks",
+      message: `存在长时间停留在等待补充输入的任务（阈值 ${taskStaleThresholdMinutes} 分钟）`,
+      count: stalePausedInputTasks.length,
+      sampleIds: stalePausedInputTasks.slice(0, 5).map((task) => task.id)
+    });
+  }
+  if (queueBacklogWithoutRunningWorkers) {
+    alerts.push({
+      level: queueMetrics.oldestQueuedWaitMs >= runtimeConfig.queue.sla.criticalWaitMs ? "critical" : "warning",
+      code: "queued_without_runner_progress",
+      message: "存在排队任务，但当前没有 running task/goal run，疑似 task-runner 不消费队列",
+      count: queueMetrics.queuedCount
+    });
+  }
   if (!channels.feishu.configured && runtimeConfig.channels.feishuEnabled) {
     alerts.push({
       level: "warning",
@@ -962,6 +1026,37 @@ function buildSystemHealthReport(): Record<string, unknown> {
 
   const criticalCount = alerts.filter((item) => item.level === "critical").length;
   const warningCount = alerts.filter((item) => item.level === "warning").length;
+  const recommendedResetMode = (() => {
+    if (providers.filter((provider) => provider.available).length === 0) {
+      return "investigate_providers";
+    }
+    if (criticalCount > 0 && queueBacklogWithoutRunningWorkers && staleRunningTasks.length > 0) {
+      return "factory-reset";
+    }
+    if (staleRunningTasks.length > 0 || staleRunningGoalRuns.length > 0 || stalePendingApprovals.length > 0 || stalePausedInputTasks.length > 0) {
+      return "drain";
+    }
+    if (queueBacklogWithoutRunningWorkers) {
+      return "drain";
+    }
+    return "none";
+  })();
+  const recoveryActions =
+    recommendedResetMode === "factory-reset"
+      ? [
+          "执行 `npm run reset:runtime:factory-reset`，终止检查/服务进程并重建 runtime 数据库",
+          "重启 orchestrator 与 task-runner，再重新执行 harness 自检"
+        ]
+      : recommendedResetMode === "drain"
+        ? [
+            "执行 `npm run reset:runtime:drain -- --kill-check-processes`，清理卡住的 tasks / goal runs / approvals / paused_input",
+            "确认 task-runner 重新启动后队列持续下降"
+          ]
+        : recommendedResetMode === "investigate_providers"
+          ? [
+              "先修复工具执行 Provider 或模型后端可用性，再决定是否需要 reset runtime"
+            ]
+          : [];
 
   return {
     ok: criticalCount === 0,
@@ -976,8 +1071,10 @@ function buildSystemHealthReport(): Record<string, unknown> {
       queuedTasks: getStatusCount(statusCounts.tasks, "queued"),
       runningTasks: getStatusCount(statusCounts.tasks, "running"),
       waitingApprovalTasks: getStatusCount(statusCounts.tasks, "waiting_approval"),
+      pausedInputTasks: pausedInputTasks.length,
       queuedGoalRuns: getStatusCount(statusCounts.goalRuns, "queued"),
-      runningGoalRuns: getStatusCount(statusCounts.goalRuns, "running")
+      runningGoalRuns: getStatusCount(statusCounts.goalRuns, "running"),
+      queueBacklogWithoutRunningWorkers
     },
     thresholds: {
       taskStaleMinutes: taskStaleThresholdMinutes,
@@ -988,6 +1085,10 @@ function buildSystemHealthReport(): Record<string, unknown> {
     },
     channels,
     toolProviders: providers,
+    recovery: {
+      recommendedResetMode,
+      actions: recoveryActions
+    },
     alerts
   };
 }
@@ -1091,11 +1192,11 @@ function resolveWorkflowLevelsForApproval(approval: {
   if (approval.kind === "task_execution") {
     const riskLevel = typeof approval.payload.riskLevel === "string" ? approval.payload.riskLevel : "";
     if (riskLevel === "high") {
-      return ["cto", "ceo"];
+      return ["cto"];  // User (CEO) handles final approval via the UI/Feishu
     }
     return ["cto"];
   }
-  return ["ceo"];
+  return ["cto"];
 }
 
 function ensureApprovalWorkflowForRecord(approvalId: string) {
@@ -1164,6 +1265,60 @@ async function applyApprovalDecisionEffects(approval: ReturnType<typeof store.ge
 
 function shorten(value: string, length = 48): string {
   return value.length <= length ? value : `${value.slice(0, length - 1)}...`;
+}
+
+function updateSessionProjectMemoryFromInbound(input: {
+  sessionId?: string | undefined;
+  requesterName?: string | undefined;
+  requestedBy?: string | undefined;
+  source: CreateTaskInput["source"];
+  inboundText: string;
+  taskText: string;
+  stage: string;
+  unresolvedQuestions?: string[] | undefined;
+  nextActions?: string[] | undefined;
+}): void {
+  if (!input.sessionId) {
+    return;
+  }
+  const normalizedTaskText = input.taskText.replace(/\s+/g, " ").trim();
+  const shouldPromoteGoal =
+    normalizedTaskText.length >= 8 ||
+    /(?:帮我|请|做|写|实现|开发|构建|创建|生成|调研|分析|规划|build|create|implement|develop|research|plan)/i.test(
+      normalizedTaskText
+    );
+  store.updateSessionProjectMemory(
+    input.sessionId,
+    {
+      ...(shouldPromoteGoal ? { currentGoal: shorten(normalizedTaskText, 160) } : {}),
+      currentStage: input.stage,
+      latestUserRequest: input.inboundText.trim(),
+      ...(input.unresolvedQuestions !== undefined ? { unresolvedQuestions: input.unresolvedQuestions } : {}),
+      ...(input.nextActions !== undefined ? { nextActions: input.nextActions } : {}),
+      updatedBy: input.requesterName?.trim() || input.requestedBy?.trim() || input.source
+    },
+    {
+      lastInboundSource: input.source,
+      lastRequesterName: input.requesterName?.trim() ?? "",
+      lastRequestedBy: input.requestedBy?.trim() ?? ""
+    }
+  );
+}
+
+function parseSkillSelectionReply(
+  text: string
+): { selection: number; roleId?: RoleId | undefined } | undefined {
+  const normalized = text.trim();
+  const match = normalized.match(/^([1-9]\d?)(?:\s+([a-zA-Z_-]+))?$/);
+  if (!match) {
+    return undefined;
+  }
+  const selection = Number(match[1]);
+  if (!Number.isFinite(selection) || selection <= 0) {
+    return undefined;
+  }
+  const roleId = match[2] ? resolveRoleId(match[2]) : undefined;
+  return { selection, roleId };
 }
 
 function normalizeKeywords(values: string[]): string[] {
@@ -1311,6 +1466,141 @@ function createTask(input: {
   });
 }
 
+function createSkillRuntimeIntegrationTask(input: {
+  sessionId?: string | undefined;
+  source: CreateTaskInput["source"];
+  requestedBy?: string | undefined;
+  chatId?: string | undefined;
+  targetRoleId?: RoleId | undefined;
+  skill: {
+    skillId: string;
+    name: string;
+    summary: string;
+    description?: string | undefined;
+    source?: string | undefined;
+    sourceLabel?: string | undefined;
+    sourceUrl?: string | undefined;
+    version?: string | undefined;
+    allowedRoles?: RoleId[] | undefined;
+  };
+}): ReturnType<typeof store.createTask> {
+  const targetRole = input.targetRoleId ? formatRoleLabel(input.targetRoleId) : "目标角色";
+  const sourceLabel = input.skill.sourceLabel || input.skill.source || "remote registry";
+  const versionLabel = input.skill.version ? `版本：${input.skill.version}` : "版本：未声明";
+  const allowedRolesLabel =
+    Array.isArray(input.skill.allowedRoles) && input.skill.allowedRoles.length > 0
+      ? input.skill.allowedRoles.join(", ")
+      : "未声明";
+  const sourceUrlLine = input.skill.sourceUrl ? `来源地址：${input.skill.sourceUrl}` : "来源地址：未提供";
+  const originalInfo = [
+    `skillId：${input.skill.skillId}`,
+    `技能名称：${input.skill.name}`,
+    versionLabel,
+    `来源：${sourceLabel}`,
+    sourceUrlLine,
+    `适用角色：${allowedRolesLabel}`,
+    `目标安装角色：${targetRole}`,
+    `摘要：${input.skill.summary}`,
+    input.skill.description ? `详细说明：${input.skill.description}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const template = store.getRoutingTemplate("tpl-skill-runtime-integration");
+  const templateTask = template?.tasks.find((entry) => entry.roleId === "engineering");
+  const title = templateTask
+    ? renderTemplate(templateTask.titleTemplate, `${input.skill.name} ${input.skill.skillId}`)
+    : `接入 Skill Runtime: ${input.skill.name}`;
+  const instruction = templateTask
+    ? renderTemplate(templateTask.instructionTemplate, originalInfo)
+    : [
+        `请将 marketplace 中发现的 skill 接入本地运行时，并确保后续可以直接安装到 ${targetRole}。`,
+        "",
+        originalInfo
+      ].join("\n");
+  return createTask({
+    sessionId: input.sessionId,
+    source: input.source,
+    requestedBy: input.requestedBy,
+    chatId: input.chatId,
+    roleId: "engineering",
+    priority: templateTask?.priority ?? 91,
+    title,
+    instruction,
+    metadata: {
+      ...(template ? { routeTemplateId: template.id, routeTemplateName: template.name } : {}),
+      ...(templateTask?.deliverableMode ? { deliverableMode: templateTask.deliverableMode } : { deliverableMode: "artifact_required" }),
+      ...(Array.isArray(templateTask?.deliverableSections) && templateTask.deliverableSections.length > 0
+        ? { deliverableSections: templateTask.deliverableSections }
+        : { deliverableSections: ["接入方案", "技能定义", "代码改动", "安装验证", "剩余限制"] }),
+      requestedSkillId: input.skill.skillId,
+      requestedSkillName: input.skill.name,
+      requestedSkillSource: input.skill.source ?? "remote",
+      requestedSkillSourceLabel: sourceLabel,
+      requestedSkillSourceUrl: input.skill.sourceUrl ?? "",
+      requestedSkillVersion: input.skill.version ?? "",
+      requestedSkillTargetRoleId: input.targetRoleId ?? ""
+    }
+  });
+}
+
+function createSkillSmokeVerifyTask(input: {
+  sessionId?: string | undefined;
+  source: CreateTaskInput["source"];
+  requestedBy?: string | undefined;
+  chatId?: string | undefined;
+  targetRoleId: RoleId;
+  skill: {
+    skillId: string;
+    name: string;
+    source?: string | undefined;
+    sourceLabel?: string | undefined;
+    sourceUrl?: string | undefined;
+    version?: string | undefined;
+  };
+}): ReturnType<typeof store.createTask> {
+  const sourceLabel = input.skill.sourceLabel || input.skill.source || "marketplace";
+  const originalInfo = [
+    `skillId：${input.skill.skillId}`,
+    `技能名称：${input.skill.name}`,
+    input.skill.version ? `版本：${input.skill.version}` : "",
+    `来源：${sourceLabel}`,
+    input.skill.sourceUrl ? `来源地址：${input.skill.sourceUrl}` : "",
+    `目标角色：${formatRoleLabel(input.targetRoleId)}`
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const template = store.getRoutingTemplate("tpl-skill-smoke-verify");
+  const templateTask = template?.tasks[0];
+  const title = templateTask
+    ? renderTemplate(templateTask.titleTemplate, `${input.skill.name} ${input.skill.skillId}`)
+    : `验证 Skill: ${input.skill.name}`;
+  const instruction = templateTask
+    ? renderTemplate(templateTask.instructionTemplate, originalInfo)
+    : `请使用已安装的 skill 做一个最小验证，并说明 skill 如何影响输出。\n\n${originalInfo}`;
+  return createTask({
+    sessionId: input.sessionId,
+    source: input.source,
+    requestedBy: input.requestedBy,
+    chatId: input.chatId,
+    roleId: input.targetRoleId,
+    priority: templateTask?.priority ?? 84,
+    title,
+    instruction,
+    metadata: {
+      ...(template ? { routeTemplateId: template.id, routeTemplateName: template.name } : {}),
+      ...(templateTask?.deliverableMode ? { deliverableMode: templateTask.deliverableMode } : { deliverableMode: "artifact_preferred" }),
+      ...(Array.isArray(templateTask?.deliverableSections) && templateTask.deliverableSections.length > 0
+        ? { deliverableSections: templateTask.deliverableSections }
+        : { deliverableSections: ["验证任务", "执行结果", "Skill 使用证据", "结论"] }),
+      verifyInstalledSkillId: input.skill.skillId,
+      verifyInstalledSkillName: input.skill.name,
+      verifyInstalledSkillSourceLabel: sourceLabel,
+      verifyInstalledSkillSourceUrl: input.skill.sourceUrl ?? "",
+      verifyInstalledSkillVersion: input.skill.version ?? ""
+    }
+  });
+}
+
 function createTemplateTasks(input: {
   sessionId?: string | undefined;
   template: RoutingTemplate;
@@ -1337,6 +1627,10 @@ function createTemplateTasks(input: {
       metadata: {
         ...attachmentsMetadata,
         ...(input.requesterName ? { requesterName: input.requesterName } : {}),
+        ...(taskTemplate.deliverableMode ? { deliverableMode: taskTemplate.deliverableMode } : {}),
+        ...(Array.isArray(taskTemplate.deliverableSections) && taskTemplate.deliverableSections.length > 0
+          ? { deliverableSections: taskTemplate.deliverableSections }
+          : {}),
         routeTemplateId: input.template.id,
         routeTemplateName: input.template.name,
         routeTaskIndex: index + 1,
@@ -1345,6 +1639,69 @@ function createTemplateTasks(input: {
       }
     })
   );
+}
+
+function createFounderDeliveryWorkflow(input: {
+  sessionId?: string | undefined;
+  template: RoutingTemplate;
+  text: string;
+  source: CreateTaskInput["source"];
+  requestedBy?: string | undefined;
+  requesterName?: string | undefined;
+  chatId?: string | undefined;
+  attachments?: TaskAttachment[] | undefined;
+}): ReturnType<typeof store.createTask>[] {
+  const prdTaskTemplate = input.template.tasks[0];
+  if (!prdTaskTemplate) {
+    return [];
+  }
+  const workflowId = randomUUID();
+  const attachmentsMetadata = input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {};
+  const task = createTask({
+    title: renderTemplate(prdTaskTemplate.titleTemplate, input.text),
+    instruction: renderTemplate(prdTaskTemplate.instructionTemplate, input.text),
+    sessionId: input.sessionId,
+    source: input.source,
+    priority: prdTaskTemplate.priority,
+    requestedBy: input.requestedBy,
+    chatId: input.chatId,
+    roleId: prdTaskTemplate.roleId,
+    metadata: {
+      ...attachmentsMetadata,
+      ...(input.requesterName ? { requesterName: input.requesterName } : {}),
+      ...(prdTaskTemplate.deliverableMode ? { deliverableMode: prdTaskTemplate.deliverableMode } : {}),
+      ...(Array.isArray(prdTaskTemplate.deliverableSections) && prdTaskTemplate.deliverableSections.length > 0
+        ? { deliverableSections: prdTaskTemplate.deliverableSections }
+        : {}),
+      routeTemplateId: input.template.id,
+      routeTemplateName: input.template.name,
+      routeTaskIndex: 1,
+      routeTaskTotal: 4,
+      originalInstruction: input.text,
+      founderWorkflowKind: "founder_delivery",
+      founderWorkflowId: workflowId,
+      founderWorkflowStage: "prd",
+      founderWorkflowStepIndex: 1,
+      founderWorkflowStepTotal: 4,
+      founderWorkflowOriginalInstruction: input.text,
+      orchestrationMode: "main_agent",
+      orchestrationState: createOrchestrationState({
+        ownerRoleId: prdTaskTemplate.roleId,
+        goal: input.text,
+        stage: "spec",
+        successCriteria: [
+          "产出结构化需求与验收标准",
+          "生成可见 artifact",
+          "为实现与验证阶段提供明确输入"
+        ],
+        constraints: ["用户作为 CEO，不引入 AI CEO 默认接力", "所有后续阶段必须回流到主流程状态"],
+        scope: ["spec", "implementation", "verification", "delivery_recap"],
+        nextActions: ["完成 spec 并决定是否需要并行执行"],
+        updatedBy: String(prdTaskTemplate.roleId)
+      })
+    }
+  });
+  return [task];
 }
 
 function buildAutoSplitSpecs(task: TaskRecord, maxTasks = 6): Array<{
@@ -1390,7 +1747,7 @@ function buildAutoSplitSpecs(task: TaskRecord, maxTasks = 6): Array<{
       priority: 90
     },
     {
-      roleId: "ceo",
+      roleId: "operations",
       title: `结果汇总: ${shorten(task.title, 40)}`,
       instruction:
         `请汇总各子任务输出，形成最终可执行结论与风险清单，原始任务：\n${task.instruction}`,
@@ -1529,6 +1886,35 @@ function formatTaskQueuedMessage(source: CreateTaskInput["source"], taskId: stri
   return `收到，我先让${FEISHU_ROLE_LABELS[roleId]}开工，关键进展会同步你。`;
 }
 
+function formatSkillIntegrationTaskQueuedMessage(input: {
+  source: CreateTaskInput["source"];
+  taskId: string;
+  skillName: string;
+}): string {
+  if (input.source === "feishu") {
+    return `这个 skill 还没接入本地运行时。我已经为工程助理创建接入任务（${input.taskId.slice(0, 8)}），完成后你就可以直接安装它。`;
+  }
+  return `已创建 skill 接入任务（${input.taskId.slice(0, 8)}）：${input.skillName}。工程助理会继续把它接到本地 runtime。`;
+}
+
+function appendSessionSkillEvent(input: {
+  sessionId?: string | undefined;
+  content: string;
+  metadata: Record<string, unknown>;
+}): void {
+  if (!input.sessionId) {
+    return;
+  }
+  store.appendSessionMessage({
+    sessionId: input.sessionId,
+    actorType: "system",
+    actorId: "orchestrator",
+    messageType: "event",
+    content: input.content,
+    metadata: input.metadata
+  });
+}
+
 function formatTemplateTasksQueuedMessage(
   source: CreateTaskInput["source"],
   templateName: string,
@@ -1538,6 +1924,13 @@ function formatTemplateTasksQueuedMessage(
     return `已按模板「${templateName}」创建 ${taskCount} 个并行任务，任务已入队。`;
   }
   return `已收到，已按模板「${templateName}」创建 ${taskCount} 个并行任务，完成后会继续回复你。`;
+}
+
+function formatFounderWorkflowQueuedMessage(source: CreateTaskInput["source"], templateName: string): string {
+  if (source === "feishu") {
+    return `收到，我会按「${templateName}」顺序推进：先产出 PRD，再接实现、验证和 recap，并持续同步进展。`;
+  }
+  return `已启动「${templateName}」：系统会按 PRD → 实现 → QA → Recap 顺序自动推进。`;
 }
 
 function formatGoalRunQueuedMessage(source: CreateTaskInput["source"], goalRunId: string): string {
@@ -2233,10 +2626,13 @@ function isDirectConversationTurn(text: string): boolean {
     "会做什么",
     "介绍一下你们团队",
     "介绍你们团队",
+    "团队都有谁",
+    "团队是谁",
     "团队有多少人",
     "为什么",
     "啥意思",
     "什么意思",
+    "你是个笨蛋",
     "你好笨",
     "太慢",
     "不理我",
@@ -2246,24 +2642,30 @@ function isDirectConversationTurn(text: string): boolean {
   if (conversationPatterns.some((keyword) => compact.includes(keyword))) {
     return true;
   }
-  if (normalized.length <= 14) {
-    return true;
-  }
-  return /[?？]$/.test(normalized) && normalized.length <= 40;
+  return /(?:你|团队|我们|为什么|怎么|啥|什么|在吗|介绍)[^。！？!?]{0,30}[?？]?$/.test(normalized) && normalized.length <= 24;
 }
 
 function buildDirectConversationReply(text: string): string {
   const compact = normalizeConversationCandidate(text).toLowerCase().replace(/\s+/g, "");
+  if (compact.includes("你是谁")) {
+    return "我是 VinkoClaw 的执行入口。你可以把我当成一个可调度多角色团队的总入口，能接任务、拆分角色、推进执行、同步进度。";
+  }
   if (compact.includes("你能做什么") || compact.includes("你可以做什么") || compact.includes("会做什么")) {
     return "我可以直接帮你推进真实工作：拆解需求、写代码、联调测试、配置工具、发审批并回报进度。你给一条明确目标，我就按同一工作流持续做完。";
   }
-  if (compact.includes("团队有多少人") || compact.includes("介绍你们团队")) {
+  if (
+    compact.includes("团队有多少人") ||
+    compact.includes("介绍你们团队") ||
+    compact.includes("介绍一下你们团队") ||
+    compact.includes("团队都有谁") ||
+    compact.includes("团队是谁")
+  ) {
     const defaults = store.getRuntimeConfig().collaboration.defaultParticipants;
-    const participants = defaults.length > 0 ? defaults : ["product", "uiux", "frontend", "backend", "qa", "ceo"];
+    const participants = defaults.length > 0 ? defaults : ["product", "uiux", "frontend", "backend", "qa"];
     return `当前默认协作角色有：${participants.map((roleId) => formatRoleLabel(roleId)).join("、")}。你给一条工作指令后，我会按团队协作方式推进并同步每个角色进展。`;
   }
-  if (compact.includes("你好笨") || compact.includes("太慢") || compact.includes("不理我")) {
-    return "收到这个反馈。接下来我会只回结论和行动，不展示内部分析，并优先复用同一条工作流减少等待。";
+  if (compact.includes("你是个笨蛋") || compact.includes("你好笨") || compact.includes("太慢") || compact.includes("不理我")) {
+    return "收到反馈。我不会和你抬杠，后面我会尽量少说空话，直接给结论、动作和结果。你要是愿意，可以直接给我一个具体任务试一下。";
   }
   if (compact.includes("在吗") || compact.includes("在不在")) {
     return "在的。你直接给目标，我会连续推进直到完成。";
@@ -2415,6 +2817,7 @@ async function handleInboundMessage(input: {
   | { type: "template_updated"; message: string; templateId: string; enabled: boolean }
   | { type: "template_not_found"; message: string; query: string }
   | { type: "smalltalk_replied"; message: string }
+  | { type: "needs_clarification"; message: string; questions: string[] }
   | { type: "config_input_required"; message: string; missingField: string; expectedCommand: string }
   | { type: "operator_action_pending"; message: string; approvalId: string }
   | { type: "operator_action_applied"; message: string; actionId: string }
@@ -2425,6 +2828,49 @@ async function handleInboundMessage(input: {
   const inboundText = input.text.trim();
   const taskText = (input.taskText ?? inboundText).trim() || inboundText;
   const requesterName = input.requesterName?.trim() ?? "";
+
+  // Fire collaboration analysis immediately (fire-and-forget, not blocking).
+  // The result will be used by whichever path actually creates a task.
+  const collaborationConfig = store.getRuntimeConfig().collaboration;
+  const collabStartTime = Date.now();
+  const collaborationPlanPromise = analyzeCollaborationNeed(inboundText, {
+    triggerKeywords: collaborationConfig.triggerKeywords
+  });
+  collaborationPlanPromise.then((plan) => {
+    logger.info("collaboration analysis completed", { elapsed: Date.now() - collabStartTime, plan });
+  }).catch((err) => {
+    logger.error("collaboration analysis failed", { elapsed: Date.now() - collabStartTime, error: (err as Error)?.message });
+  });
+
+  // Helper: apply collaboration plan to a just-created task (async, non-blocking).
+  // Call this right after createTask() in every path that creates a task.
+  const applyCollaborationPlanToTask = (
+    taskId: string,
+    planPromise: Promise<Awaited<ReturnType<typeof analyzeCollaborationNeed>>> = collaborationPlanPromise
+  ) => {
+    planPromise.then((plan) => {
+      logger.info("collaboration plan resolved", { taskId, plan });
+      const patch: Record<string, unknown> = { collaborationPlan: plan };
+      if (collaborationConfig.enabled && (plan.level === "light")) {
+        // Light collaboration: only set lightCollaboration flag, NOT collaborationMode.
+        // collaborationMode triggers the full collaboration flow in the worker,
+        // which we don't want for light collaboration tasks.
+        patch.lightCollaboration = true;
+        // If the task was not yet assigned to a specialist (ceo or undefined), assign to
+        // the domain specialist indicated by the plan's first suggested reviewer.
+        const task = store.getTask(taskId);
+        if (task && (task.roleId === "ceo" || task.roleId === undefined) && plan.suggestedReviewers.length > 0) {
+          const executionRole: string = plan.suggestedReviewers[0]!;
+          store.patchTaskRole(taskId, executionRole);
+        }
+      } else if (collaborationConfig.enabled && (plan.level === "standard" || plan.level === "full")) {
+        patch.collaborationMode = true;
+        patch.lightCollaboration = true;
+      }
+      store.patchTaskMetadata(taskId, patch);
+    }).catch(() => { /* ignore — keyword fallback will be used by worker */ });
+  };
+
   const sessionId = ensureInboundSession({
     source: input.source,
     requestedBy: input.requestedBy,
@@ -2445,12 +2891,22 @@ async function handleInboundMessage(input: {
         requesterName
       }
     });
+    updateSessionProjectMemoryFromInbound({
+      sessionId,
+      requesterName,
+      requestedBy: input.requestedBy,
+      source: input.source,
+      inboundText,
+      taskText,
+      stage: "intake"
+    });
   }
 
   type InboundResult =
     | { type: "template_updated"; message: string; templateId: string; enabled: boolean }
     | { type: "template_not_found"; message: string; query: string }
     | { type: "smalltalk_replied"; message: string }
+    | { type: "needs_clarification"; message: string; questions: string[] }
     | { type: "config_input_required"; message: string; missingField: string; expectedCommand: string }
     | { type: "operator_action_pending"; message: string; approvalId: string }
     | { type: "operator_action_applied"; message: string; actionId: string }
@@ -2474,6 +2930,208 @@ async function handleInboundMessage(input: {
     }
     return result;
   };
+
+  const session = sessionId ? store.getSession(sessionId) : undefined;
+  const pendingSkillSearch = (session?.metadata?.pendingSkillSearch ?? null) as
+    | {
+        query?: unknown;
+        targetRoleId?: unknown;
+        results?: unknown;
+        createdAt?: unknown;
+      }
+    | null;
+  const skillSelection = parseSkillSelectionReply(inboundText);
+  if (sessionId && pendingSkillSearch && skillSelection) {
+    const results = Array.isArray(pendingSkillSearch.results)
+      ? pendingSkillSearch.results
+          .filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+      : [];
+    const selected = results[skillSelection.selection - 1];
+    const skillId = typeof selected?.skillId === "string" ? selected.skillId : "";
+    const targetRoleId =
+      skillSelection.roleId ??
+      (typeof pendingSkillSearch.targetRoleId === "string" ? resolveRoleId(pendingSkillSearch.targetRoleId) : undefined);
+    if (skillId && targetRoleId) {
+      const definition = getSkillDefinition(skillId);
+      if (!definition) {
+        const integrationTask = createSkillRuntimeIntegrationTask({
+          sessionId,
+          source: input.source,
+          requestedBy: input.requestedBy,
+          chatId: input.chatId,
+          targetRoleId,
+          skill: {
+            skillId,
+            name: typeof selected?.name === "string" ? selected.name : skillId,
+            summary: typeof selected?.summary === "string" ? selected.summary : "",
+            source: typeof selected?.source === "string" ? selected.source : "remote",
+            sourceLabel: typeof selected?.sourceLabel === "string" ? selected.sourceLabel : "remote",
+            sourceUrl: typeof selected?.sourceUrl === "string" ? selected.sourceUrl : undefined,
+            version: typeof selected?.version === "string" ? selected.version : undefined,
+            allowedRoles: Array.isArray(selected?.allowedRoles)
+              ? selected.allowedRoles.filter((entry): entry is RoleId => typeof entry === "string")
+              : []
+          }
+        });
+        store.patchSessionMetadata(sessionId, {
+          pendingSkillSearch: null
+        });
+        updateSessionProjectMemoryFromInbound({
+          sessionId,
+          requesterName,
+          requestedBy: input.requestedBy,
+          source: input.source,
+          inboundText,
+          taskText: `接入 skill runtime: ${skillId}`,
+          stage: "skill_integration_queued",
+          nextActions: ["等待工程助理接入 skill runtime 并完成验证"]
+        });
+        appendSessionSkillEvent({
+          sessionId,
+          content: `已创建 skill 接入任务：${typeof selected?.name === "string" ? selected.name : skillId}`,
+          metadata: {
+            type: "skill_integration_queued",
+            taskId: integrationTask.id,
+            skillId,
+            targetRoleId,
+            source: typeof selected?.source === "string" ? selected.source : "remote",
+            sourceLabel: typeof selected?.sourceLabel === "string" ? selected.sourceLabel : "remote",
+            sourceUrl: typeof selected?.sourceUrl === "string" ? selected.sourceUrl : "",
+            version: typeof selected?.version === "string" ? selected.version : ""
+          }
+        });
+        return finalize({
+          type: "task_queued",
+          message: formatSkillIntegrationTaskQueuedMessage({
+            source: input.source,
+            taskId: integrationTask.id,
+            skillName: typeof selected?.name === "string" ? selected.name : skillId
+          }),
+          taskId: integrationTask.id
+        });
+      }
+      if (!definition.allowedRoles.includes(targetRoleId)) {
+        return finalize({
+          type: "config_input_required",
+          message: `${skillId} 不能安装到 ${targetRoleId}，请换一个角色。`,
+          missingField: "targetRoleId",
+          expectedCommand: `${skillSelection.selection} product`
+        });
+      }
+      store.setSkillBinding({
+        scope: "role",
+        scopeId: targetRoleId,
+        skillId,
+        status: "enabled",
+        verificationStatus: "unverified",
+        config: definition.defaultConfig,
+        installedBy: input.requestedBy,
+        source: typeof selected?.source === "string" ? selected.source : "marketplace",
+        sourceLabel: typeof selected?.sourceLabel === "string" ? selected.sourceLabel : "marketplace",
+        sourceUrl: typeof selected?.sourceUrl === "string" ? selected.sourceUrl : undefined,
+        version: typeof selected?.version === "string" ? selected.version : undefined
+      });
+      const verifyTask = createSkillSmokeVerifyTask({
+        sessionId,
+        source: input.source,
+        requestedBy: input.requestedBy,
+        chatId: input.chatId,
+        targetRoleId,
+        skill: {
+          skillId,
+          name: typeof selected?.name === "string" ? selected.name : skillId,
+          source: typeof selected?.source === "string" ? selected.source : "marketplace",
+          sourceLabel: typeof selected?.sourceLabel === "string" ? selected.sourceLabel : "marketplace",
+          sourceUrl: typeof selected?.sourceUrl === "string" ? selected.sourceUrl : undefined,
+          version: typeof selected?.version === "string" ? selected.version : undefined
+        }
+      });
+      updateSessionProjectMemoryFromInbound({
+        sessionId,
+        requesterName,
+        requestedBy: input.requestedBy,
+        source: input.source,
+        inboundText,
+        taskText: `安装 skill: ${skillId}`,
+        stage: "team_configured",
+        nextActions: [
+          `等待 ${targetRoleId} 执行 skill smoke verify`,
+          `查看验证任务 ${verifyTask.id.slice(0, 8)} 的结果`
+        ]
+      });
+      appendSessionSkillEvent({
+        sessionId,
+        content: `已安装 skill：${skillId} -> ${targetRoleId}`,
+        metadata: {
+          type: "skill_installed",
+          skillId,
+          targetRoleId,
+          source: typeof selected?.source === "string" ? selected.source : "marketplace",
+          sourceLabel: typeof selected?.sourceLabel === "string" ? selected.sourceLabel : "marketplace",
+          sourceUrl: typeof selected?.sourceUrl === "string" ? selected.sourceUrl : "",
+          version: typeof selected?.version === "string" ? selected.version : "",
+          verifyTaskId: verifyTask.id
+        }
+      });
+      store.patchSessionMetadata(sessionId, {
+        pendingSkillSearch: null
+      });
+      return finalize({
+        type: "operator_action_applied",
+        message: `已安装 skill：${skillId} -> ${targetRoleId}。我还创建了验证任务（${verifyTask.id.slice(0, 8)}），会检查这个 skill 是否真的生效。`,
+        actionId: `${targetRoleId}:${skillId}`
+      });
+    }
+    if (!targetRoleId) {
+      return finalize({
+        type: "config_input_required",
+        message: "还缺安装目标角色。请回复“编号 + 角色”，例如：1 product",
+        missingField: "targetRoleId",
+        expectedCommand: "1 product"
+      });
+    }
+  }
+
+  const skillSearchIntent = parseSkillSearchIntent(inboundText);
+  if (sessionId && skillSearchIntent) {
+    const results = await searchMarketplaceSkills({
+      query: skillSearchIntent.query,
+      limit: 5
+    });
+    store.patchSessionMetadata(sessionId, {
+      pendingSkillSearch: {
+        query: skillSearchIntent.query,
+        targetRoleId: skillSearchIntent.roleId ?? "",
+        results: results.map((entry) => ({
+          skillId: entry.skillId,
+          name: entry.name,
+          summary: entry.summary,
+          allowedRoles: entry.allowedRoles,
+          source: entry.source,
+          sourceLabel: entry.sourceLabel,
+          sourceUrl: entry.sourceUrl,
+          version: entry.version,
+          installState: entry.installState
+        })),
+        createdAt: new Date().toISOString()
+      }
+    });
+    return finalize({
+      type: "smalltalk_replied",
+      message: formatSkillSearchResultsMessage({
+        query: skillSearchIntent.query,
+        roleId: skillSearchIntent.roleId,
+        results: results.map((entry) => ({
+          skillId: entry.skillId,
+          name: entry.name,
+          summary: entry.summary,
+          allowedRoles: entry.allowedRoles,
+          version: entry.version,
+          installState: entry.installState
+        }))
+      })
+    });
+  }
 
   const templateToggle = parseTemplateToggleCommand(inboundText);
   if (templateToggle) {
@@ -2526,6 +3184,17 @@ async function handleInboundMessage(input: {
   }
 
   if (isTaskStatusQuery(inboundText)) {
+    const awaitingCollaboration = resolveAwaitingCollaborationTaskForInbound({
+      source: input.source,
+      requestedBy: input.requestedBy,
+      chatId: input.chatId
+    }, store.listTasks(500));
+    if (awaitingCollaboration) {
+      return finalize({
+        type: "smalltalk_replied",
+        message: formatAwaitingCollaborationMessage(awaitingCollaboration)
+      });
+    }
     const activeTask = resolveLatestActiveTaskForInbound({
       source: input.source,
       requestedBy: input.requestedBy,
@@ -2644,11 +3313,65 @@ async function handleInboundMessage(input: {
       });
     }
     if (isContinueSignal(inboundText)) {
+      updateSessionProjectMemoryFromInbound({
+        sessionId,
+        requesterName,
+        requestedBy: input.requestedBy,
+        source: input.source,
+        inboundText,
+        taskText,
+        stage: "goal_run_in_progress"
+      });
       return finalize({
         type: "smalltalk_replied",
         message: `${formatGoalRunStatusMessage(inFlightGoalRun)} 你无需重复下发，我会持续推进并在关键节点同步。`
       });
     }
+  }
+
+  const awaitingCollaboration = resolveAwaitingCollaborationTaskForInbound({
+    source: input.source,
+    requestedBy: input.requestedBy,
+    chatId: input.chatId
+  }, store.listTasks(500));
+  if (awaitingCollaboration) {
+    const resumedTask = resumeAwaitingCollaborationTask(store, {
+      task: awaitingCollaboration,
+      text: inboundText,
+      requesterName
+    });
+    updateSessionProjectMemoryFromInbound({
+      sessionId: resumedTask.sessionId,
+      requesterName,
+      requestedBy: input.requestedBy,
+      source: input.source,
+      inboundText,
+      taskText,
+      stage: "resuming_collaboration",
+      unresolvedQuestions: [],
+      nextActions: ["等待团队重新汇总并继续交付"]
+    });
+    if (resumedTask.sessionId) {
+      store.appendSessionMessage({
+        sessionId: resumedTask.sessionId,
+        actorType: "system",
+        actorId: "orchestrator",
+        messageType: "event",
+        content: `已续接协作任务：${resumedTask.title}`,
+        metadata: {
+          type: "collaboration_resumed",
+          taskId: resumedTask.id,
+          collaborationId:
+            typeof resumedTask.metadata?.collaborationId === "string" ? resumedTask.metadata.collaborationId : "",
+          source: input.source
+        }
+      });
+    }
+    return finalize({
+      type: "operator_action_applied",
+      message: `收到，我已把这次补充信息续接到原协作任务（${awaitingCollaboration.id.slice(0, 8)}），现在继续汇总并推进交付。`,
+      actionId: awaitingCollaboration.id
+    });
   }
 
   if (isDirectConversationTurn(inboundText)) {
@@ -2659,6 +3382,170 @@ async function handleInboundMessage(input: {
   }
 
   const parsedAction = parseOperatorActionFromText(inboundText, input.requestedBy);
+  const marketplaceInstallIntent = !parsedAction ? parseSkillInstallIntent(inboundText) : undefined;
+  if (!parsedAction && marketplaceInstallIntent) {
+    const results = await searchMarketplaceSkills({
+      query: marketplaceInstallIntent.query,
+      limit: 5
+    });
+    if (results.length === 0) {
+      return finalize({
+        type: "config_input_required",
+        message: `没有找到和「${marketplaceInstallIntent.query}」相关的 skill。你可以换个关键词，或者先搜索 skill 再确认安装。`,
+        missingField: "skillId",
+        expectedCommand: `搜索 ${marketplaceInstallIntent.query} skill`
+      });
+    }
+
+    const exactMatch = results.find((entry) => isExactMarketplaceSkillMatch(entry, marketplaceInstallIntent.query));
+    const selected = exactMatch ?? (results.length === 1 ? results[0] : undefined);
+    if (!selected) {
+      if (sessionId) {
+        store.patchSessionMetadata(sessionId, {
+          pendingSkillSearch: {
+            query: marketplaceInstallIntent.query,
+            targetRoleId: marketplaceInstallIntent.roleId,
+            results: results.map((entry) => ({
+              skillId: entry.skillId,
+              name: entry.name,
+              summary: entry.summary,
+              allowedRoles: entry.allowedRoles,
+              aliases: entry.aliases,
+              source: entry.source,
+              sourceLabel: entry.sourceLabel,
+              sourceUrl: entry.sourceUrl,
+              version: entry.version,
+              installState: entry.installState
+            })),
+            createdAt: new Date().toISOString()
+          }
+        });
+      }
+      return finalize({
+        type: "smalltalk_replied",
+        message: formatSkillSearchResultsMessage({
+          query: marketplaceInstallIntent.query,
+          roleId: marketplaceInstallIntent.roleId,
+          results: results.map((entry) => ({
+            skillId: entry.skillId,
+            name: entry.name,
+            summary: entry.summary,
+            allowedRoles: entry.allowedRoles,
+            version: entry.version,
+            installState: entry.installState
+          }))
+        })
+      });
+    }
+
+    if (!selected.allowedRoles.includes(marketplaceInstallIntent.roleId)) {
+      return finalize({
+        type: "config_input_required",
+        message: `${selected.skillId} 不能安装到 ${marketplaceInstallIntent.roleId}，请换一个角色。`,
+        missingField: "targetRoleId",
+        expectedCommand: `给 product 安装 ${selected.skillId} skill`
+      });
+    }
+
+    const definition = getSkillDefinition(selected.skillId);
+    if (!definition) {
+      const integrationTask = createSkillRuntimeIntegrationTask({
+        sessionId,
+        source: input.source,
+        requestedBy: input.requestedBy,
+        chatId: input.chatId,
+        targetRoleId: marketplaceInstallIntent.roleId,
+        skill: selected
+      });
+      updateSessionProjectMemoryFromInbound({
+        sessionId,
+        requesterName,
+        requestedBy: input.requestedBy,
+        source: input.source,
+        inboundText,
+        taskText: `接入 skill runtime: ${selected.skillId}`,
+        stage: "skill_integration_queued",
+        nextActions: ["等待工程助理接入 skill runtime 并完成验证"]
+      });
+      appendSessionSkillEvent({
+        sessionId,
+        content: `已创建 skill 接入任务：${selected.name}`,
+        metadata: {
+          type: "skill_integration_queued",
+          taskId: integrationTask.id,
+          skillId: selected.skillId,
+          targetRoleId: marketplaceInstallIntent.roleId,
+          source: selected.source,
+          sourceLabel: selected.sourceLabel ?? "",
+          sourceUrl: selected.sourceUrl ?? "",
+          version: selected.version ?? ""
+        }
+      });
+      return finalize({
+        type: "task_queued",
+        message: formatSkillIntegrationTaskQueuedMessage({
+          source: input.source,
+          taskId: integrationTask.id,
+          skillName: selected.name
+        }),
+        taskId: integrationTask.id
+      });
+    }
+
+    store.setSkillBinding({
+      scope: "role",
+      scopeId: marketplaceInstallIntent.roleId,
+      skillId: selected.skillId,
+      status: "enabled",
+      verificationStatus: "unverified",
+      config: definition.defaultConfig,
+      installedBy: input.requestedBy,
+      source: selected.source,
+      sourceLabel: selected.sourceLabel,
+      sourceUrl: selected.sourceUrl,
+      version: selected.version
+    });
+    const verifyTask = createSkillSmokeVerifyTask({
+      sessionId,
+      source: input.source,
+      requestedBy: input.requestedBy,
+      chatId: input.chatId,
+      targetRoleId: marketplaceInstallIntent.roleId,
+      skill: selected
+    });
+    updateSessionProjectMemoryFromInbound({
+      sessionId,
+      requesterName,
+      requestedBy: input.requestedBy,
+      source: input.source,
+      inboundText,
+      taskText: `安装 skill: ${selected.skillId}`,
+      stage: "team_configured",
+      nextActions: [
+        `等待 ${marketplaceInstallIntent.roleId} 执行 skill smoke verify`,
+        `查看验证任务 ${verifyTask.id.slice(0, 8)} 的结果`
+      ]
+    });
+    appendSessionSkillEvent({
+      sessionId,
+      content: `已安装 skill：${selected.skillId} -> ${marketplaceInstallIntent.roleId}`,
+      metadata: {
+        type: "skill_installed",
+        skillId: selected.skillId,
+        targetRoleId: marketplaceInstallIntent.roleId,
+        source: selected.source,
+        sourceLabel: selected.sourceLabel ?? "",
+        sourceUrl: selected.sourceUrl ?? "",
+        version: selected.version ?? "",
+        verifyTaskId: verifyTask.id
+      }
+    });
+    return finalize({
+      type: "operator_action_applied",
+      message: `已安装 skill：${selected.skillId} -> ${marketplaceInstallIntent.roleId}。我还创建了验证任务（${verifyTask.id.slice(0, 8)}），会检查这个 skill 是否真的生效。`,
+      actionId: `${marketplaceInstallIntent.roleId}:${selected.skillId}`
+    });
+  }
   if (parsedAction) {
     if (parsedAction.action.kind === "set_tool_provider_config") {
       const requiresApiKey = Boolean(parsedAction.action.payload.requiresApiKey);
@@ -2828,8 +3715,31 @@ async function handleInboundMessage(input: {
       });
 
     if (ownerLowRiskAutoApply || allowlistAutoApply) {
+      let verifyTask:
+        | ReturnType<typeof store.createTask>
+        | undefined;
       try {
         store.applyOperatorAction(action.id, input.requestedBy ?? "system");
+        if (action.kind === "install_skill" && action.targetRoleId && action.skillId) {
+          const definition = getSkillDefinition(action.skillId);
+          if (definition) {
+            verifyTask = createSkillSmokeVerifyTask({
+              sessionId,
+              source: input.source,
+              requestedBy: input.requestedBy,
+              chatId: input.chatId,
+              targetRoleId: action.targetRoleId,
+              skill: {
+                skillId: action.skillId,
+                name: definition.name,
+                source: typeof action.payload.source === "string" ? action.payload.source : "catalog",
+                sourceLabel: typeof action.payload.sourceLabel === "string" ? action.payload.sourceLabel : "catalog",
+                sourceUrl: typeof action.payload.sourceUrl === "string" ? action.payload.sourceUrl : undefined,
+                version: typeof action.payload.version === "string" ? action.payload.version : undefined
+              }
+            });
+          }
+        }
         if (ownerLowRiskAutoApply) {
           store.appendAuditEvent({
             category: "approval",
@@ -2861,12 +3771,12 @@ async function handleInboundMessage(input: {
           }
           if (input.source === "feishu") {
             return ownerLowRiskAutoApply
-              ? `已为你自动执行（低风险免审）：${actionSummaryForUser}。`
-              : `已按白名单自动执行：${actionSummaryForUser}。`;
+              ? `已为你自动执行（低风险免审）：${actionSummaryForUser}。${verifyTask ? ` 验证任务 ${verifyTask.id.slice(0, 8)} 已创建。` : ""}`
+              : `已按白名单自动执行：${actionSummaryForUser}。${verifyTask ? ` 验证任务 ${verifyTask.id.slice(0, 8)} 已创建。` : ""}`;
           }
           return ownerLowRiskAutoApply
-            ? `已自动执行（低风险免审）：${actionSummaryForUser}`
-            : `已按白名单自动执行：${actionSummaryForUser}`;
+            ? `已自动执行（低风险免审）：${actionSummaryForUser}${verifyTask ? `；验证任务 ${verifyTask.id.slice(0, 8)} 已创建` : ""}`
+            : `已按白名单自动执行：${actionSummaryForUser}${verifyTask ? `；验证任务 ${verifyTask.id.slice(0, 8)} 已创建` : ""}`;
         })(),
         actionId: action.id
       });
@@ -2902,29 +3812,265 @@ async function handleInboundMessage(input: {
 
   const template = selectRoutingTemplate(inboundText, store.listRoutingTemplates());
   if (template) {
-    const tasks = createTemplateTasks({
-      sessionId,
-      template,
-      text: taskText,
-      source: input.source,
-      requestedBy: input.requestedBy,
-      requesterName: requesterName || undefined,
-      chatId: input.chatId,
-      attachments: input.attachments
-    });
+    const tasks =
+      template.id === "tpl-founder-delivery-loop"
+        ? createFounderDeliveryWorkflow({
+            sessionId,
+            template,
+            text: taskText,
+            source: input.source,
+            requestedBy: input.requestedBy,
+            requesterName: requesterName || undefined,
+            chatId: input.chatId,
+            attachments: input.attachments
+          })
+        : createTemplateTasks({
+            sessionId,
+            template,
+            text: taskText,
+            source: input.source,
+            requestedBy: input.requestedBy,
+            requesterName: requesterName || undefined,
+            chatId: input.chatId,
+            attachments: input.attachments
+          });
     return finalize({
       type: "template_tasks_queued",
-      message: formatTemplateTasksQueuedMessage(input.source, template.name, tasks.length),
+      message:
+        template.id === "tpl-founder-delivery-loop"
+          ? formatFounderWorkflowQueuedMessage(input.source, template.name)
+          : formatTemplateTasksQueuedMessage(input.source, template.name, tasks.length),
       templateId: template.id,
       taskIds: tasks.map((task) => task.id)
     });
   }
 
-  // Classify intent with the local model. Falls back to keyword matching on timeout or error.
-  const collaborationConfig = store.getRuntimeConfig().collaboration;
+  // --- Task-level user interaction: handle paused task response ---
+  const pausedTask = sessionId ? store.getPausedTask(input.source, input.requestedBy, input.chatId) : undefined;
+  if (sessionId && pausedTask && pausedTask.pendingInput) {
+    const originalInstruction = pausedTask.instruction;
+    const userAnswer = inboundText.trim();
+    const enrichedInstruction = `${originalInstruction}\n\n用户补充信息：${userAnswer}`;
+    store.resumeTask(pausedTask.id, enrichedInstruction);
+    updateSessionProjectMemoryFromInbound({
+      sessionId,
+      requesterName,
+      requestedBy: input.requestedBy,
+      source: input.source,
+      inboundText,
+      taskText: enrichedInstruction,
+      stage: "task_input_received",
+      nextActions: ["任务已恢复执行"]
+    });
+    store.appendSessionMessage({
+      sessionId,
+      actorType: "system",
+      actorId: "orchestrator",
+      roleId: pausedTask.roleId,
+      messageType: "event",
+      content: "任务已恢复执行",
+      metadata: {
+        type: "task_resumed",
+        taskId: pausedTask.id
+      }
+    });
+    return finalize({
+      type: "task_queued",
+      message: formatTaskQueuedMessage(input.source, pausedTask.id, pausedTask.roleId),
+      taskId: pausedTask.id
+    });
+  }
+
+  // --- Intake clarification: handle pending clarification response ---
+  const pendingClarification = (session?.metadata?.pendingClarification ?? null) as
+    | {
+        originalText?: unknown;
+        questions?: unknown;
+        createdAt?: unknown;
+        roleId?: unknown;
+      }
+    | null;
+  if (sessionId && pendingClarification && typeof pendingClarification.originalText === "string") {
+    const originalText = pendingClarification.originalText;
+    const questions = Array.isArray(pendingClarification.questions)
+      ? pendingClarification.questions.filter((q): q is string => typeof q === "string")
+      : [];
+    const enrichedInstruction = mergeClarificationResponse(originalText, questions, inboundText);
+    store.patchSessionMetadata(sessionId, { pendingClarification: null });
+    updateSessionProjectMemoryFromInbound({
+      sessionId,
+      requesterName,
+      requestedBy: input.requestedBy,
+      source: input.source,
+      inboundText,
+      taskText: enrichedInstruction,
+      stage: "clarification_received",
+      nextActions: ["创建任务并开始执行"]
+    });
+    const clarifiedIntentStartTime = Date.now();
+    const clarifiedIntent = await classifyInboundIntent(enrichedInstruction, {
+      triggerKeywords: collaborationConfig.triggerKeywords
+    });
+    logger.info("clarification intent classification done", {
+      elapsed: Date.now() - clarifiedIntentStartTime,
+      sinceFunctionStart: Date.now() - collabStartTime,
+      clarifiedIntent
+    });
+
+    if (clarifiedIntent === "operator_config") {
+      const clarifiedInputRequirement = parseOperatorConfigInputRequirementFromText(enrichedInstruction);
+      if (clarifiedInputRequirement) {
+        return finalize({
+          type: "config_input_required",
+          message: clarifiedInputRequirement.message,
+          missingField: clarifiedInputRequirement.missingField,
+          expectedCommand: clarifiedInputRequirement.expectedCommand
+        });
+      }
+      return finalize({
+        type: "config_input_required",
+        message: "我理解你想配置系统能力，请告诉我具体的操作，例如：「设置搜索工具为 tavily」、「切换模型到 glm-5」或「给 research 安装 web-search skill」。",
+        missingField: "action",
+        expectedCommand: "设置搜索工具为 tavily"
+      });
+    }
+
+    if (clarifiedIntent === "goalrun") {
+      if (inFlightGoalRun && !requestsNewIndependentGoal(enrichedInstruction)) {
+        return finalize({
+          type: "smalltalk_replied",
+          message: `当前已有进行中的目标（${inFlightGoalRun.id.slice(0, 8)}，${formatGoalRunStageLabel(inFlightGoalRun.currentStage)}）。我会先把这条主线推进完成。若你要并行开新目标，请发送”新任务：<你的目标>”。`
+        });
+      }
+      const goalRun = store.createGoalRun({
+        source: input.source,
+        objective: enrichedInstruction,
+        requestedBy: input.requestedBy,
+        chatId: input.chatId,
+        sessionId,
+        language: /[\u4e00-\u9fff]/.test(enrichedInstruction) ? "zh-CN" : "en-US",
+        metadata: {
+          inboundText: enrichedInstruction,
+          ...(requesterName ? { requesterName } : {}),
+          attachments: input.attachments ?? []
+        },
+        context: {}
+      });
+      updateSessionProjectMemoryFromInbound({
+        sessionId,
+        requesterName,
+        requestedBy: input.requestedBy,
+        source: input.source,
+        inboundText: enrichedInstruction,
+        taskText: enrichedInstruction,
+        stage: "goal_run_discover",
+        nextActions: ["等待目标流程完成 discover/plan/execute 阶段"]
+      });
+      return finalize({
+        type: "goal_run_queued",
+        message: formatGoalRunQueuedMessage(input.source, goalRun.id),
+        goalRunId: goalRun.id
+      });
+    }
+
+    const clarifiedCollaborationMode = collaborationConfig.enabled && (clarifiedIntent === "collaboration");
+    const clarifiedLightCollaborationMode =
+      collaborationConfig.enabled && (clarifiedIntent === "light_collaboration") && !clarifiedCollaborationMode;
+    const clarifiedRoleId = clarifiedCollaborationMode ? resolveCollaborationEntryRole(enrichedInstruction) : undefined;
+    const clarifiedMetadata: Record<string, unknown> = requesterName ? { requesterName } : {};
+    if (input.attachments && input.attachments.length > 0) {
+      clarifiedMetadata.attachments = input.attachments;
+    }
+    if (clarifiedCollaborationMode) {
+      clarifiedMetadata.collaborationMode = true;
+      clarifiedMetadata.collaborationEntryRole = clarifiedRoleId;
+    }
+    if (clarifiedLightCollaborationMode) {
+      clarifiedMetadata.lightCollaboration = true;
+    }
+    const clarifiedTask = createTask({
+      sessionId,
+      instruction: enrichedInstruction,
+      source: input.source,
+      requestedBy: input.requestedBy,
+      chatId: input.chatId,
+      roleId: clarifiedRoleId,
+      metadata: clarifiedMetadata
+    });
+    const clarifiedCollaborationPlanPromise = analyzeCollaborationNeed(enrichedInstruction, {
+      triggerKeywords: collaborationConfig.triggerKeywords
+    });
+    applyCollaborationPlanToTask(clarifiedTask.id, clarifiedCollaborationPlanPromise);
+    updateSessionProjectMemoryFromInbound({
+      sessionId,
+      requesterName,
+      requestedBy: input.requestedBy,
+      source: input.source,
+      inboundText: enrichedInstruction,
+      taskText: enrichedInstruction,
+      stage: clarifiedCollaborationMode
+        ? "collaboration_queued"
+        : clarifiedLightCollaborationMode
+        ? "light_collaboration_queued"
+        : "task_queued",
+      nextActions: [
+        clarifiedCollaborationMode
+          ? "等待团队分工执行并汇总"
+          : clarifiedLightCollaborationMode
+          ? "等待主执行者完成并审阅"
+          : "等待角色执行并返回结果"
+      ]
+    });
+    const clarifiedMessage = clarifiedCollaborationMode
+      ? formatTaskQueuedMessage(input.source, clarifiedTask.id, clarifiedTask.roleId) + "（已启动多角色协作模式）"
+      : clarifiedLightCollaborationMode
+      ? formatTaskQueuedMessage(input.source, clarifiedTask.id, clarifiedTask.roleId) + "（已启动轻量协作模式：主执行 + 审阅）"
+      : formatTaskQueuedMessage(input.source, clarifiedTask.id, clarifiedTask.roleId);
+    return finalize({
+      type: "task_queued",
+      message: clarifiedMessage,
+      taskId: clarifiedTask.id
+    });
+  }
+
+  // --- Intake clarification: analyze new requests for clarity ---
+  if (sessionId && !isObviouslyClear(inboundText)) {
+    const analysis = await analyzeIntakeClarity(inboundText);
+    if (!analysis.isClear && analysis.clarifyingQuestions.length > 0) {
+      store.patchSessionMetadata(sessionId, {
+        pendingClarification: {
+          originalText: inboundText,
+          questions: analysis.clarifyingQuestions,
+          createdAt: new Date().toISOString()
+        }
+      });
+      updateSessionProjectMemoryFromInbound({
+        sessionId,
+        requesterName,
+        requestedBy: input.requestedBy,
+        source: input.source,
+        inboundText,
+        taskText,
+        stage: "awaiting_clarification",
+        unresolvedQuestions: analysis.clarifyingQuestions,
+        nextActions: ["等待用户回复澄清问题"]
+      });
+      return finalize({
+        type: "needs_clarification",
+        message: formatClarificationMessage(analysis.clarifyingQuestions),
+        questions: analysis.clarifyingQuestions
+      });
+    }
+  }
+
+  // Classify intent (for routing: goalrun / operator_config / task).
+  // collaborationPlanPromise was already fired at the top of handleInboundMessage
+  // and has been running in parallel throughout all early-return checks above.
+  const intentStartTime = Date.now();
   const intent = await classifyInboundIntent(inboundText, {
     triggerKeywords: collaborationConfig.triggerKeywords
   });
+  logger.info("intent classification done", { elapsed: Date.now() - intentStartTime, sinceFunctionStart: Date.now() - collabStartTime, intent });
 
   if (intent === "operator_config") {
     // The precise operator action path (parseOperatorActionFromText) already ran above and
@@ -2968,6 +4114,16 @@ async function handleInboundMessage(input: {
       },
       context: {}
     });
+    updateSessionProjectMemoryFromInbound({
+      sessionId,
+      requesterName,
+      requestedBy: input.requestedBy,
+      source: input.source,
+      inboundText,
+      taskText,
+      stage: "goal_run_discover",
+      nextActions: ["等待目标流程完成 discover/plan/execute 阶段"]
+    });
     return finalize({
       type: "goal_run_queued",
       message: formatGoalRunQueuedMessage(input.source, goalRun.id),
@@ -2975,8 +4131,11 @@ async function handleInboundMessage(input: {
     });
   }
 
-  // 检测协作模式
-  const collaborationMode = collaborationConfig.enabled && intent === "collaboration";
+  // For the main task path, we don't block on collaborationPlan — the LLM analysis can take
+  // 30-60s. Instead, use intent for initial routing and let applyCollaborationPlanToTask()
+  // async-patch the plan into task metadata before the worker processes it.
+  const collaborationMode = collaborationConfig.enabled && (intent === "collaboration");
+  const lightCollaborationMode = collaborationConfig.enabled && (intent === "light_collaboration") && !collaborationMode;
   const roleId = collaborationMode ? resolveCollaborationEntryRole(inboundText) : undefined;
   const metadata: Record<string, unknown> = requesterName ? { requesterName } : {};
   if (input.attachments && input.attachments.length > 0) {
@@ -2984,7 +4143,10 @@ async function handleInboundMessage(input: {
   }
   if (collaborationMode) {
     metadata.collaborationMode = true;
-    metadata.collaborationEntryRole = roleId ?? "ceo";
+    metadata.collaborationEntryRole = roleId;
+  }
+  if (lightCollaborationMode) {
+    metadata.lightCollaboration = true;
   }
 
   const task = createTask({
@@ -2996,9 +4158,31 @@ async function handleInboundMessage(input: {
     roleId,
     metadata
   });
+  // Async-patch collaboration plan into task metadata once the LLM analysis completes.
+  // The worker reads this lazily before creating review tasks, so it will see the final plan.
+  applyCollaborationPlanToTask(task.id);
+
+  updateSessionProjectMemoryFromInbound({
+    sessionId,
+    requesterName,
+    requestedBy: input.requestedBy,
+    source: input.source,
+    inboundText,
+    taskText,
+    stage: collaborationMode ? "collaboration_queued" : lightCollaborationMode ? "light_collaboration_queued" : "task_queued",
+    nextActions: [
+      collaborationMode
+        ? "等待团队分工执行并汇总"
+        : lightCollaborationMode
+        ? "等待主执行者完成并审阅"
+        : "等待角色执行并返回结果"
+    ]
+  });
 
   const message = collaborationMode
     ? formatTaskQueuedMessage(input.source, task.id, task.roleId) + "（已启动多角色协作模式）"
+    : lightCollaborationMode
+    ? formatTaskQueuedMessage(input.source, task.id, task.roleId) + "（已启动轻量协作模式：主执行 + 审阅）"
     : formatTaskQueuedMessage(input.source, task.id, task.roleId);
 
   return finalize({
@@ -3081,9 +4265,14 @@ async function resolveFeishuSenderName(senderId: string): Promise<string | undef
   }
 }
 
-async function sendFeishuPrivateFeedback(openId: string, text: string): Promise<void> {
+async function sendFeishuPrivateFeedback(openId: string, payload: string | Record<string, unknown>): Promise<void> {
   try {
-    await createFeishuClient().sendTextToUser(openId, text);
+    const client = createFeishuClient();
+    if (typeof payload === "string") {
+      await client.sendTextToUser(openId, payload);
+    } else {
+      await client.sendCardToUser(openId, payload);
+    }
   } catch (error) {
     store.appendAuditEvent({
       category: "feishu",
@@ -3187,19 +4376,25 @@ async function handleFeishuCardAction(cardAction: FeishuCardActionEvent): Promis
   if (stillPending) {
     await sendFeishuPrivateFeedback(
       cardAction.operatorOpenId,
-      `已${payload.decision === "approved" ? "批准" : "拒绝"}，审批单进入下一步（${stillPending.step.roleId}）。`
+      buildApprovalResultCard({
+        summary: `审批单进入下一步（${stillPending.step.roleId}）。`,
+        decision: payload.decision,
+      })
     );
     return;
   }
   await sendFeishuPrivateFeedback(
     cardAction.operatorOpenId,
-    `已${payload.decision === "approved" ? "批准" : "拒绝"}：${approval.summary}`
+    buildApprovalResultCard({
+      summary: approval.summary,
+      decision: payload.decision,
+    })
   );
 }
 
 async function sendFeishuInboundAck(
   message: FeishuMessageEvent,
-  result: { message: string },
+  result: { type?: string; message: string; questions?: string[]; taskId?: string },
   scene?: EmojiScene,
   options?: { forceText?: boolean | undefined; skipReaction?: boolean | undefined }
 ): Promise<void> {
@@ -3235,9 +4430,30 @@ async function sendFeishuInboundAck(
   if (!shouldSendText) {
     return;
   }
-  const userFacingMessage = sanitizeFeishuAckMessage(result.message);
+
   try {
-    await client.sendTextToChat(message.chatId, userFacingMessage);
+    if (result.type === "needs_clarification" && result.questions && result.questions.length > 0) {
+      await client.sendCardToChat(message.chatId, buildNeedsClarificationCard({ questions: result.questions }));
+    } else if (result.type === "task_queued" && result.taskId) {
+      const task = store.getTask(result.taskId);
+      if (task) {
+        const roleProfile = listRoles().find((r) => r.id === task.roleId);
+        const roleLabel = roleProfile?.name ?? task.roleId;
+        await client.sendCardToChat(
+          message.chatId,
+          buildTaskQueuedCard({
+            title: task.title,
+            roleLabel,
+            workflowSummary: buildWorkflowStatusSummary(task, { includeGoal: true })
+          })
+        );
+      } else {
+        await client.sendTextToChat(message.chatId, sanitizeFeishuAckMessage(result.message));
+      }
+    } else {
+      const userFacingMessage = sanitizeFeishuAckMessage(result.message);
+      await client.sendTextToChat(message.chatId, userFacingMessage);
+    }
   } catch (error) {
     store.appendAuditEvent({
       category: "feishu",
@@ -3273,392 +4489,45 @@ function sanitizeFeishuAckMessage(message: string): string {
   return sanitized || "收到，我在。请直接告诉我要完成的任务。";
 }
 
-app.post("/api/auth/login", (request, response) => {
-  const body = request.body as { username?: string; password?: string; remember?: boolean };
-  const username = String(body.username || "").trim();
-  const password = String(body.password || "");
-  const remember = Boolean(body.remember);
+// ============ Route Registration ============
 
-  if (!username || !password) {
-    response.status(400).json({ error: "username_and_password_required" });
-    return;
-  }
-
-  const credentials = getAuthCredentials();
-  const matched = credentials.find(
-    (cred) => cred.username === username && cred.password === password
-  );
-
-  if (!matched) {
-    response.status(401).json({ error: "invalid_credentials" });
-    return;
-  }
-
-  const session = createSession(
-    `user-${matched.username}`,
-    matched.username,
-    "owner",
-    matched.username,
-    remember,
-    request
-  );
-
-  logger.info("User logged in", { username: matched.username });
-  response.json({
-    ok: true,
-    user: session.user,
-    token: session.token,
-    expiresAt: session.expiresAt
-  });
+registerAuthRoutes(app, {
+  store,
+  getAuthCredentials,
+  createSession,
+  validateToken,
+  revokeToken,
+  extractBearerToken
 });
 
-app.post("/api/auth/logout", (request, response) => {
-  const token = extractBearerToken(request);
-  if (token) {
-    revokeToken(token);
-  }
-  response.json({ ok: true });
+registerSystemRoutes(app, {
+  store,
+  buildSystemMetricsSnapshot,
+  buildSystemHealthReport,
+  buildSystemDailyKpi,
+  sanitizeApprovalRecord,
+  sanitizeOperatorActionRecord
 });
 
-app.get("/api/auth/validate", (request, response) => {
-  const token = extractBearerToken(request);
-  if (!token) {
-    response.status(401).json({ error: "missing_token" });
-    return;
-  }
-  const validation = validateToken(token);
-  if (!validation.valid) {
-    response.status(401).json({ error: "invalid_token" });
-    return;
-  }
-  response.json({ ok: true, user: validation.user });
+registerSkillsMarketplaceRoutes(app, {
+  store,
+  createSkillSmokeVerifyTask,
+  createSkillRuntimeIntegrationTask,
+  formatSkillIntegrationTaskQueuedMessage
 });
 
-app.get("/api/auth/me", authMiddleware, (request, response) => {
-  const user = (request as express.Request & { user?: { id: string; username: string; role: string; displayName: string } }).user;
-  response.json({ user });
+registerConfigRoutes(app, {
+  store,
+  env,
+  getChannelStatus
 });
 
-app.get("/health", (_request, response) => {
-  response.json({
-    ok: true,
-    timestamp: new Date().toISOString(),
-    config: store.getRuntimeConfig()
-  });
+registerPluginRoutes(app, {
+  store
 });
 
-app.get("/metrics", (_request, response) => {
-  const snapshot = store.getDashboardSnapshot();
-  response.setHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
-  response.send(renderPrometheusMetrics(snapshot));
-});
-
-app.get("/api/dashboard", (_request, response) => {
-  const snapshot = store.getDashboardSnapshot();
-  response.json({
-    ...snapshot,
-    approvals: snapshot.approvals.map((approval) => sanitizeApprovalRecord(approval)),
-    operatorActions: snapshot.operatorActions.map((action) => sanitizeOperatorActionRecord(action))
-  });
-});
-
-app.get("/api/system/metrics", (_request, response) => {
-  response.json(buildSystemMetricsSnapshot());
-});
-
-app.get("/api/system/health-report", (_request, response) => {
-  const report = buildSystemHealthReport();
-  response.status(report.ok ? 200 : 503).json(report);
-});
-
-app.get("/api/system/kpi/daily", (request, response) => {
-  const daysRaw = Number(request.query.days);
-  const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(90, Math.round(daysRaw))) : 14;
-  response.json(buildSystemDailyKpi(days));
-});
-
-app.get("/api/roles", (_request, response) => {
-  response.json({
-    roles: listRoles().map((role) => ({
-      ...role,
-      skills: store.resolveSkillsForRole(role.id)
-    })),
-    catalog: listSkills()
-  });
-});
-
-app.get("/api/config", (_request, response) => {
-  response.json(store.getRuntimeConfig());
-});
-
-app.get("/api/channels/status", (_request, response) => {
-  response.json({
-    channels: store.getRuntimeConfig().channels,
-    status: getChannelStatus()
-  });
-});
-
-app.get("/api/email-inbound/records", (request, response) => {
-  const limitRaw = Number(request.query.limit);
-  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, Math.round(limitRaw))) : 100;
-  const records = store.getConfigEntry<unknown[]>(EMAIL_INBOUND_LEDGER_CONFIG_KEY) ?? [];
-  response.json({
-    count: records.length,
-    records: records.slice(0, limit)
-  });
-});
-
-app.get("/api/tool-providers", (_request, response) => {
-  const runtimeConfig = store.getRuntimeConfig();
-  response.json({
-    providers: listToolProviderStatuses(env, runtimeConfig.tools, store.getRuntimeSecrets()),
-    policy: runtimeConfig.tools
-  });
-});
-
-app.put("/api/config/tool-exec-policy", (request, response) => {
-  const body = request.body as Partial<ToolExecPolicy>;
-  const nextConfig = store.patchRuntimeConfig((config) => {
-    config.tools = normalizeToolExecPolicy({
-      ...config.tools,
-      ...body,
-      providerOrder: Array.isArray(body.providerOrder) ? body.providerOrder : config.tools.providerOrder,
-      highRiskKeywords: Array.isArray(body.highRiskKeywords)
-        ? body.highRiskKeywords.map((entry) => String(entry))
-        : config.tools.highRiskKeywords
-    });
-    return config;
-  });
-
-  response.json({
-    ok: true,
-    tools: nextConfig.tools
-  });
-});
-
-app.put("/api/config/queue-sla", (request, response) => {
-  const body = request.body as Partial<{ warningWaitMs: number; criticalWaitMs: number }>;
-  const warningWaitMs = Number(body.warningWaitMs);
-  const criticalWaitMs = Number(body.criticalWaitMs);
-  if (!Number.isFinite(warningWaitMs) || !Number.isFinite(criticalWaitMs)) {
-    response.status(400).json({ error: "warningWaitMs_and_criticalWaitMs_required" });
-    return;
-  }
-
-  if (warningWaitMs < 0 || criticalWaitMs <= warningWaitMs) {
-    response.status(400).json({ error: "invalid_sla_thresholds" });
-    return;
-  }
-
-  const nextConfig = store.patchRuntimeConfig((config) => {
-    config.queue.sla.warningWaitMs = Math.round(warningWaitMs);
-    config.queue.sla.criticalWaitMs = Math.round(criticalWaitMs);
-    return config;
-  });
-
-  response.json({
-    ok: true,
-    queue: nextConfig.queue
-  });
-});
-
-app.get("/api/tool-runs", (_request, response) => {
-  response.json(store.listToolRuns(200));
-});
-
-app.get("/api/tool-runs/:toolRunId", (request, response) => {
-  const toolRun = store.getToolRun(request.params.toolRunId);
-  if (!toolRun) {
-    response.status(404).json({ error: "tool_run_not_found" });
-    return;
-  }
-
-  response.json(toolRun);
-});
-
-// Plugin API routes
-app.get("/api/plugins", (_request, response) => {
-  const plugins = listPlugins();
-  response.json(plugins.map((p) => ({
-    id: p.definition.id,
-    name: p.definition.name,
-    version: p.definition.version,
-    kind: p.definition.kind,
-    description: p.definition.description,
-    status: p.status,
-    skillsCount: p.skills.length,
-    providersCount: p.providers.length,
-    commandsCount: p.commands.length,
-    allowedRoles: p.definition.allowedRoles,
-    config: p.config
-  })));
-});
-
-app.get("/api/plugins/:pluginId", (request, response) => {
-  const instance = getPlugin(request.params.pluginId);
-  if (!instance) {
-    response.status(404).json({ error: "plugin_not_found" });
-    return;
-  }
-
-  response.json({
-    id: instance.definition.id,
-    name: instance.definition.name,
-    version: instance.definition.version,
-    kind: instance.definition.kind,
-    description: instance.definition.description,
-    status: instance.status,
-    skills: instance.skills,
-    providers: instance.providers,
-    commands: instance.commands,
-    allowedRoles: instance.definition.allowedRoles,
-    config: instance.config,
-    manifest: instance.manifest
-  });
-});
-
-app.post("/api/plugins/:pluginId/enable", (request, response) => {
-  const instance = getPlugin(request.params.pluginId);
-  if (!instance) {
-    response.status(404).json({ error: "plugin_not_found" });
-    return;
-  }
-
-  try {
-    enablePlugin(request.params.pluginId);
-    // Persist state
-    const state = getPluginState(request.params.pluginId);
-    if (state) {
-      store.setPluginState(state.id, state.enabled, state.config);
-    }
-    response.json({ ok: true, status: "enabled" });
-  } catch (error) {
-    response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-app.post("/api/plugins/:pluginId/disable", (request, response) => {
-  const instance = getPlugin(request.params.pluginId);
-  if (!instance) {
-    response.status(404).json({ error: "plugin_not_found" });
-    return;
-  }
-
-  try {
-    disablePlugin(request.params.pluginId);
-    // Persist state
-    const state = getPluginState(request.params.pluginId);
-    if (state) {
-      store.setPluginState(state.id, state.enabled, state.config);
-    }
-    response.json({ ok: true, status: "disabled" });
-  } catch (error) {
-    response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-app.put("/api/plugins/:pluginId/config", (request, response) => {
-  const instance = getPlugin(request.params.pluginId);
-  if (!instance) {
-    response.status(404).json({ error: "plugin_not_found" });
-    return;
-  }
-
-  const body = request.body as Record<string, unknown>;
-  try {
-    updatePluginConfig(request.params.pluginId, body);
-    // Persist state
-    const state = getPluginState(request.params.pluginId);
-    if (state) {
-      store.setPluginState(state.id, state.enabled, state.config);
-    }
-    response.json({ ok: true, config: body });
-  } catch (error) {
-    response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-app.get("/api/routing-templates", (_request, response) => {
-  response.json(store.listRoutingTemplates());
-});
-
-app.get("/api/routing-templates/export", (_request, response) => {
-  response.json({
-    version: 1,
-    exportedAt: new Date().toISOString(),
-    templates: store.listRoutingTemplates()
-  });
-});
-
-app.post("/api/routing-templates", (request, response) => {
-  const body = normalizeRoutingTemplateBody(request.body as Partial<CreateRoutingTemplateInput>);
-  if (!body.name || !Array.isArray(body.triggerKeywords) || !Array.isArray(body.tasks)) {
-    response.status(400).json({ error: "invalid_template_payload" });
-    return;
-  }
-
-  try {
-    const template = store.createRoutingTemplate({
-      name: body.name,
-      description: body.description,
-      triggerKeywords: body.triggerKeywords,
-      matchMode: body.matchMode,
-      enabled: body.enabled,
-      tasks: body.tasks
-    });
-    response.status(201).json(template);
-  } catch (error) {
-    response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-app.post("/api/routing-templates/import", (request, response) => {
-  const body = request.body as {
-    templates?: unknown;
-    mode?: "merge" | "replace";
-  };
-  const mode = body.mode === "replace" ? "replace" : "merge";
-  if (!Array.isArray(body.templates)) {
-    response.status(400).json({ error: "templates_array_required" });
-    return;
-  }
-
-  try {
-    const nextTemplates = store.importRoutingTemplates(body.templates as RoutingTemplate[], mode);
-    response.status(201).json({
-      ok: true,
-      mode,
-      count: nextTemplates.length,
-      templates: nextTemplates
-    });
-  } catch (error) {
-    response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-app.put("/api/routing-templates/:templateId", (request, response) => {
-  const body = normalizeRoutingTemplateBody(request.body as Partial<UpdateRoutingTemplateInput>);
-  try {
-    const updated = store.updateRoutingTemplate(request.params.templateId, body);
-    if (!updated) {
-      response.status(404).json({ error: "template_not_found" });
-      return;
-    }
-
-    response.json(updated);
-  } catch (error) {
-    response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-app.delete("/api/routing-templates/:templateId", (request, response) => {
-  const deleted = store.deleteRoutingTemplate(request.params.templateId);
-  if (!deleted) {
-    response.status(404).json({ error: "template_not_found" });
-    return;
-  }
-
-  response.status(204).end();
+registerRoutingTemplateRoutes(app, {
+  store
 });
 
 registerTaskRoutes(app, {
@@ -3691,6 +4560,7 @@ registerApprovalRoutes(app, {
 registerSelfCheckRoutes(app, {
   latestFile: productSelfcheckLatestFile,
   historyFile: productSelfcheckHistoryFile,
+  harnessRootDir: harnessReportDir,
   watcherPidFile: productSelfcheckWatcherPidFile
 });
 
@@ -3752,7 +4622,7 @@ async function processFeishuInboundMessage(message: FeishuMessageEvent) {
   });
 
   await sendFeishuInboundAck(message, result, undefined, {
-    forceText: result.type === "smalltalk_replied" || result.type === "config_input_required"
+    forceText: result.type === "smalltalk_replied" || result.type === "config_input_required" || result.type === "needs_clarification"
   });
 
   return result;

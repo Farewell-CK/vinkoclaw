@@ -1,43 +1,58 @@
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { AgentRuntime, type TaskContextSnippet } from "@vinko/agent-runtime";
+import { AgentRuntime, type RuntimeExecutionInput, type TaskContextSnippet, globalTelemetry, initGlobalTelemetry, TelemetryCollector } from "@vinko/agent-runtime";
 import { buildWorkDir } from "@vinko/agent-runtime/tool-executor";
-import { FeishuClient } from "@vinko/feishu-gateway";
+import { FeishuClient, buildTaskCompletedCard, buildTaskFailedCard, buildTaskPausedCard, buildLightReviewQueuedCard, buildLightIterationQueuedCard, buildEscalationCard } from "@vinko/feishu-gateway";
 import { WorkspaceKnowledgeBase } from "@vinko/knowledge-base";
 import {
   buildToolCommand,
+  buildWorkflowStatusSummary,
   createLogger,
   createRuntimeValueResolver,
   detectToolRiskLevel,
   detectToolProviderError,
   emitTaskLifecycle,
   extractToolOutput,
+  getSkillDefinition,
   hasMeaningfulToolProgress,
   parseSearchMaxResults,
+  createOrchestrationState,
+  mergeOrchestrationState,
+  normalizeOrchestrationState,
+  type OrchestrationArtifactItem,
+  type OrchestrationStatePatch,
+  type OrchestrationStateRecord,
   resolveFeishuApproverOpenIds,
   resolveSearchProviderApiKeyEnv,
   resolveSearchProviderId,
   listToolProviderStatuses,
   loadEnv,
+  resolveDataPath,
   ROLE_IDS,
   selectAvailableProviders,
   shouldUseCodeExecutorTask,
+  AgentCollaborationService,
   VinkoStore,
   type GoalRunRecord,
   type GoalRunResult,
   type ReflectionNote,
   type RoleId,
+  type SkillBindingRecord,
   type TaskRecord,
   type TaskResult,
   type ToolProviderId,
   type ToolRunRecord
 } from "@vinko/shared";
 import { CollaborationManager } from "./collaboration-manager.js";
+import { resolveDeliverableMode, validateDeliverableArtifacts } from "./deliverable-contract.js";
 import { notifyGoalRunProgressSafely } from "./goal-run-progress.js";
 
 const env = loadEnv();
 const store = VinkoStore.fromEnv(env);
+const telemetryDb = resolveDataPath(env, "telemetry.db");
+initGlobalTelemetry(telemetryDb);
 const logger = createLogger("task-runner");
 const runtimeValues = createRuntimeValueResolver({
   env,
@@ -49,6 +64,396 @@ const knowledgeBase = new WorkspaceKnowledgeBase();
 const FEISHU_APPROVAL_CARD_TTL_MS = 15 * 60 * 1000;
 const runnerInstanceId = (process.env.RUNNER_INSTANCE_ID ?? String(process.pid)).trim() || String(process.pid);
 const taskHeartbeatMsRaw = Number(process.env.RUNNER_TASK_HEARTBEAT_MS ?? "30000");
+
+const ROLE_LABELS: Record<RoleId, string> = {
+  ceo: "CEO",
+  cto: "CTO",
+  product: "产品经理",
+  uiux: "UI/UX",
+  frontend: "前端",
+  backend: "后端",
+  algorithm: "算法",
+  qa: "测试",
+  developer: "开发",
+  engineering: "工程",
+  research: "研究",
+  operations: "运营"
+};
+
+/**
+ * Light collaboration reviewer map: primary executor → reviewer role.
+ * Used in "build + quick check" mode.
+ * Note: "ceo" is intentionally absent — that role belongs to the user (operator),
+ * not an AI agent. Product tasks are reviewed by CTO for feasibility instead.
+ */
+const LIGHT_REVIEWER_MAP: Partial<Record<RoleId, RoleId>> = {
+  frontend: "qa",
+  uiux: "qa",
+  backend: "qa",
+  product: "cto",
+  algorithm: "research",
+  developer: "qa",
+  engineering: "qa",
+  operations: "product",
+  research: "cto"
+};
+
+function resolveLightCollaborationReviewer(roleId: RoleId): RoleId {
+  return LIGHT_REVIEWER_MAP[roleId] ?? "qa";
+}
+
+function buildRuntimeSkillBindingSnapshot(skills: SkillBindingRecord[]): Array<Record<string, unknown>> {
+  return skills.map((skill) => ({
+    skillId: skill.skillId,
+    verificationStatus: skill.verificationStatus ?? "unverified",
+    source: skill.source ?? "",
+    sourceLabel: skill.sourceLabel ?? "",
+    version: skill.version ?? "",
+    installedAt: skill.installedAt ?? "",
+    verifiedAt: skill.verifiedAt ?? "",
+    runtimeAvailable: Boolean(getSkillDefinition(skill.skillId))
+  }));
+}
+
+function persistTaskRuntimeSkillSnapshot(task: TaskRecord, skills: SkillBindingRecord[]): void {
+  store.patchTaskMetadata(task.id, {
+    runtimeSkillBindings: buildRuntimeSkillBindingSnapshot(skills)
+  });
+}
+
+/** Role-specific review checklists for light collaboration. */
+const REVIEW_CHECKLISTS: Partial<Record<RoleId, string[]>> = {
+  qa: [
+    "测试覆盖是否充分？边界用例和异常路径是否考虑到？",
+    "错误处理是否完善？是否存在未捕获的异常场景？",
+    "代码/逻辑是否具备可测性？是否有难以测试的隐藏依赖？"
+  ],
+  cto: [
+    "架构设计是否合理？是否引入了不必要的技术债？",
+    "方案的可扩展性和可维护性如何？是否有安全隐患？",
+    "技术选型是否适合当前阶段？是否过度设计或设计不足？"
+  ],
+  research: [
+    "分析方法论是否严谨？结论是否有数据支撑？",
+    "是否存在明显的遗漏视角或样本偏差？",
+    "结论的可信度和适用边界是否清晰说明？"
+  ],
+  product: [
+    "用户故事和验收标准是否完整、可执行？",
+    "功能优先级是否合理？是否遗漏了关键用户场景？",
+    "需求描述是否足够清晰，开发侧是否能无歧义理解？"
+  ]
+};
+
+const DEFAULT_REVIEW_CHECKLIST = [
+  "输出内容是否逻辑清晰、结构完整？",
+  "是否完整覆盖了原任务的所有要求？",
+  "是否有明显可执行的改进空间？"
+];
+
+const ROLE_REVIEW_LABELS: Partial<Record<RoleId, string>> = {
+  qa: "测试工程师",
+  cto: "技术负责人",
+  research: "研究员",
+  product: "产品经理"
+};
+
+/**
+ * Build a role-specific review instruction with a structured checklist.
+ */
+function buildReviewInstruction(
+  primaryTask: TaskRecord,
+  primaryOutput: TaskResult,
+  reviewerRoleId: RoleId,
+  collaborationContext?: string
+): string {
+  const checklist = REVIEW_CHECKLISTS[reviewerRoleId] ?? DEFAULT_REVIEW_CHECKLIST;
+  const roleLabel = ROLE_REVIEW_LABELS[reviewerRoleId] ?? ROLE_LABELS[reviewerRoleId] ?? reviewerRoleId;
+  const checklistText = checklist.map((q, i) => `${i + 1}. ${q}`).join("\n");
+  const roomSection = collaborationContext ? `${collaborationContext}\n\n` : "";
+
+  return `${roomSection}你是${roleLabel}，请从专业视角审阅以下内容。
+
+## 审阅 Checklist（必须逐项作答）
+${checklistText}
+
+## 原任务
+${primaryTask.instruction}
+
+## 执行结果摘要
+${primaryOutput.summary}
+
+## 交付物
+${primaryOutput.deliverable.slice(0, 1500)}
+
+请输出：
+- **总体评价**（一句话）
+- **Checklist 逐项结论**（逐条回答）
+- **需要修订的问题**（如有，最多3条，每条须具体可操作；如无则写"无需修订"）
+- **风险点**（如有）`;
+}
+
+// ── Collaboration Room ────────────────────────────────────────────────────────
+
+/**
+ * Ensure a shared AgentCollaboration record exists for this task.
+ * Returns the collaborationId (creates one if it doesn't exist yet).
+ */
+function ensureCollaborationRoom(task: TaskRecord, reviewerRoleId: RoleId): string {
+  if (typeof task.metadata?.collaborationId === "string") {
+    return task.metadata.collaborationId;
+  }
+  const collabService = new AgentCollaborationService(store);
+  const createInput: Parameters<typeof collabService.createCollaboration>[0] = {
+    parentTaskId: task.id,
+    participants: [task.roleId, reviewerRoleId],
+    facilitator: task.roleId,
+    config: {
+      maxRounds: 4,
+      discussionTimeoutMs: 20 * 60 * 1000,
+      requireConsensus: false,
+      pushIntermediateResults: false,
+      autoAggregateOnComplete: false,
+      aggregateTimeoutMs: 30 * 60 * 1000
+    }
+  };
+  if (task.sessionId !== undefined) createInput.sessionId = task.sessionId;
+  if (task.chatId !== undefined) createInput.chatId = task.chatId;
+  const collab = collabService.createCollaboration(createInput);
+  store.patchTaskMetadata(task.id, { collaborationId: collab.id });
+  return collab.id;
+}
+
+/**
+ * Build a "collaboration room" context string from all AgentMessages in the room.
+ * Injected into the instruction of review/iteration tasks so each agent sees
+ * what others produced — like reading a group chat before joining the conversation.
+ */
+function buildCollaborationRoomContext(collaborationId: string): string {
+  const collabService = new AgentCollaborationService(store);
+  const messages = collabService.listMessages(collaborationId);
+  if (messages.length === 0) return "";
+  const lines: string[] = ["## 协作室（其他智能体已完成的工作）"];
+  for (const msg of messages) {
+    const label = ROLE_LABELS[msg.fromRoleId] ?? msg.fromRoleId;
+    lines.push(`\n### ${label}：`);
+    lines.push(msg.content.slice(0, 1500));
+  }
+  return lines.join("\n");
+}
+
+// ── Quality convergence ───────────────────────────────────────────────────────
+
+const QUALITY_ASSESSMENT_TIMEOUT_MS = 60_000;
+
+const QUALITY_SYSTEM_PROMPT = `You are a quality assessor for an AI team. Given a review and the original task instruction, assess the quality of the work and determine if it needs revision.
+
+Output ONLY valid JSON:
+{"score":8,"passesThreshold":true,"issues":[],"recommendation":"approve"}
+
+Fields:
+- score: 1-10 integer (1=terrible, 10=perfect)
+- passesThreshold: true if score >= 7
+- issues: array of specific, actionable issues (empty if none)
+- recommendation: "approve" (score >= 7), "revise" (score 4-6), or "escalate" (score < 4 after multiple iterations)
+
+Critical: be concrete about issues. Generic feedback like "could be better" is not actionable.`;
+
+function qualityAssessmentFallback(reviewText: string): import("@vinko/shared").QualityAssessment {
+  const needsRevision = /需要修订|建议修改|存在问题|有问题|不足|不够|缺少|缺乏|issue|risk|improve|修改建议|改进建议/i.test(reviewText) &&
+    !/无需修订|不需要修订|无修改|完全正确|非常完善|质量很高/i.test(reviewText);
+  return {
+    score: needsRevision ? 5 : 8,
+    passesThreshold: !needsRevision,
+    issues: [],
+    recommendation: needsRevision ? "revise" : "approve"
+  };
+}
+
+async function assessReviewQuality(
+  reviewOutput: string,
+  originalInstruction: string,
+  iterationCount: number,
+  maxIterations: number
+): Promise<import("@vinko/shared").QualityAssessment> {
+  // Hard cap: if we've hit max iterations, force approve
+  if (iterationCount >= maxIterations) {
+    return { score: 7, passesThreshold: true, issues: [], recommendation: "approve" };
+  }
+
+  const text = `## Original Task\n${originalInstruction.slice(0, 500)}\n\n## Review Output\n${reviewOutput.slice(0, 1500)}\n\nIteration: ${iterationCount}/${maxIterations}`;
+
+  try {
+    const response = await fetch(`${resolveQualityLLMBaseUrl()}/chat/completions`, {
+      method: "POST",
+      headers: resolveQualityLLMHeaders(),
+      body: JSON.stringify({
+        model: resolveQualityLLMModel(),
+        temperature: 0,
+        thinking: { type: "enabled" },
+        messages: [
+          { role: "system", content: QUALITY_SYSTEM_PROMPT },
+          { role: "user", content: text }
+        ]
+      }),
+      signal: AbortSignal.timeout(QUALITY_ASSESSMENT_TIMEOUT_MS)
+    });
+
+    if (!response.ok) {
+      return qualityAssessmentFallback(reviewOutput);
+    }
+
+    const payload = (await response.json()) as {
+      choices?: Array<{ message?: { content?: unknown; reasoning?: unknown } }>;
+    };
+    const msg = payload.choices?.[0]?.message;
+    const raw =
+      typeof msg?.content === "string" ? msg.content :
+      typeof msg?.reasoning === "string" ? msg.reasoning : "";
+
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (!match) return qualityAssessmentFallback(reviewOutput);
+
+    const obj = JSON.parse(match[0]) as Record<string, unknown>;
+    const score = typeof obj.score === "number" ? Math.round(obj.score) : 5;
+    const issues = Array.isArray(obj.issues) ? (obj.issues as unknown[]).filter((i): i is string => typeof i === "string") : [];
+    const recommendation = obj.recommendation === "approve" ? "approve"
+      : obj.recommendation === "escalate" ? "escalate"
+      : "revise";
+
+    // Auto-escalate if score very low and already iterated
+    const effectiveRecommendation: "approve" | "revise" | "escalate" =
+      (score < 4 && iterationCount >= 2) ? "escalate" : recommendation;
+
+    return {
+      score,
+      passesThreshold: score >= 7,
+      issues,
+      recommendation: effectiveRecommendation
+    };
+  } catch {
+    return qualityAssessmentFallback(reviewOutput);
+  }
+}
+
+function resolveQualityLLMBaseUrl(): string {
+  const e = env;
+  if (e.primaryBackend === "zhipu") return e.zhipuBaseUrl.replace(/\/$/, "");
+  if (e.primaryBackend === "openai") return e.openaiBaseUrl.replace(/\/$/, "");
+  if (e.primaryBackend === "sglang") return e.sglangBaseUrl.replace(/\/$/, "");
+  return e.ollamaBaseUrl.replace(/\/$/, "");
+}
+
+function resolveQualityLLMModel(): string {
+  const e = env;
+  if (e.primaryBackend === "zhipu") return e.zhipuModel;
+  if (e.primaryBackend === "openai") return e.openaiModel;
+  if (e.primaryBackend === "sglang") return e.sglangModel;
+  return e.ollamaModel;
+}
+
+function resolveQualityLLMHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  const e = env;
+  const apiKey = e.primaryBackend === "zhipu" ? e.zhipuApiKey
+    : e.primaryBackend === "openai" ? e.openaiApiKey
+    : undefined;
+  if (apiKey) headers["authorization"] = `Bearer ${apiKey}`;
+  return headers;
+}
+
+/** Derive max iteration count from CollaborationPlan complexity */
+function resolveMaxIterations(task: TaskRecord): number {
+  const plan = task.metadata?.collaborationPlan as { complexity?: string } | undefined;
+  if (plan?.complexity === "trivial") return 1;
+  if (plan?.complexity === "simple") return 2;
+  if (plan?.complexity === "moderate") return 3;
+  if (plan?.complexity === "complex") return 4;
+  const config = store.getRuntimeConfig().collaboration.defaultConfig;
+  return config.maxRounds;
+}
+
+/**
+ * Apply a QualityAssessment to a parent task: create iteration task, send escalation card, or approve.
+ * Used by both single-reviewer and aggregated parallel-review paths.
+ */
+async function applyQualityAssessment(opts: {
+  assessment: import("@vinko/shared").QualityAssessment;
+  parentTask: TaskRecord;
+  parentTaskId: string;
+  collaborationId: string | undefined;
+  iterationCount: number;
+  maxIterations: number;
+  completed: TaskRecord;
+}): Promise<void> {
+  const { assessment, parentTask, parentTaskId, collaborationId, iterationCount, completed } = opts;
+
+  if (assessment.recommendation === "escalate") {
+    if (parentTask.source === "feishu" && parentTask.chatId) {
+      const executorLabel = ROLE_LABELS[parentTask.roleId] ?? parentTask.roleId;
+      const card = buildEscalationCard({
+        title: parentTask.title,
+        roleLabel: executorLabel,
+        issues: assessment.issues,
+        iterationCount,
+      });
+      await notifyFeishuCard(parentTask.chatId, card);
+    }
+  } else if (assessment.recommendation === "revise") {
+    const roomContext = collaborationId ? buildCollaborationRoomContext(collaborationId) : "";
+    const roomSection = roomContext ? `${roomContext}\n\n` : "";
+    const reviewSummary = completed.result?.summary ?? "";
+    const reviewDeliverable = completed.result?.deliverable?.slice(0, 1200) ?? "";
+    const createInput: Parameters<typeof store.createTask>[0] = {
+      source: parentTask.source,
+      roleId: parentTask.roleId,
+      title: `[修订] ${parentTask.title}`,
+      instruction: `${roomSection}请根据审阅意见修订你的输出。\n\n## 原任务\n${parentTask.instruction}\n\n## 审阅意见\n${reviewDeliverable}\n\n请针对每条具体问题进行修订，输出修订后的完整交付物。`,
+      priority: parentTask.priority,
+      metadata: {
+        lightCollaboration: true,
+        isLightIteration: true,
+        lightCollaborationParentId: parentTaskId,
+        collaborationIterationCount: iterationCount + 1,
+        collaborationMaxIterations: opts.maxIterations,
+        collaborationId
+      }
+    };
+    if (parentTask.sessionId !== undefined) createInput.sessionId = parentTask.sessionId;
+    if (parentTask.requestedBy !== undefined) createInput.requestedBy = parentTask.requestedBy;
+    if (parentTask.chatId !== undefined) createInput.chatId = parentTask.chatId;
+    const iterTask = store.createTask(createInput);
+    store.patchTaskMetadata(parentTaskId, { lightIterationTaskId: iterTask.id });
+    store.patchTaskMetadata(completed.id, { lightIterationTaskId: iterTask.id });
+    if (completed.sessionId) {
+      store.appendSessionMessage({
+        sessionId: completed.sessionId,
+        actorType: "system",
+        actorId: "task-runner",
+        messageType: "event",
+        content: `审阅发现改进点（质量评分 ${assessment.score}/10），已创建修订任务交回${ROLE_LABELS[parentTask.roleId] ?? parentTask.roleId}处理…`,
+        metadata: {
+          type: "light_iteration_queued",
+          iterationTaskId: iterTask.id,
+          reviewTaskId: completed.id,
+          parentTaskId,
+          qualityScore: assessment.score
+        }
+      });
+    }
+    if (iterationCount === 0 && parentTask.source === "feishu" && parentTask.chatId) {
+      const executorLabel = ROLE_LABELS[parentTask.roleId] ?? parentTask.roleId;
+      const card = buildLightIterationQueuedCard({
+        parentTitle: parentTask.title,
+        executorLabel,
+        reviewSummary,
+      });
+      await notifyFeishuCard(parentTask.chatId, card);
+    }
+  }
+  // else: "approve" — fall through, no action needed
+}
+
 const taskHeartbeatMs = Number.isFinite(taskHeartbeatMsRaw) ? Math.max(5_000, Math.round(taskHeartbeatMsRaw)) : 30_000;
 const codeExecutorEnabled = runtimeValues.getBoolean("CODE_EXECUTOR_ENABLED", false);
 const goalRunExecSoftTimeoutMsRaw = Number(process.env.GOAL_RUN_EXEC_SOFT_TIMEOUT_MS ?? "45000");
@@ -85,7 +490,7 @@ const toolRunCollabTimeoutMsRaw = Number(process.env.TOOL_RUN_COLLAB_TIMEOUT_MS 
 const toolRunCollabTimeoutMs = Number.isFinite(toolRunCollabTimeoutMsRaw)
   ? Math.max(60_000, Math.round(toolRunCollabTimeoutMsRaw))
   : 360_000;
-const taskConcurrencyRaw = Number(process.env.RUNNER_TASK_CONCURRENCY ?? "1");
+const taskConcurrencyRaw = Number(process.env.RUNNER_TASK_CONCURRENCY ?? "2");
 const taskConcurrency = Number.isFinite(taskConcurrencyRaw) ? Math.max(1, Math.min(12, Math.round(taskConcurrencyRaw))) : 1;
 const FEISHU_SMALLTALK_ONLY_PATTERN =
   /^(?:你好|您好|嗨|哈喽|hello|hi|hey|在吗|在不在|早上好|中午好|下午好|晚上好|谢谢|多谢|thx|thanks|thankyou|辛苦了)(?:呀|啊|哈|呢|啦|嘛|哇)?$/i;
@@ -115,6 +520,7 @@ const ARTIFACT_SCAN_IGNORED_DIRS = new Set([
   ".run",
   "node_modules",
   ".data",
+  "tmp",
   "dist",
   "build",
   "coverage",
@@ -126,6 +532,223 @@ const ARTIFACT_SCAN_IGNORED_DIRS = new Set([
 ]);
 const KNOWN_ROLE_IDS = new Set<RoleId>(ROLE_IDS);
 const goalRunCollabLastHeartbeatMs = new Map<string, number>();
+
+const TEXT_DELIVERABLE_REQUEST_PATTERN =
+  /(?:\bprd\b|roadmap|spec|report|brief|proposal|docx|pdf|markdown|\.md\b|文档|文件|报告|方案|简介|需求文档|产品需求|prd|路线图|纪要|总结)/i;
+
+function slugifyArtifactBaseName(task: TaskRecord): string {
+  const source = `${task.title} ${task.roleId}`
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return source || `task-${task.id.slice(0, 8)}`;
+}
+
+function requiresPersistedTextArtifact(task: TaskRecord): boolean {
+  const sample = `${task.title}\n${task.instruction}`;
+  return TEXT_DELIVERABLE_REQUEST_PATTERN.test(sample);
+}
+
+function injectDeliverableStructure(task: TaskRecord): string {
+  const metadata = task.metadata as { deliverableSections?: unknown };
+  const sections = Array.isArray(metadata.deliverableSections)
+    ? metadata.deliverableSections
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+        .slice(0, 12)
+    : [];
+  if (sections.length === 0) {
+    return task.instruction;
+  }
+  return [
+    task.instruction,
+    "",
+    "交付结构要求：",
+    ...sections.map((section, index) => `${index + 1}. ${section}`),
+    "",
+    "请按以上章节结构输出；如果某一节信息不足，也要写出最小可行内容和待确认项。"
+  ].join("\n");
+}
+
+function buildRoleExecutionContract(task: TaskRecord): string {
+  const lines: string[] = [];
+  switch (task.roleId) {
+    case "product":
+      lines.push("岗位执行约束:");
+      lines.push("- 输出必须先给结论，再给范围、风险、验收标准。");
+      lines.push("- 如果信息不足，明确列出待确认项，不要假装需求已经完整。");
+      break;
+    case "research":
+      lines.push("岗位执行约束:");
+      lines.push("- 输出必须包含：核心结论、关键证据/依据、主要风险、建议动作。");
+      lines.push("- 不要只罗列资料；先归纳判断，再给证据。");
+      break;
+    case "uiux":
+      lines.push("岗位执行约束:");
+      lines.push("- 输出必须包含：设计方向、关键界面/流程、体验风险、待确认项。");
+      lines.push("- 优先说明信息架构和交互，不要只给泛泛视觉描述。");
+      break;
+    case "frontend":
+    case "backend":
+    case "developer":
+    case "engineering":
+      lines.push("岗位执行约束:");
+      lines.push("- 输出必须包含：实际变更文件、实现说明、验证结果、剩余风险。");
+      lines.push("- 如果没有改动文件，必须明确说明阻塞原因。");
+      break;
+    case "qa":
+      lines.push("岗位执行约束:");
+      lines.push("- 输出必须包含：测试范围、验证结论、发现的问题、回归建议。");
+      lines.push("- 不能把“未测试”写成“已通过”。");
+      break;
+    default:
+      break;
+  }
+  return lines.join("\n");
+}
+
+function buildSkillExecutionContract(task: TaskRecord, skillIds: string[]): string {
+  const enabled = new Set(skillIds);
+  const lines: string[] = [];
+  const metadata = task.metadata as {
+    requestedSkillId?: unknown;
+    requestedSkillName?: unknown;
+    requestedSkillSourceLabel?: unknown;
+    requestedSkillSourceUrl?: unknown;
+    requestedSkillVersion?: unknown;
+    requestedSkillTargetRoleId?: unknown;
+  };
+  if (enabled.has("prd-writer") && task.roleId === "product") {
+    lines.push("技能执行约束(PRD Writer):");
+    lines.push("- 输出必须是结构化 PRD，而不是泛泛建议。");
+    lines.push("- 必须覆盖：背景、目标用户、核心流程、需求范围、验收标准、风险、待确认项、下一步。");
+    lines.push("- 如果信息不足，待确认项不能为空。");
+  }
+  if ((task.roleId === "engineering" || task.roleId === "developer") && typeof metadata.requestedSkillId === "string") {
+    lines.push("技能接入执行约束(Skill Runtime Integration):");
+    lines.push(`- 本次接入目标 skillId：${metadata.requestedSkillId}`);
+    if (typeof metadata.requestedSkillName === "string" && metadata.requestedSkillName.trim()) {
+      lines.push(`- 技能名称：${metadata.requestedSkillName.trim()}`);
+    }
+    if (typeof metadata.requestedSkillVersion === "string" && metadata.requestedSkillVersion.trim()) {
+      lines.push(`- 目标版本：${metadata.requestedSkillVersion.trim()}`);
+    }
+    if (typeof metadata.requestedSkillSourceLabel === "string" && metadata.requestedSkillSourceLabel.trim()) {
+      lines.push(`- 来源标识：${metadata.requestedSkillSourceLabel.trim()}`);
+    }
+    if (typeof metadata.requestedSkillSourceUrl === "string" && metadata.requestedSkillSourceUrl.trim()) {
+      lines.push(`- 来源地址：${metadata.requestedSkillSourceUrl.trim()}`);
+    }
+    if (typeof metadata.requestedSkillTargetRoleId === "string" && metadata.requestedSkillTargetRoleId.trim()) {
+      lines.push(`- 接入完成后应可安装到角色：${metadata.requestedSkillTargetRoleId.trim()}`);
+    }
+    lines.push("- 必须补齐本地 runtime skill definition、marketplace 元数据和安装可用性。");
+    lines.push("- 必须补充或更新测试，至少覆盖 skill 被发现、可安装或 discover_only 状态。");
+    lines.push("- 如果无法完整接入，也要明确缺失依赖、阻塞点和下一步。");
+  }
+  return lines.join("\n");
+}
+
+function buildVerifierOnlyContract(task: TaskRecord): string {
+  const metadata = task.metadata as { verifierOnly?: unknown };
+  if (metadata.verifierOnly !== true) {
+    return "";
+  }
+  return [
+    "验证者约束:",
+    "- 你只负责验证、挑错、给出风险和回归建议。",
+    "- 不要继续产出下一阶段主交付，也不要改写产品/实现方案。",
+    "- 若缺信息，明确指出缺口并给出最小补充问题。"
+  ].join("\n");
+}
+
+export function buildRoleAwareInstruction(task: TaskRecord, skillIds: string[] = []): string {
+  const deliverableInstruction = injectDeliverableStructure(task).trim();
+  const roleContract = buildRoleExecutionContract(task).trim();
+  const skillContract = buildSkillExecutionContract(task, skillIds).trim();
+  const verifierContract = buildVerifierOnlyContract(task).trim();
+  const contracts = [roleContract, skillContract, verifierContract].filter(Boolean);
+  if (contracts.length === 0) {
+    return deliverableInstruction;
+  }
+  return [deliverableInstruction, "", ...contracts].join("\n");
+}
+
+async function ensureTextDeliverableArtifact(
+  task: TaskRecord,
+  result: TaskResult,
+  existingArtifactFiles: string[]
+): Promise<{ artifactFiles: string[]; result: TaskResult }> {
+  const deliverableMode = resolveDeliverableMode(task);
+  if (deliverableMode === "answer_only") {
+    return { artifactFiles: existingArtifactFiles, result };
+  }
+  if (!requiresPersistedTextArtifact(task)) {
+    return { artifactFiles: existingArtifactFiles, result };
+  }
+  if (existingArtifactFiles.length > 0) {
+    return { artifactFiles: existingArtifactFiles, result };
+  }
+
+  const deliverableText = result.deliverable.trim();
+  if (!deliverableText) {
+    return { artifactFiles: existingArtifactFiles, result };
+  }
+
+  const workDir = buildWorkDir(env.workspaceRoot, task.id);
+  await mkdir(workDir, { recursive: true });
+
+  const baseName = slugifyArtifactBaseName(task);
+  const fileName = `${baseName}.md`;
+  const absolutePath = path.join(workDir, fileName);
+  await writeFile(absolutePath, deliverableText.endsWith("\n") ? deliverableText : `${deliverableText}\n`, "utf8");
+
+  const relPath = path.relative(env.workspaceRoot, absolutePath);
+  const nextArtifactFiles = Array.from(new Set([...existingArtifactFiles, relPath])).sort((a, b) => a.localeCompare(b));
+  const fileNotice = `\n\n已落地产物文件：\n- ${relPath}`;
+  const nextResult: TaskResult = {
+    ...result,
+    deliverable: result.deliverable.includes(relPath) ? result.deliverable : `${result.deliverable}${fileNotice}`
+  };
+
+  return {
+    artifactFiles: nextArtifactFiles,
+    result: nextResult
+  };
+}
+
+async function failDeliverableContract(task: TaskRecord, mode: string, errorText: string): Promise<void> {
+  const failed = store.failTask(task.id, errorText) ?? task;
+  store.patchTaskMetadata(task.id, {
+    deliverableMode: mode,
+    deliverableContractViolated: true
+  });
+  if (failed.sessionId) {
+    store.appendSessionMessage({
+      sessionId: failed.sessionId,
+      actorType: "system",
+      actorId: "task-runner",
+      messageType: "event",
+      content: `交付失败：${failed.title} 未满足产物契约`,
+      metadata: {
+        taskId: failed.id,
+        type: "deliverable_contract_failed",
+        deliverableMode: mode,
+        errorText
+      }
+    });
+  }
+  if (failed.source === "feishu" && failed.chatId) {
+    const card = buildTaskFailedCard({
+      title: failed.title,
+      roleLabel: ROLE_LABELS[failed.roleId] ?? failed.roleId,
+      reason: errorText
+    });
+    await notifyFeishuCard(failed.chatId, card);
+  }
+  syncFounderWorkflowFailure(failed);
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -426,6 +1049,64 @@ function buildFeishuApprovalDecisionCard(input: {
       }
     ]
   };
+}
+
+/**
+ * Build an interactive feedback card sent to users after a light_collaboration
+ * final delivery. Allows the user to rate the result 👍 or 👎.
+ */
+function buildTaskFeedbackCard(task: TaskRecord, summary: string): Record<string, unknown> {
+  const feedbackValue = { kind: "task_feedback", taskId: task.id, chatId: task.chatId };
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: "plain_text", content: "任务完成 ✓" },
+      template: "green"
+    },
+    elements: [
+      {
+        tag: "markdown",
+        content: `**${task.title}**\n\n${summary.slice(0, 300)}`
+      },
+      {
+        tag: "action",
+        actions: [
+          {
+            tag: "button",
+            text: { tag: "plain_text", content: "👍 满意" },
+            type: "primary",
+            value: { ...feedbackValue, rating: "good" }
+          },
+          {
+            tag: "button",
+            text: { tag: "plain_text", content: "👎 需改进" },
+            type: "danger",
+            value: { ...feedbackValue, rating: "poor" }
+          }
+        ]
+      }
+    ]
+  };
+}
+
+/**
+ * Send an interactive card to a Feishu chat (group or direct message).
+ */
+async function notifyFeishuCard(chatId: string, card: Record<string, unknown>): Promise<void> {
+  if (!isLikelyFeishuChatId(chatId)) return;
+  const client = createFeishuClient();
+  if (!client) return;
+  try {
+    await client.sendCardToChat(chatId, card);
+  } catch (error) {
+    store.appendAuditEvent({
+      category: "feishu",
+      entityType: "chat",
+      entityId: chatId,
+      message: "Failed to send Feishu feedback card",
+      payload: { error: error instanceof Error ? error.message : String(error) }
+    });
+  }
 }
 
 async function notifyFeishuApprovalStep(input: {
@@ -772,18 +1453,26 @@ function buildConversationHistory(task: TaskRecord): Array<{ role: "user" | "ass
     return [];
   }
 
+  const founderWorkflowMetadata = task.metadata as {
+    founderWorkflowKind?: unknown;
+    founderWorkflowStage?: unknown;
+  };
+  const isFounderPrdTask =
+    founderWorkflowMetadata.founderWorkflowKind === "founder_delivery" &&
+    founderWorkflowMetadata.founderWorkflowStage === "prd";
+
   // Fetch more messages but be generous with content — this goes into real message turns
   const recentMessages = store
     .listSessionMessages(task.sessionId, 120)
-    .slice(-30);
+    .slice(isFounderPrdTask ? -8 : -30);
 
   const turns: Array<{ role: "user" | "assistant"; content: string }> = [];
   for (const message of recentMessages) {
     const isUser = message.actorType === "user";
     const isAssistant = message.actorType === "role";
     if (!isUser && !isAssistant) continue;
-    // Truncate individual messages to 800 chars — generous enough for most context
-    const content = message.content.slice(0, 800);
+    // Founder PRD tasks should stay lean; later stages can consume richer context.
+    const content = message.content.slice(0, isFounderPrdTask ? 240 : 800);
     if (!content.trim()) continue;
     turns.push({ role: isUser ? "user" : "assistant", content });
   }
@@ -796,6 +1485,31 @@ function buildSessionContextSnippets(task: TaskRecord): TaskContextSnippet[] {
     return [];
   }
 
+  const founderWorkflowMetadata = task.metadata as {
+    founderWorkflowKind?: unknown;
+    founderWorkflowStage?: unknown;
+  };
+  const isFounderPrdTask =
+    founderWorkflowMetadata.founderWorkflowKind === "founder_delivery" &&
+    founderWorkflowMetadata.founderWorkflowStage === "prd";
+
+  const session = store.getSession(task.sessionId);
+  const sessionMetadata = (session?.metadata ?? {}) as {
+    projectMemory?: {
+      currentGoal?: unknown;
+      currentStage?: unknown;
+      latestUserRequest?: unknown;
+      latestSummary?: unknown;
+      keyDecisions?: unknown;
+      unresolvedQuestions?: unknown;
+      nextActions?: unknown;
+      latestArtifacts?: unknown;
+      updatedAt?: unknown;
+      updatedBy?: unknown;
+    };
+  };
+  const projectMemory = sessionMetadata.projectMemory;
+
   const relatedTasks = store
     .listTasks(500)
     .filter((item) => item.sessionId === task.sessionId && item.id !== task.id)
@@ -803,7 +1517,7 @@ function buildSessionContextSnippets(task: TaskRecord): TaskContextSnippet[] {
 
   const activeTasks = relatedTasks
     .filter((item) => item.status === "queued" || item.status === "running" || item.status === "waiting_approval")
-    .slice(0, 8)
+    .slice(0, isFounderPrdTask ? 3 : 8)
     .map((item) => ({
       id: item.id.slice(0, 8),
       roleId: item.roleId,
@@ -814,19 +1528,19 @@ function buildSessionContextSnippets(task: TaskRecord): TaskContextSnippet[] {
 
   const recentCompleted = relatedTasks
     .filter((item) => item.status === "completed")
-    .slice(0, 6)
+    .slice(0, isFounderPrdTask ? 2 : 6)
     .map((item) => ({
       id: item.id.slice(0, 8),
       roleId: item.roleId,
       title: item.title,
-      summary: item.result?.summary ?? "",
+      summary: (item.result?.summary ?? "").slice(0, isFounderPrdTask ? 120 : 240),
       updatedAt: item.updatedAt
     }));
 
   const activeCollaborations = store
     .listActiveAgentCollaborations()
     .filter((item) => item.sessionId === task.sessionId)
-    .slice(0, 4)
+    .slice(0, isFounderPrdTask ? 1 : 4)
     .map((item) => ({
       id: item.id.slice(0, 8),
       facilitator: item.facilitator,
@@ -834,7 +1548,144 @@ function buildSessionContextSnippets(task: TaskRecord): TaskContextSnippet[] {
       participants: item.participants
     }));
 
+  const normalizeMemoryString = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
+  const normalizeMemoryStringList = (value: unknown, limit = 6): string[] =>
+    Array.isArray(value)
+      ? value
+          .filter((entry): entry is string => typeof entry === "string")
+          .map((entry) => entry.trim())
+          .filter(Boolean)
+          .slice(0, limit)
+      : [];
+  const currentGoal = normalizeMemoryString(projectMemory?.currentGoal);
+  const currentStage = normalizeMemoryString(projectMemory?.currentStage);
+  const latestSummary = normalizeMemoryString(projectMemory?.latestSummary);
+  const latestRequest = normalizeMemoryString(projectMemory?.latestUserRequest);
+  const unresolvedQuestions = normalizeMemoryStringList(projectMemory?.unresolvedQuestions);
+  const nextActions = normalizeMemoryStringList(projectMemory?.nextActions);
+  const latestArtifacts = normalizeMemoryStringList(projectMemory?.latestArtifacts, 8);
+  const keyDecisions = normalizeMemoryStringList(projectMemory?.keyDecisions);
+
+  const buildRoleProjectBrief = (): string => {
+    if (!projectMemory) {
+      return "";
+    }
+    const base: string[] = [];
+    if (currentGoal) {
+      base.push(`当前目标: ${currentGoal}`);
+    }
+    if (currentStage) {
+      base.push(`当前阶段: ${currentStage}`);
+    }
+    if (latestRequest) {
+      base.push(`最近用户要求: ${latestRequest}`);
+    }
+    if (latestSummary) {
+      base.push(`最近团队结论: ${latestSummary}`);
+    }
+
+    switch (task.roleId) {
+      case "product":
+      case "research":
+        if (keyDecisions.length > 0) {
+          base.push(`关键决策:\n- ${keyDecisions.join("\n- ")}`);
+        }
+        if (unresolvedQuestions.length > 0) {
+          base.push(`待澄清问题:\n- ${unresolvedQuestions.join("\n- ")}`);
+        }
+        if (nextActions.length > 0) {
+          base.push(`优先推进动作:\n- ${nextActions.join("\n- ")}`);
+        }
+        break;
+      case "frontend":
+      case "backend":
+      case "developer":
+      case "engineering":
+        if (latestArtifacts.length > 0) {
+          base.push(`已产出文件/产物:\n- ${latestArtifacts.join("\n- ")}`);
+        }
+        if (nextActions.length > 0) {
+          base.push(`待实现动作:\n- ${nextActions.join("\n- ")}`);
+        }
+        if (unresolvedQuestions.length > 0) {
+          base.push(`实现前待确认:\n- ${unresolvedQuestions.join("\n- ")}`);
+        }
+        break;
+      case "qa":
+        if (latestArtifacts.length > 0) {
+          base.push(`待验证产物:\n- ${latestArtifacts.join("\n- ")}`);
+        }
+        if (unresolvedQuestions.length > 0) {
+          base.push(`测试前缺口:\n- ${unresolvedQuestions.join("\n- ")}`);
+        }
+        if (nextActions.length > 0) {
+          base.push(`建议验证动作:\n- ${nextActions.join("\n- ")}`);
+        }
+        break;
+      case "uiux":
+        if (keyDecisions.length > 0) {
+          base.push(`设计约束/方向:\n- ${keyDecisions.join("\n- ")}`);
+        }
+        if (unresolvedQuestions.length > 0) {
+          base.push(`体验待确认:\n- ${unresolvedQuestions.join("\n- ")}`);
+        }
+        if (nextActions.length > 0) {
+          base.push(`设计下一步:\n- ${nextActions.join("\n- ")}`);
+        }
+        break;
+      default:
+        if (nextActions.length > 0) {
+          base.push(`下一步:\n- ${nextActions.join("\n- ")}`);
+        }
+        if (unresolvedQuestions.length > 0) {
+          base.push(`待确认:\n- ${unresolvedQuestions.join("\n- ")}`);
+        }
+        break;
+    }
+
+    return capText(base.join("\n\n").trim(), isFounderPrdTask ? 900 : 1800);
+  };
+
+  const roleProjectBrief = buildRoleProjectBrief();
+
   return [
+    ...(projectMemory
+      ? [
+          ...(!isFounderPrdTask
+            ? [
+                {
+                  path: "runtime://session/project-memory",
+                  excerpt: capJsonText(
+                    {
+                      currentGoal: typeof projectMemory.currentGoal === "string" ? projectMemory.currentGoal : "",
+                      currentStage: typeof projectMemory.currentStage === "string" ? projectMemory.currentStage : "",
+                      latestUserRequest:
+                        typeof projectMemory.latestUserRequest === "string" ? projectMemory.latestUserRequest : "",
+                      latestSummary: typeof projectMemory.latestSummary === "string" ? projectMemory.latestSummary : "",
+                      keyDecisions: Array.isArray(projectMemory.keyDecisions) ? projectMemory.keyDecisions : [],
+                      unresolvedQuestions: Array.isArray(projectMemory.unresolvedQuestions)
+                        ? projectMemory.unresolvedQuestions
+                        : [],
+                      nextActions: Array.isArray(projectMemory.nextActions) ? projectMemory.nextActions : [],
+                      latestArtifacts: Array.isArray(projectMemory.latestArtifacts) ? projectMemory.latestArtifacts : [],
+                      updatedAt: typeof projectMemory.updatedAt === "string" ? projectMemory.updatedAt : "",
+                      updatedBy: typeof projectMemory.updatedBy === "string" ? projectMemory.updatedBy : ""
+                    },
+                    2600
+                  )
+                } satisfies TaskContextSnippet
+              ]
+            : []),
+          ...(roleProjectBrief
+            ? [
+                {
+                  path: `runtime://session/project-memory-${task.roleId}`,
+                  excerpt: roleProjectBrief
+                } satisfies TaskContextSnippet
+              ]
+            : [])
+        ]
+      : []),
     {
       path: "runtime://session/workflow-state",
       excerpt: capJsonText(
@@ -843,7 +1694,7 @@ function buildSessionContextSnippets(task: TaskRecord): TaskContextSnippet[] {
           recentCompleted,
           activeCollaborations
         },
-        2400
+        isFounderPrdTask ? 900 : 2400
       )
     }
   ];
@@ -1111,7 +1962,7 @@ async function ensureToolRunApproval(task: TaskRecord, toolRun: ToolRunRecord): 
   });
   const workflow = store.ensureApprovalWorkflow(
     approval.id,
-    toolRun.riskLevel === "high" ? ["cto", "ceo"] : ["cto"]
+    toolRun.riskLevel === "high" ? ["cto"] : ["cto"]
   );
   store.markToolRunApprovalPending(toolRun.id, approval.id);
   store.markTaskWaitingApproval(
@@ -1212,6 +2063,15 @@ async function completeToolTask(
   changedFiles: string[]
 ): Promise<void> {
   const normalizedChangedFiles = dedupeSortedStrings(changedFiles.flatMap((file) => extractArtifactFilesFromText(file)));
+  const deliverableMode = resolveDeliverableMode(task);
+  const deliverableValidation = validateDeliverableArtifacts({
+    task,
+    artifactFiles: normalizedChangedFiles
+  });
+  if (!deliverableValidation.ok) {
+    await failDeliverableContract(task, deliverableMode, deliverableValidation.error);
+    return;
+  }
   const completion = buildToolTaskResult({
     task,
     providerId,
@@ -1222,8 +2082,16 @@ async function completeToolTask(
   if (completed) {
     store.patchTaskMetadata(completed.id, {
       toolProviderId: providerId,
-      toolChangedFiles: normalizedChangedFiles
+      toolChangedFiles: normalizedChangedFiles,
+      deliverableMode,
+      deliverableContractViolated: false
     });
+    updateSessionProjectMemoryFromTask(completed, {
+      currentStage: "artifact_delivered"
+    });
+    syncSkillIntegrationOutcome(completed);
+    syncInstalledSkillVerification(completed);
+    syncFounderWorkflowProgress(completed);
   }
   if (completed?.sessionId) {
     store.appendSessionMessage({
@@ -1240,29 +2108,41 @@ async function completeToolTask(
     });
   }
   if (completed?.source === "feishu" && completed.chatId) {
-    const message = [
-      `${completed.title}`,
-      completion.result.summary,
-      "",
-      completion.result.deliverable.slice(0, 1200)
-    ].join("\n");
-    await notifyFeishu(completed.chatId, message);
+    const card = buildTaskCompletedCard({
+      title: completed.title,
+      roleLabel: ROLE_LABELS[completed.roleId] ?? completed.roleId,
+      summary: `${completion.result.summary}\n\n${completion.result.deliverable.slice(0, 800)}`,
+      workflowSummary: buildWorkflowStatusSummary(completed, { includeGoal: true, includeArtifacts: true })
+    });
+    await notifyFeishuCard(completed.chatId, card);
   }
 }
 
-async function processCodeExecutionTask(task: TaskRecord): Promise<boolean> {
+async function processCodeExecutionTask(
+  task: TaskRecord,
+  skillIds: string[],
+  skills: SkillBindingRecord[]
+): Promise<boolean> {
+  const effectiveTask: TaskRecord = {
+    ...task,
+    instruction: buildRoleAwareInstruction(task, skillIds)
+  };
+  persistTaskRuntimeSkillSnapshot(effectiveTask, skills);
   const config = store.getRuntimeConfig();
   const runtimeSecrets = store.getRuntimeSecrets();
-  const queuedRun = store.getQueuedExecutableToolRunForTask(task.id);
+  const queuedRun = store.getQueuedExecutableToolRunForTask(effectiveTask.id);
   if (queuedRun) {
-    const executed = await executeApprovedToolRun(task, queuedRun);
+    const executed = await executeApprovedToolRun(effectiveTask, queuedRun);
     if (executed.ok) {
-      await completeToolTask(task, queuedRun.providerId, executed.outputText, executed.changedFiles);
+      await completeToolTask(effectiveTask, queuedRun.providerId, executed.outputText, executed.changedFiles);
       return true;
     }
 
     if (queuedRun.riskLevel === "high") {
-      store.failTask(task.id, executed.errorText ?? "Approved high-risk tool run failed.");
+      const failed = store.failTask(effectiveTask.id, executed.errorText ?? "Approved high-risk tool run failed.");
+      if (failed) {
+        syncFounderWorkflowFailure(failed);
+      }
       return true;
     }
   }
@@ -1270,20 +2150,23 @@ async function processCodeExecutionTask(task: TaskRecord): Promise<boolean> {
   const statuses = listToolProviderStatuses(env, config.tools, runtimeSecrets);
   const providers = selectAvailableProviders(config.tools, statuses);
   if (providers.length === 0) {
-    store.failTask(task.id, "No tool provider is available. Install opencode/codex/claude binary first.");
+    const failed = store.failTask(task.id, "No tool provider is available. Install opencode/codex/claude binary first.");
+    if (failed) {
+      syncFounderWorkflowFailure(failed);
+    }
     return true;
   }
 
-  const riskLevel = detectToolRiskLevel(task.instruction, config.tools);
+  const riskLevel = detectToolRiskLevel(effectiveTask.instruction, config.tools);
   let lastError = "";
 
   for (const provider of providers) {
-    const instructions = [buildWorkspaceConstrainedInstruction(task)];
+    const instructions = [buildWorkspaceConstrainedInstruction(effectiveTask)];
     if (provider.providerId === "opencode") {
-      instructions.push(buildWorkspaceStrictRetryInstruction(task));
+      instructions.push(buildWorkspaceStrictRetryInstruction(effectiveTask));
     }
     for (let attemptIndex = 0; attemptIndex < instructions.length; attemptIndex += 1) {
-      const instruction = instructions[attemptIndex] ?? task.instruction;
+      const instruction = instructions[attemptIndex] ?? effectiveTask.instruction;
       const commandSpec = buildToolCommand({
         providerId: provider.providerId,
         instruction,
@@ -1300,28 +2183,28 @@ async function processCodeExecutionTask(task: TaskRecord): Promise<boolean> {
       }
 
       const toolRun = store.createToolRun({
-        taskId: task.id,
-        roleId: task.roleId,
+        taskId: effectiveTask.id,
+        roleId: effectiveTask.roleId,
         providerId: provider.providerId,
-        title: attemptIndex === 0 ? task.title : `${task.title} (retry-${attemptIndex})`,
+        title: attemptIndex === 0 ? effectiveTask.title : `${effectiveTask.title} (retry-${attemptIndex})`,
         instruction,
         command: commandSpec.command,
         args: commandSpec.args,
         riskLevel,
-        requestedBy: task.requestedBy,
+        requestedBy: effectiveTask.requestedBy,
         status: "queued",
         approvalStatus: "not_required"
       });
 
-      const approval = await ensureToolRunApproval(task, toolRun);
+      const approval = await ensureToolRunApproval(effectiveTask, toolRun);
       if (approval.state === "pending") {
         return true;
       }
 
       const executableRun = approval.approvedRun ?? store.getToolRun(toolRun.id) ?? toolRun;
-      const executed = await executeApprovedToolRun(task, executableRun);
+      const executed = await executeApprovedToolRun(effectiveTask, executableRun);
       if (executed.ok) {
-        await completeToolTask(task, provider.providerId, executed.outputText, executed.changedFiles);
+        await completeToolTask(effectiveTask, provider.providerId, executed.outputText, executed.changedFiles);
         return true;
       }
 
@@ -1332,18 +2215,28 @@ async function processCodeExecutionTask(task: TaskRecord): Promise<boolean> {
     }
   }
 
-  store.failTask(task.id, lastError || "All available tool providers failed.");
+  const failed = store.failTask(effectiveTask.id, lastError || "All available tool providers failed.");
+  if (failed) {
+    syncFounderWorkflowFailure(failed);
+  }
   return true;
 }
 
-async function processNormalTask(task: TaskRecord): Promise<boolean> {
+async function processNormalTask(
+  task: TaskRecord,
+  skillIds: string[],
+  skills: SkillBindingRecord[]
+): Promise<boolean> {
+  const effectiveTask: TaskRecord = {
+    ...task,
+    instruction: buildRoleAwareInstruction(task, skillIds)
+  };
+  persistTaskRuntimeSkillSnapshot(effectiveTask, skills);
   const config = store.getRuntimeConfig();
   const runtimeSecrets = store.getRuntimeSecrets();
-  const skills = store.resolveSkillsForRole(task.roleId);
-  const skillIds = skills.map((skill) => skill.skillId);
   const memoryBackend = config.memory.roleBackends[task.roleId] ?? config.memory.defaultBackend;
   const preferSemanticRetrieval = memoryBackend === "vector-db";
-  const snippets = await knowledgeBase.retrieve(task.instruction, 5, {
+  const snippets = await knowledgeBase.retrieve(effectiveTask.instruction, 5, {
     keywordWeight: preferSemanticRetrieval ? 0.45 : 0.7,
     semanticWeight: preferSemanticRetrieval ? 0.55 : 0.3,
     minSemanticScore: preferSemanticRetrieval ? 0.05 : 0.1
@@ -1352,49 +2245,323 @@ async function processNormalTask(task: TaskRecord): Promise<boolean> {
   const hasToolCallingBackend = env.primaryBackend === "zhipu" || env.primaryBackend === "sglang";
   const webSearchSnippets =
     !hasToolCallingBackend && skillIds.includes("web-search")
-      ? await retrieveWebSearchSnippets(task, skillIds)
+      ? await retrieveWebSearchSnippets(effectiveTask, skillIds)
       : [];
-  const runtimeSnippets = buildRuntimeContextSnippets(task);
-  const sessionSnippets = buildSessionContextSnippets(task);
-  const conversationHistory = buildConversationHistory(task);
+  const runtimeSnippets = buildRuntimeContextSnippets(effectiveTask);
+  const sessionSnippets = buildSessionContextSnippets(effectiveTask);
+  const conversationHistory = buildConversationHistory(effectiveTask);
   const runtimeTask =
-    task.source === "feishu"
+    effectiveTask.source === "feishu"
       ? {
-          ...task,
-          instruction: buildFeishuExecutionInstruction(task.instruction)
+          ...effectiveTask,
+          instruction: buildFeishuExecutionInstruction(effectiveTask.instruction)
         }
-      : task;
+      : {
+          ...effectiveTask,
+          instruction: effectiveTask.instruction
+        };
 
   // Build tool context so the agent can call tools autonomously
   const searchProvider = resolveSearchProviderId(store.getRuntimeSettings()["SEARCH_PROVIDER"]) ?? "";
   const toolContext = {
-    workDir: buildWorkDir(env.workspaceRoot, task.id),
+    workDir: buildWorkDir(env.workspaceRoot, effectiveTask.id),
     secrets: runtimeSecrets,
     searchProvider
   };
 
-  const output = await runtime.execute({
+  const runtimeExecuteInput: RuntimeExecutionInput = {
     task: runtimeTask,
     config,
     skills,
     snippets: [...runtimeSnippets, ...sessionSnippets, ...webSearchSnippets, ...snippets],
     toolContext,
-    conversationHistory
+    conversationHistory,
+    preExecutePlan: !task.pendingInput && !shouldFounderWorkflowBypassNeedsInput(task),
+    telemetry: initGlobalTelemetry(telemetryDb),
+    knowledgeBase
+  };
+
+  // Inject workspace context from session metadata for cross-session continuity
+  if (task.sessionId) {
+    const session = store.getSession(task.sessionId);
+    const ctx = session?.metadata?.workspaceContext as
+      | {
+          preferredTechStack?: string[];
+          communicationStyle?: "concise" | "detailed" | "default";
+          activeProjects?: Array<{ name: string; stage: string; lastUpdate: string }>;
+          keyDecisions?: Array<{ decision: string; rationale: string; timestamp: string }>;
+        }
+      | undefined;
+    if (ctx) {
+      const workspaceContext: NonNullable<RuntimeExecutionInput["workspaceContext"]> = {};
+      if (ctx.preferredTechStack) workspaceContext.preferredTechStack = ctx.preferredTechStack;
+      if (ctx.communicationStyle) workspaceContext.communicationStyle = ctx.communicationStyle;
+      if (ctx.activeProjects) workspaceContext.activeProjects = ctx.activeProjects;
+      if (ctx.keyDecisions) workspaceContext.keyDecisions = ctx.keyDecisions;
+      if (Object.keys(workspaceContext).length > 0) {
+        runtimeExecuteInput.workspaceContext = workspaceContext;
+      }
+    }
+  }
+
+  const output = await runtime.execute(runtimeExecuteInput);
+
+  // Detect __NEEDS_INPUT__ marker in LLM output for task-level user interaction
+  const needsInputMarker = output.result.deliverable.match(/__NEEDS_INPUT__\s*(?:\{[^}]*\})?/);
+  if (needsInputMarker) {
+    // Try to parse structured data from the marker
+    let question = output.result.deliverable;
+    let context: string | undefined = undefined;
+    const jsonMatch = needsInputMarker[0].match(/\{([^}]*)\}/);
+    if (jsonMatch) {
+      try {
+        const data = JSON.parse(`{${jsonMatch[1]}}`);
+        if (data.question && typeof data.question === "string") {
+          question = data.question;
+        }
+        if (data.context && typeof data.context === "string") {
+          context = data.context;
+        }
+      } catch {
+        // If JSON parse fails, extract question from text before the marker
+        question = output.result.deliverable.split("__NEEDS_INPUT__")[0]?.trim() || "请提供更多信息以帮助完成任务";
+      }
+    } else {
+      // No JSON, extract question from text before the marker
+      question = output.result.deliverable.split("__NEEDS_INPUT__")[0]?.trim() || "请提供更多信息以帮助完成任务";
+    }
+
+    // Pause the task
+    const paused = store.pauseTask(effectiveTask.id, { question, context });
+    if (paused && paused.sessionId) {
+      // Notify user via session message
+      store.appendSessionMessage({
+        sessionId: paused.sessionId,
+        actorType: "system",
+        actorId: "task-runner",
+        roleId: paused.roleId,
+        messageType: "text",
+        content: `任务需要你补充信息：${question}`,
+        metadata: {
+          taskId: paused.id,
+          pausedAt: paused.pendingInput?.pausedAt
+        }
+      });
+    }
+    if (paused?.source === "feishu" && paused.chatId) {
+      const card = buildTaskPausedCard({
+        title: paused.title,
+        roleLabel: ROLE_LABELS[paused.roleId] ?? paused.roleId,
+        question,
+        workflowSummary: buildWorkflowStatusSummary(paused, { includeGoal: true })
+      });
+      await notifyFeishuCard(paused.chatId, card);
+    }
+    // Do not complete the task - leave it in paused_input state
+    return true;
+  }
+
+  const persisted = await ensureTextDeliverableArtifact(effectiveTask, output.result, output.artifactFiles);
+  output.result = persisted.result;
+  output.artifactFiles = persisted.artifactFiles;
+  const deliverableMode = resolveDeliverableMode(effectiveTask);
+  const deliverableValidation = validateDeliverableArtifacts({
+    task: effectiveTask,
+    artifactFiles: output.artifactFiles
   });
+  if (!deliverableValidation.ok) {
+    await failDeliverableContract(effectiveTask, deliverableMode, deliverableValidation.error);
+    return true;
+  }
 
   const rawMessage = `${output.result.summary}\n\n${output.result.deliverable.slice(0, 1200)}`;
   const userFacingMessage =
-    task.source === "feishu"
+    effectiveTask.source === "feishu"
       ? condenseFeishuReplyIfNeeded({
-          instruction: task.instruction,
+          instruction: effectiveTask.instruction,
           message: sanitizeFeishuReplyText(rawMessage)
         })
       : rawMessage;
   // Persist any files created by tool calls (run_code / write_file) to task metadata
   if (output.artifactFiles.length > 0) {
-    store.patchTaskMetadata(task.id, { toolChangedFiles: output.artifactFiles });
+    store.patchTaskMetadata(effectiveTask.id, {
+      toolChangedFiles: output.artifactFiles,
+      runtimeBackendUsed: output.backendUsed,
+      runtimeModelUsed: output.modelUsed,
+      runtimeToolLoopEnabled: true,
+      runtimeToolRegistry: "default",
+      runtimeRulesEngine: "default",
+      deliverableMode,
+      deliverableContractViolated: false
+    });
+  } else {
+    store.patchTaskMetadata(effectiveTask.id, {
+      runtimeBackendUsed: output.backendUsed,
+      runtimeModelUsed: output.modelUsed,
+      runtimeToolLoopEnabled: true,
+      runtimeToolRegistry: "default",
+      runtimeRulesEngine: "default",
+      deliverableMode,
+      deliverableContractViolated: false
+    });
   }
-  const completed = store.completeTask(task.id, output.result, output.reflection);
+  const completed = store.completeTask(effectiveTask.id, output.result, output.reflection);
+  if (completed) {
+    updateSessionProjectMemoryFromTask(completed, {
+      currentStage: "artifact_delivered"
+    });
+    syncSkillIntegrationOutcome(completed);
+    syncInstalledSkillVerification(completed);
+    syncFounderWorkflowProgress(completed);
+
+    // Workspace memory: extract tech decisions and project context from completed task
+    syncWorkspaceMemoryFromTask(completed, output.result);
+
+    // Light collaboration: create a quick review task after primary task completes
+    if (completed.metadata?.lightCollaboration === true && !completed.metadata?.lightReviewTaskId && !completed.metadata?.isLightReview) {
+      // Phase 4: Determine reviewers from collaborationPlan, fallback to LIGHT_REVIEWER_MAP
+      const plan = completed.metadata?.collaborationPlan as { level?: string; suggestedReviewers?: string[] } | undefined;
+      const planReviewers: RoleId[] = (plan?.suggestedReviewers ?? []).filter((r): r is RoleId => ROLE_IDS.includes(r as RoleId));
+      const singleReviewerFallback = resolveLightCollaborationReviewer(completed.roleId);
+      const reviewers: RoleId[] = planReviewers.length > 0 ? planReviewers : [singleReviewerFallback];
+      const primaryReviewerRoleId = reviewers[0]!;
+
+      // Phase 2: Create collaboration room and record primary output
+      const collaborationId = ensureCollaborationRoom(completed, primaryReviewerRoleId);
+      const collabService = new AgentCollaborationService(store);
+      collabService.sendMessage({
+        collaborationId,
+        taskId: completed.id,
+        fromRoleId: completed.roleId,
+        toRoleIds: reviewers,
+        messageType: "summary",
+        content: `${output.result.summary}\n\n${output.result.deliverable.slice(0, 2000)}`
+      });
+
+      // Phase 4: Create parallel review tasks if multiple reviewers
+      const parallelReviewGroupId = reviewers.length > 1 ? crypto.randomUUID() : undefined;
+      const reviewTaskIds: string[] = [];
+      for (const reviewerRoleId of reviewers) {
+        const roomContext = buildCollaborationRoomContext(collaborationId);
+        const reviewInstruction = buildReviewInstruction(completed, output.result, reviewerRoleId, roomContext);
+        const reviewTaskMeta: Record<string, unknown> = {
+          lightCollaboration: true,
+          isLightReview: true,
+          verifierOnly: true,
+          lightCollaborationParentId: completed.id,
+          collaborationId
+        };
+        if (parallelReviewGroupId !== undefined) {
+          reviewTaskMeta.parallelReviewGroupId = parallelReviewGroupId;
+          reviewTaskMeta.parallelReviewTotal = reviewers.length;
+        }
+        const createReviewInput: Parameters<typeof store.createTask>[0] = {
+          source: completed.source,
+          roleId: reviewerRoleId,
+          title: `[轻量审阅] ${completed.title}`,
+          instruction: reviewInstruction,
+          priority: 5,
+          metadata: reviewTaskMeta
+        };
+        if (completed.sessionId !== undefined) createReviewInput.sessionId = completed.sessionId;
+        if (completed.requestedBy !== undefined) createReviewInput.requestedBy = completed.requestedBy;
+        if (completed.chatId !== undefined) createReviewInput.chatId = completed.chatId;
+        const reviewTask = store.createTask(createReviewInput);
+        reviewTaskIds.push(reviewTask.id);
+      }
+
+      store.patchTaskMetadata(completed.id, {
+        lightReviewTaskId: reviewTaskIds[0],
+        lightReviewTaskIds: reviewTaskIds
+      });
+      if (completed.sessionId) {
+        const reviewerLabels = reviewers.map((r) => ROLE_LABELS[r] ?? r).join("、");
+        store.appendSessionMessage({
+          sessionId: completed.sessionId,
+          actorType: "system",
+          actorId: "task-runner",
+          messageType: "event",
+          content: `已创建${reviewers.length > 1 ? `${reviewers.length}个` : ""}轻量审阅任务，${reviewerLabels}正在快速检查…`,
+          metadata: {
+            type: "light_review_queued",
+            reviewTaskIds,
+            parentTaskId: completed.id
+          }
+        });
+      }
+      if (completed.source === "feishu" && completed.chatId) {
+        const reviewerLabel = reviewers.map((r) => ROLE_LABELS[r] ?? r).join(" + ");
+        const card = buildLightReviewQueuedCard({
+          parentTitle: completed.title,
+          reviewerLabel,
+        });
+        await notifyFeishuCard(completed.chatId, card);
+      }
+    }
+
+    // Light collaboration: if this IS a review task, check whether revision is needed
+    if (
+      completed.metadata?.isLightReview === true &&
+      !completed.metadata?.lightIterationTaskId
+    ) {
+      const parentTaskId = completed.metadata?.lightCollaborationParentId as string | undefined;
+      const parentTask = parentTaskId ? store.getTask(parentTaskId) : undefined;
+      if (parentTask && !parentTask.metadata?.lightIterationTaskId) {
+
+        // Phase 2: Record review output into the collaboration room
+        const collaborationId = typeof completed.metadata?.collaborationId === "string"
+          ? completed.metadata.collaborationId
+          : typeof parentTask.metadata?.collaborationId === "string"
+            ? parentTask.metadata.collaborationId
+            : undefined;
+        if (collaborationId) {
+          const collabService = new AgentCollaborationService(store);
+          collabService.sendMessage({
+            collaborationId,
+            taskId: completed.id,
+            fromRoleId: completed.roleId,
+            toRoleIds: [parentTask.roleId],
+            messageType: "review_result",
+            content: `${output.result.summary}\n\n${output.result.deliverable.slice(0, 2000)}`
+          });
+        }
+
+        const reviewText = output.result.deliverable + " " + output.result.summary;
+        const iterationCount = typeof parentTask.metadata?.collaborationIterationCount === "number"
+          ? parentTask.metadata.collaborationIterationCount : 0;
+        const maxIterations = resolveMaxIterations(parentTask);
+
+        // Phase 4: If this is part of a parallel review group, wait until all are done
+        const parallelGroupId = completed.metadata?.parallelReviewGroupId as string | undefined;
+        if (parallelGroupId) {
+          const allReviewTaskIds = (parentTask.metadata?.lightReviewTaskIds as string[] | undefined) ?? [];
+          const allDone = allReviewTaskIds.every((tid) => {
+            const t = store.getTask(tid);
+            return t && (t.status === "completed" || t.status === "failed");
+          });
+          if (!allDone) {
+            // Other reviewers are still running — skip aggregation for now, they will trigger it
+            return true;
+          }
+
+          // Phase 4: Aggregate all parallel review outputs
+          const completedReviews = allReviewTaskIds
+            .map((tid) => store.getTask(tid))
+            .filter((t): t is NonNullable<typeof t> => t?.status === "completed");
+          const aggregatedText = completedReviews
+            .map((t) => `[${ROLE_LABELS[t.roleId] ?? t.roleId}的审阅]\n${t.result?.deliverable?.slice(0, 1000) ?? ""}`)
+            .join("\n\n");
+          const assessment = await assessReviewQuality(aggregatedText, parentTask.instruction, iterationCount, maxIterations);
+          await applyQualityAssessment({ assessment, parentTask, parentTaskId: parentTaskId!, collaborationId, iterationCount, maxIterations, completed });
+          return true;
+        }
+
+        // Phase 3 + 4: LLM-based quality assessment (falls back to regex if LLM fails)
+        const assessment = await assessReviewQuality(reviewText, parentTask.instruction, iterationCount, maxIterations);
+        await applyQualityAssessment({ assessment, parentTask, parentTaskId: parentTaskId!, collaborationId, iterationCount, maxIterations, completed });
+      }
+    }
+  }
   if (completed?.sessionId) {
     store.appendSessionMessage({
       sessionId: completed.sessionId,
@@ -1408,9 +2575,42 @@ async function processNormalTask(task: TaskRecord): Promise<boolean> {
       }
     });
   }
+
+  // Phase 2: Record iteration output into collaboration room
+  if (completed?.metadata?.isLightIteration === true && typeof completed.metadata?.collaborationId === "string") {
+    const collabId = completed.metadata.collaborationId;
+    const collabService = new AgentCollaborationService(store);
+    const parentTaskId = completed.metadata?.lightCollaborationParentId as string | undefined;
+    const parentTask = parentTaskId ? store.getTask(parentTaskId) : undefined;
+    const reviewerRoleId = parentTask ? resolveLightCollaborationReviewer(parentTask.roleId) : completed.roleId;
+    collabService.sendMessage({
+      collaborationId: collabId,
+      taskId: completed.id,
+      fromRoleId: completed.roleId,
+      toRoleIds: [reviewerRoleId],
+      messageType: "summary",
+      content: `[修订版本]\n${output.result.summary}\n\n${output.result.deliverable.slice(0, 2000)}`
+    });
+  }
+
   if (completed?.source === "feishu" && completed.chatId) {
-    const message = [`${completed.title}`, userFacingMessage].join("\n");
-    await notifyFeishu(completed.chatId, message);
+    // light_collaboration final deliverable → send interactive feedback card
+    const isFinalLightDeliverable =
+      completed.metadata?.lightCollaboration === true &&
+      completed.metadata?.isLightReview !== true &&
+      (completed.metadata?.isLightIteration === true || !completed.metadata?.lightReviewTaskId);
+    if (isFinalLightDeliverable) {
+      const card = buildTaskFeedbackCard(completed, output.result.summary);
+      await notifyFeishuCard(completed.chatId, card);
+    } else {
+      const card = buildTaskCompletedCard({
+        title: completed.title,
+        roleLabel: ROLE_LABELS[completed.roleId] ?? completed.roleId,
+        summary: userFacingMessage.slice(0, 800),
+        workflowSummary: buildWorkflowStatusSummary(completed, { includeGoal: true, includeArtifacts: true })
+      });
+      await notifyFeishuCard(completed.chatId, card);
+    }
     // If instruction asked to "send me" the file, upload and send artifacts
     if (shouldSendArtifactsToFeishu(completed.instruction)) {
       const allArtifacts = collectTaskArtifactFiles(completed);
@@ -1481,7 +2681,7 @@ function buildMiniGameExecutionConstraints(task: TaskRecord): string[] {
 
 function buildWorkspaceConstrainedInstruction(task: TaskRecord): string {
   const lines = [
-    task.instruction.trim(),
+    buildRoleAwareInstruction(task),
     "",
     "执行约束:",
     "- 输出结构必须包含：结论、关键依据、下一步行动（不超过 3 条）。",
@@ -1497,7 +2697,7 @@ function buildWorkspaceConstrainedInstruction(task: TaskRecord): string {
 
 function buildWorkspaceStrictRetryInstruction(task: TaskRecord): string {
   const lines = [
-    task.instruction.trim(),
+    buildRoleAwareInstruction(task),
     "",
     "重试约束(严格):",
     "- 输出结构必须包含：结论、关键依据、下一步行动（不超过 3 条）。",
@@ -1598,6 +2798,9 @@ function normalizeArtifactPath(input: string): string | undefined {
     return undefined;
   }
   candidate = candidate.replaceAll("\\", "/");
+  if (candidate.startsWith("-")) {
+    return undefined;
+  }
   if (path.isAbsolute(candidate)) {
     const normalizedAbsolute = path.normalize(candidate);
     const normalizedRoot = path.normalize(env.workspaceRoot);
@@ -1618,6 +2821,10 @@ function normalizeArtifactPath(input: string): string | undefined {
   if (!normalized || normalized.startsWith("../")) {
     return undefined;
   }
+  const [topLevelDir] = normalized.split("/", 1);
+  if (topLevelDir && ARTIFACT_SCAN_IGNORED_DIRS.has(topLevelDir)) {
+    return undefined;
+  }
   return normalized;
 }
 
@@ -1631,7 +2838,24 @@ function dedupeSortedStrings(values: string[]): string[] {
   ).sort((left, right) => left.localeCompare(right));
 }
 
-function extractArtifactFilesFromText(text: string): string[] {
+function normalizeGoalRunHandoffNextActions(values: string[]): string[] {
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    normalized.push(trimmed);
+    if (normalized.length >= 6) {
+      break;
+    }
+  }
+  return normalized;
+}
+
+export function extractArtifactFilesFromText(text: string): string[] {
   if (!text.trim()) {
     return [];
   }
@@ -1706,6 +2930,713 @@ function collectTaskArtifactFiles(task: TaskRecord): string[] {
     .listToolRunsByTask(task.id)
     .flatMap((toolRun) => extractArtifactFilesFromText([toolRun.outputText ?? "", toolRun.errorText ?? ""].join("\n")));
   return dedupeSortedStrings([...metadataFiles, ...resultFiles, ...toolRunFiles]);
+}
+
+function toProjectMemorySummary(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+  return normalized.length <= 240 ? normalized : `${normalized.slice(0, 239)}…`;
+}
+
+function extractProjectMemoryDecisions(task: TaskRecord): string[] {
+  const result = task.result;
+  if (!result) {
+    return [];
+  }
+  const candidates = [
+    result.summary,
+    ...result.followUps.map((item) => `后续动作：${item}`)
+  ];
+  return dedupeSortedStrings(candidates.map((item) => toProjectMemorySummary(item)).filter(Boolean)).slice(0, 6);
+}
+
+function updateSessionProjectMemoryFromTask(task: TaskRecord, patch?: {
+  currentStage?: string | undefined;
+  unresolvedQuestions?: string[] | undefined;
+  nextActions?: string[] | undefined;
+  latestSummary?: string | undefined;
+}): void {
+  if (!task.sessionId) {
+    return;
+  }
+  const artifacts = collectTaskArtifactFiles(task).slice(0, 12);
+  const result = task.result;
+  const stage =
+    patch?.currentStage ??
+    (task.status === "completed" ? "delivered" : task.status === "failed" || task.status === "cancelled" ? "blocked" : "executing");
+  const latestSummary =
+    patch?.latestSummary ??
+    (task.status === "completed"
+      ? toProjectMemorySummary(result?.summary ?? result?.deliverable ?? "")
+      : toProjectMemorySummary(task.errorText ?? ""));
+  const nextActions =
+    patch?.nextActions ??
+    (task.status === "completed" ? (result?.followUps ?? []).slice(0, 6) : []);
+  const unresolvedQuestions =
+    patch?.unresolvedQuestions ??
+    (task.status === "failed" || task.status === "cancelled" ? [task.errorText ?? "任务受阻"] : []);
+
+  store.updateSessionProjectMemory(
+    task.sessionId,
+    {
+      currentGoal: task.title,
+      currentStage: stage,
+      latestSummary,
+      keyDecisions: extractProjectMemoryDecisions(task),
+      unresolvedQuestions,
+      nextActions,
+      latestArtifacts: artifacts,
+      lastTaskId: task.id,
+      updatedBy: task.roleId
+    },
+    {
+      lastTaskId: task.id,
+      lastTaskStatus: task.status,
+      lastTaskRoleId: task.roleId
+    }
+  );
+}
+
+export function resolveSkillIntegrationCompletion(task: TaskRecord): {
+  requestedSkillId: string;
+  skillName: string;
+  installedRole: string;
+  runtimeAvailable: boolean;
+  installState: "local_installable" | "discover_only";
+} | null {
+  const metadata = task.metadata as {
+    requestedSkillId?: unknown;
+    requestedSkillName?: unknown;
+    requestedSkillTargetRoleId?: unknown;
+  };
+  const requestedSkillId =
+    typeof metadata.requestedSkillId === "string" ? metadata.requestedSkillId.trim() : "";
+  if (!requestedSkillId || task.status !== "completed") {
+    return null;
+  }
+
+  const definition = getSkillDefinition(requestedSkillId);
+  const runtimeAvailable = Boolean(definition);
+  const installState = runtimeAvailable ? "local_installable" : "discover_only";
+  const installedRole =
+    typeof metadata.requestedSkillTargetRoleId === "string" ? metadata.requestedSkillTargetRoleId.trim() : "";
+  const skillName =
+    typeof metadata.requestedSkillName === "string" && metadata.requestedSkillName.trim()
+      ? metadata.requestedSkillName.trim()
+      : requestedSkillId;
+  return {
+    requestedSkillId,
+    skillName,
+    installedRole,
+    runtimeAvailable,
+    installState
+  };
+}
+
+
+/**
+ * Extract tech stack decisions and project context from a completed task
+ * and persist them to workspace memory for cross-session continuity.
+ */
+function syncWorkspaceMemoryFromTask(task: TaskRecord, result: TaskResult): void {
+  try {
+    // Detect tech stack mentions in instruction + deliverable
+    const fullText = `${task.instruction} ${result.summary} ${result.deliverable.slice(0, 500)}`;
+    const techPatterns: Record<string, RegExp> = {
+      "React": /\bReact\b/i,
+      "Vue": /\bVue\.?js\b/i,
+      "Next.js": /\bNext\.js\b/i,
+      "TypeScript": /\bTypeScript\b/i,
+      "Node.js": /\bNode\.js\b/i,
+      "Python": /\bPython\b/i,
+      "FastAPI": /\bFastAPI\b/i,
+      "PostgreSQL": /\bPostgreSQL\b/i,
+      "MySQL": /\bMySQL\b/i,
+      "MongoDB": /\bMongoDB\b/i,
+      "Redis": /\bRedis\b/i,
+      "Docker": /\bDocker\b/i,
+      "Firebase": /\bFirebase\b/i,
+      "Tailwind": /\bTailwind\b/i
+    };
+
+    const detectedStack: string[] = [];
+    for (const [name, pattern] of Object.entries(techPatterns)) {
+      if (pattern.test(fullText)) {
+        detectedStack.push(name);
+      }
+    }
+
+    if (detectedStack.length > 0) {
+      const current = store.getWorkspaceMemory();
+      const existingStack = new Set(current.userPreferences.preferredTechStack);
+      const newEntries = detectedStack.filter((t) => !existingStack.has(t));
+      if (newEntries.length > 0) {
+        store.setWorkspacePreferences({
+          preferredTechStack: [...current.userPreferences.preferredTechStack, ...newEntries].slice(0, 10)
+        });
+      }
+    }
+
+    // Update active project context if instruction mentions a project name
+    const projectMatch = task.instruction.match(/(?:项目|project|系统|platform|app|应用)\s*[：:「"']?\s*([^\s，,。.「"']{2,20})/i);
+    if (projectMatch && projectMatch[1]) {
+      const projectName = projectMatch[1].trim();
+      if (projectName.length >= 2 && projectName.length <= 20) {
+        store.updateWorkspaceProject(projectName, "active");
+      }
+    }
+  } catch {
+    // Workspace memory sync is best-effort — never block task completion
+  }
+}
+
+function syncSkillIntegrationOutcome(task: TaskRecord): void {
+  const outcome = resolveSkillIntegrationCompletion(task);
+  if (!outcome) {
+    return;
+  }
+
+  store.patchTaskMetadata(task.id, {
+    requestedSkillInstallState: outcome.installState,
+    requestedSkillRuntimeAvailable: outcome.runtimeAvailable,
+    requestedSkillRuntimeCheckedAt: new Date().toISOString()
+  });
+
+  if (task.sessionId) {
+    store.appendSessionMessage({
+      sessionId: task.sessionId,
+      actorType: "system",
+      actorId: "task-runner",
+      messageType: "event",
+      content: outcome.runtimeAvailable
+        ? `Skill 已接入本地 runtime：${outcome.skillName}`
+        : `Skill 接入任务已完成，但本地 runtime 仍未识别：${outcome.skillName}`,
+      metadata: {
+        type: outcome.runtimeAvailable ? "skill_runtime_ready" : "skill_runtime_pending",
+        taskId: task.id,
+        skillId: outcome.requestedSkillId,
+        targetRoleId: outcome.installedRole,
+        installState: outcome.installState
+      }
+    });
+  }
+
+  updateSessionProjectMemoryFromTask(task, {
+    currentStage: outcome.runtimeAvailable ? "skill_runtime_ready" : "skill_runtime_pending",
+    latestSummary: outcome.runtimeAvailable
+      ? `Skill ${outcome.requestedSkillId} 已接入本地 runtime，可继续安装到 ${outcome.installedRole || "目标角色"}。`
+      : `Skill ${outcome.requestedSkillId} 接入任务已完成，但本地 runtime 尚未识别该 skill。`,
+    nextActions: outcome.runtimeAvailable
+      ? [
+          `给 ${outcome.installedRole || "目标角色"} 安装 ${outcome.requestedSkillId} skill`,
+          "验证安装后角色是否按 skill 正常工作"
+        ]
+      : ["检查 skill definition 是否正确加载", "确认 runtime/catalog 是否包含该 skill"]
+  });
+}
+
+function syncInstalledSkillVerification(task: TaskRecord): void {
+  const metadata = task.metadata as {
+    verifyInstalledSkillId?: unknown;
+    verifyInstalledSkillName?: unknown;
+  };
+  const skillId = typeof metadata.verifyInstalledSkillId === "string" ? metadata.verifyInstalledSkillId.trim() : "";
+  if (!skillId) {
+    return;
+  }
+  const verificationStatus =
+    task.status === "completed" ? "verified" : task.status === "failed" || task.status === "cancelled" ? "failed" : undefined;
+  if (!verificationStatus) {
+    return;
+  }
+  const binding = store.updateSkillBindingVerification({
+    scopeId: task.roleId,
+    skillId,
+    verificationStatus,
+    verifiedAt: new Date().toISOString(),
+    lastVerifiedTaskId: task.id
+  });
+  if (!binding) {
+    return;
+  }
+  const skillName =
+    typeof metadata.verifyInstalledSkillName === "string" && metadata.verifyInstalledSkillName.trim()
+      ? metadata.verifyInstalledSkillName.trim()
+      : skillId;
+  if (task.sessionId) {
+    store.appendSessionMessage({
+      sessionId: task.sessionId,
+      actorType: "system",
+      actorId: "task-runner",
+      messageType: "event",
+      content:
+        verificationStatus === "verified"
+          ? `Skill 已验证可用：${skillName}`
+          : `Skill 验证失败：${skillName}`,
+      metadata: {
+        type: verificationStatus === "verified" ? "skill_verified" : "skill_verify_failed",
+        taskId: task.id,
+        skillId,
+        roleId: task.roleId,
+        verificationStatus
+      }
+    });
+  }
+  updateSessionProjectMemoryFromTask(task, {
+    currentStage: verificationStatus === "verified" ? "skill_verified" : "skill_verification_failed",
+    latestSummary:
+      verificationStatus === "verified"
+        ? `Skill ${skillId} 已在 ${task.roleId} 上验证可用。`
+        : `Skill ${skillId} 在 ${task.roleId} 上的验证失败。`,
+    nextActions:
+      verificationStatus === "verified"
+        ? [`现在可以让 ${task.roleId} 正式按 ${skillId} 执行真实任务`]
+        : [`检查 ${task.roleId} 的验证输出和 skill 约束`, `修复 ${skillId} 后重新验证`]
+  });
+}
+
+type FounderWorkflowStage = "prd" | "implementation" | "qa" | "recap";
+
+function normalizeFounderWorkflowStage(value: unknown): FounderWorkflowStage | undefined {
+  return value === "prd" || value === "implementation" || value === "qa" || value === "recap" ? value : undefined;
+}
+
+function mapFounderWorkflowStageToOrchestrationStage(stage: FounderWorkflowStage | undefined): string {
+  switch (stage) {
+    case "prd":
+      return "spec";
+    case "implementation":
+      return "implementation";
+    case "qa":
+      return "verify";
+    case "recap":
+      return "deliver";
+    default:
+      return "spec";
+  }
+}
+
+function dedupeFounderStrings(values: string[], limit = 20): string[] {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean))).slice(0, limit);
+}
+
+function buildFounderDecisionEntries(task: TaskRecord): string[] {
+  const result = task.result;
+  return dedupeFounderStrings([
+    typeof result?.summary === "string" ? result.summary : "",
+    ...(Array.isArray(result?.followUps) ? result.followUps : []),
+    ...(task.errorText ? [task.errorText] : [])
+  ]);
+}
+
+function mergeFounderArtifactItems(existing: OrchestrationArtifactItem[], incoming: OrchestrationArtifactItem[]): OrchestrationArtifactItem[] {
+  const merged = new Map<string, OrchestrationArtifactItem>();
+  for (const item of [...existing, ...incoming]) {
+    if (!item.path) {
+      continue;
+    }
+    merged.set(item.path, item);
+  }
+  return Array.from(merged.values()).sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function buildFounderArtifactItems(task: TaskRecord, stage: string, status: OrchestrationArtifactItem["status"]): OrchestrationArtifactItem[] {
+  return collectTaskArtifactFiles(task).map((filePath) => ({
+    path: filePath,
+    title: path.basename(filePath),
+    stage,
+    status
+  }));
+}
+
+function ensureTaskOrchestrationState(task: TaskRecord, fallbackStage: string): OrchestrationStateRecord {
+  const metadata = task.metadata as Record<string, unknown>;
+  const existing = normalizeOrchestrationState(metadata.orchestrationState);
+  if (existing) {
+    return existing;
+  }
+  const goal =
+    typeof metadata.founderWorkflowOriginalInstruction === "string" && metadata.founderWorkflowOriginalInstruction.trim()
+      ? metadata.founderWorkflowOriginalInstruction.trim()
+      : task.instruction;
+  return createOrchestrationState({
+    ownerRoleId: task.roleId,
+    goal,
+    stage: fallbackStage,
+    updatedBy: task.roleId,
+    nextActions: []
+  });
+}
+
+function patchTaskOrchestrationState(task: TaskRecord, patch: OrchestrationStatePatch, fallbackStage: string): OrchestrationStateRecord {
+  const baseState = ensureTaskOrchestrationState(task, fallbackStage);
+  const nextState = mergeOrchestrationState(baseState, patch) ?? baseState;
+  store.patchTaskMetadata(task.id, {
+    orchestrationMode: "main_agent",
+    orchestrationState: nextState
+  });
+  return nextState;
+}
+
+function resolveFounderWorkflowRootTask(task: TaskRecord): TaskRecord | undefined {
+  const metadata = task.metadata as Record<string, unknown>;
+  const rootTaskId = typeof metadata.founderWorkflowRootTaskId === "string" && metadata.founderWorkflowRootTaskId.trim()
+    ? metadata.founderWorkflowRootTaskId.trim()
+    : task.id;
+  return store.getTask(rootTaskId) ?? (rootTaskId === task.id ? task : undefined);
+}
+
+function syncFounderOrchestrationState(task: TaskRecord, patch: OrchestrationStatePatch, fallbackStage: string): void {
+  const rootTask = resolveFounderWorkflowRootTask(task) ?? task;
+  const nextState = patchTaskOrchestrationState(rootTask, patch, fallbackStage);
+  if (task.id !== rootTask.id) {
+    store.patchTaskMetadata(task.id, {
+      orchestrationMode: "main_agent",
+      orchestrationState: nextState,
+      founderWorkflowRootTaskId: rootTask.id
+    });
+  }
+}
+
+function shortenFounderText(value: string, maxLength = 72): string {
+  const normalized = value.trim().replace(/\s+/g, " ");
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function capFounderBlock(value: string, maxLength = 1200): string {
+  const normalized = value.trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function resolveFounderBuildRole(text: string): RoleId {
+  const normalized = text.toLowerCase();
+  if (/(?:api|接口|数据库|服务端|后端|auth|鉴权|schema)/i.test(normalized)) {
+    return "backend";
+  }
+  if (/(?:页面|官网|landing|首页|ui|ux|前端|login|表单|dashboard)/i.test(normalized)) {
+    return "frontend";
+  }
+  return "engineering";
+}
+
+function shouldFounderWorkflowBypassNeedsInput(task: TaskRecord): boolean {
+  const metadata = task.metadata as Record<string, unknown>;
+  if (metadata.founderWorkflowKind !== "founder_delivery") {
+    return false;
+  }
+  const stage = normalizeFounderWorkflowStage(metadata.founderWorkflowStage);
+  return stage === "implementation" || stage === "qa" || stage === "recap";
+}
+
+export function resolveFounderWorkflowNextSpec(task: TaskRecord): {
+  nextStage: FounderWorkflowStage;
+  roleId: RoleId;
+  title: string;
+  instruction: string;
+  deliverableMode: "artifact_required";
+  deliverableSections: string[];
+  verifierOnly: boolean;
+  stepIndex: number;
+} | undefined {
+  const metadata = task.metadata as Record<string, unknown>;
+  if (metadata.founderWorkflowKind !== "founder_delivery" || task.status !== "completed") {
+    return undefined;
+  }
+  const stage = normalizeFounderWorkflowStage(metadata.founderWorkflowStage);
+  if (!stage) {
+    return undefined;
+  }
+  const originalInstruction =
+    typeof metadata.founderWorkflowOriginalInstruction === "string" && metadata.founderWorkflowOriginalInstruction.trim()
+      ? metadata.founderWorkflowOriginalInstruction.trim()
+      : task.instruction;
+  const summary = task.result?.summary?.trim() || "";
+  const deliverable = capFounderBlock(task.result?.deliverable?.trim() || "", 1200);
+  const artifacts = collectTaskArtifactFiles(task).slice(0, 4);
+  const artifactSection = artifacts.length > 0 ? `\n相关产物：\n- ${artifacts.join("\n- ")}` : "";
+  const titleSource = shortenFounderText(originalInstruction, 48) || shortenFounderText(task.title, 48);
+
+  if (stage === "prd") {
+    const roleId = resolveFounderBuildRole(originalInstruction);
+    return {
+      nextStage: "implementation",
+      roleId,
+      title: `Founder Delivery / Build: ${titleSource}`,
+      instruction: [
+        "你正在执行 Founder Delivery Loop 的实现阶段。",
+        "请基于以下原始目标和上一阶段产物，直接在 workspace 中完成最小可用实现，并产出真实变更文件。",
+        "如果缺少技术细节，请使用合理默认假设继续推进，不要因为技术栈、认证方案、UI 组件库未明确而暂停等待用户输入。",
+        "默认假设优先级：React + TypeScript + Vite；认证先用本地 mock / 假登录流程占位，并在交付中明确记录这些假设与后续替换点。",
+        "",
+        `原始目标：${originalInstruction}`,
+        summary ? `PRD 摘要：${summary}` : "",
+        deliverable ? `PRD 交付：\n${deliverable}` : "",
+        artifactSection
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      deliverableMode: "artifact_required",
+      deliverableSections: ["变更文件", "实现说明", "启动命令", "验证结果", "剩余风险"],
+      verifierOnly: false,
+      stepIndex: 2
+    };
+  }
+
+  if (stage === "implementation") {
+    return {
+      nextStage: "qa",
+      roleId: "qa",
+      title: `Founder Delivery / QA: ${titleSource}`,
+      instruction: [
+        "你正在执行 Founder Delivery Loop 的验证阶段。",
+        "请基于以下原始目标与实现交付，输出测试步骤、通过标准、失败场景和最终验证结论。",
+        "",
+        `原始目标：${originalInstruction}`,
+        summary ? `实现摘要：${summary}` : "",
+        deliverable ? `实现交付：\n${deliverable}` : "",
+        artifactSection
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      deliverableMode: "artifact_required",
+      deliverableSections: ["测试步骤", "通过标准", "失败场景", "验证结论", "待修复项"],
+      verifierOnly: true,
+      stepIndex: 3
+    };
+  }
+
+  if (stage === "qa") {
+    return {
+      nextStage: "recap",
+      roleId: "operations",
+      title: `Founder Delivery / Recap: ${titleSource}`,
+      instruction: [
+        "你正在执行 Founder Delivery Loop 的 recap 阶段。",
+        "请把本次交付过程沉淀成创始人可直接阅读的 recap，说明完成事项、关键进展、阻塞、下一步和待决策项。",
+        "",
+        `原始目标：${originalInstruction}`,
+        summary ? `验证摘要：${summary}` : "",
+        deliverable ? `验证交付：\n${deliverable}` : "",
+        artifactSection
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      deliverableMode: "artifact_required",
+      deliverableSections: ["阶段结论", "已完成事项", "关键进展", "阻塞问题", "下一步", "待决策项"],
+      verifierOnly: false,
+      stepIndex: 4
+    };
+  }
+
+  return undefined;
+}
+
+function syncFounderWorkflowFailure(task: TaskRecord): void {
+  const metadata = task.metadata as Record<string, unknown>;
+  if (metadata.founderWorkflowKind !== "founder_delivery") {
+    return;
+  }
+  const stage = normalizeFounderWorkflowStage(metadata.founderWorkflowStage) ?? "prd";
+  const orchestrationStage = mapFounderWorkflowStageToOrchestrationStage(stage);
+  syncFounderOrchestrationState(
+    task,
+    {
+      progress: {
+        stage: orchestrationStage,
+        status: "blocked",
+        blocked: dedupeFounderStrings([task.title, task.errorText ?? ""]),
+        nextActions: task.errorText ? [`修复 ${stage} 阶段阻塞：${task.errorText}`] : [`修复 ${stage} 阶段阻塞`]
+      },
+      decision: {
+        summary: task.errorText ?? `Founder workflow blocked at ${stage}`,
+        entries: buildFounderDecisionEntries(task)
+      },
+      artifactIndex: {
+        items: mergeFounderArtifactItems(
+          ensureTaskOrchestrationState(resolveFounderWorkflowRootTask(task) ?? task, orchestrationStage).artifactIndex.items,
+          buildFounderArtifactItems(task, orchestrationStage, "failed")
+        )
+      },
+      verificationStatus: stage === "qa" ? "failed" : undefined,
+      updatedBy: task.roleId
+    },
+    orchestrationStage
+  );
+  if (task.sessionId) {
+    store.appendSessionMessage({
+      sessionId: task.sessionId,
+      actorType: "system",
+      actorId: "task-runner",
+      messageType: "event",
+      content: `Founder Delivery Loop 在 ${stage} 阶段受阻：${task.title}`,
+      metadata: {
+        type: "founder_workflow_blocked",
+        taskId: task.id,
+        stage,
+        errorText: task.errorText ?? ""
+      }
+    });
+  }
+  updateSessionProjectMemoryFromTask(task, {
+    currentStage: `founder_delivery_${stage}_blocked`,
+    unresolvedQuestions: task.errorText ? [task.errorText] : undefined
+  });
+}
+
+function syncFounderWorkflowProgress(task: TaskRecord): void {
+  const metadata = task.metadata as Record<string, unknown>;
+  if (metadata.founderWorkflowKind !== "founder_delivery" || task.status !== "completed") {
+    return;
+  }
+  const stage = normalizeFounderWorkflowStage(metadata.founderWorkflowStage);
+  if (!stage) {
+    return;
+  }
+
+  const orchestrationStage = mapFounderWorkflowStageToOrchestrationStage(stage);
+  const nextSpec = resolveFounderWorkflowNextSpec(task);
+  const rootTask = resolveFounderWorkflowRootTask(task) ?? task;
+  const rootState = ensureTaskOrchestrationState(rootTask, orchestrationStage);
+  const completedStages = dedupeFounderStrings([...rootState.progress.completed, orchestrationStage]);
+  const nextOrchestrationStage = nextSpec ? mapFounderWorkflowStageToOrchestrationStage(nextSpec.nextStage) : "deliver";
+  const nextProgressStatus = nextSpec ? "active" : "completed";
+  const nextVerificationStatus = stage === "qa" ? "verified" : rootState.verificationStatus;
+  const nextArtifacts = mergeFounderArtifactItems(
+    rootState.artifactIndex.items,
+    buildFounderArtifactItems(task, orchestrationStage, stage === "qa" ? "verified" : "produced")
+  );
+  syncFounderOrchestrationState(
+    task,
+    {
+      progress: {
+        stage: nextSpec ? nextOrchestrationStage : "deliver",
+        status: nextProgressStatus,
+        completed: completedStages,
+        inFlight: nextSpec ? [nextOrchestrationStage] : [],
+        blocked: [],
+        awaitingInput: [],
+        nextActions: nextSpec ? [`dispatch ${nextSpec.nextStage} stage`] : ["delivery loop completed"]
+      },
+      decision: {
+        summary: task.result?.summary ?? rootState.decision.summary,
+        entries: dedupeFounderStrings([...rootState.decision.entries, ...buildFounderDecisionEntries(task)], 30)
+      },
+      artifactIndex: {
+        items: nextArtifacts
+      },
+      verificationStatus: nextVerificationStatus,
+      mergeReason: nextSpec ? `stage_completed:${stage}` : "workflow_completed",
+      updatedBy: task.roleId
+    },
+    orchestrationStage
+  );
+
+  if (!nextSpec) {
+    if (task.sessionId) {
+      store.appendSessionMessage({
+        sessionId: task.sessionId,
+        actorType: "system",
+        actorId: "task-runner",
+        messageType: "event",
+        content: `Founder Delivery Loop 已完成：${task.title}`,
+        metadata: {
+          type: "founder_workflow_completed",
+          taskId: task.id,
+          stage
+        }
+      });
+    }
+    updateSessionProjectMemoryFromTask(task, {
+      currentStage: "founder_delivery_completed",
+      nextActions: ["复用本次产物推进下一轮需求或发布动作"]
+    });
+    return;
+  }
+
+  if (store.listTaskChildren(task.id).length > 0) {
+    return;
+  }
+
+  const workflowId =
+    typeof metadata.founderWorkflowId === "string" && metadata.founderWorkflowId.trim() ? metadata.founderWorkflowId.trim() : task.id;
+  const originalInstruction =
+    typeof metadata.founderWorkflowOriginalInstruction === "string" && metadata.founderWorkflowOriginalInstruction.trim()
+      ? metadata.founderWorkflowOriginalInstruction.trim()
+      : task.instruction;
+  const childState = mergeOrchestrationState(ensureTaskOrchestrationState(rootTask, orchestrationStage), {
+    progress: {
+      stage: nextOrchestrationStage,
+      status: "active",
+      completed: completedStages,
+      inFlight: [nextOrchestrationStage],
+      blocked: [],
+      awaitingInput: [],
+      nextActions: [`complete ${nextSpec.nextStage} stage and report back to main agent`]
+    },
+    branchReason: nextSpec.roleId !== rootTask.roleId ? `specialist_${nextSpec.roleId}` : undefined,
+    updatedBy: task.roleId
+  }) ?? ensureTaskOrchestrationState(rootTask, orchestrationStage);
+  const child = store.createTask({
+    sessionId: task.sessionId,
+    source: task.source,
+    roleId: nextSpec.roleId,
+    title: nextSpec.title,
+    instruction: nextSpec.instruction,
+    priority: Math.max(80, task.priority - 1),
+    requestedBy: task.requestedBy,
+    chatId: task.chatId,
+    metadata: {
+      founderWorkflowKind: "founder_delivery",
+      founderWorkflowId: workflowId,
+      founderWorkflowRootTaskId: rootTask.id,
+      founderWorkflowStage: nextSpec.nextStage,
+      founderWorkflowStepIndex: nextSpec.stepIndex,
+      founderWorkflowStepTotal: 4,
+      founderWorkflowOriginalInstruction: originalInstruction,
+      founderWorkflowPreviousTaskId: task.id,
+      routeTemplateId: "tpl-founder-delivery-loop",
+      routeTemplateName: "Founder Delivery Loop",
+      deliverableMode: nextSpec.deliverableMode,
+      deliverableSections: nextSpec.deliverableSections,
+      verifierOnly: nextSpec.verifierOnly,
+      originalInstruction,
+      orchestrationMode: "main_agent",
+      orchestrationState: childState
+    }
+  });
+  store.createTaskRelation({
+    parentTaskId: task.id,
+    childTaskId: child.id,
+    relationType: "split"
+  });
+  if (task.sessionId) {
+    store.appendSessionMessage({
+      sessionId: task.sessionId,
+      actorType: "system",
+      actorId: "task-runner",
+      messageType: "event",
+      content: `Founder Delivery Loop 已推进到 ${nextSpec.nextStage} 阶段：${child.title}`,
+      metadata: {
+        type: "founder_workflow_advanced",
+        taskId: task.id,
+        nextTaskId: child.id,
+        currentStage: stage,
+        nextStage: nextSpec.nextStage
+      }
+    });
+  }
+  updateSessionProjectMemoryFromTask(task, {
+    currentStage: `founder_delivery_${nextSpec.nextStage}`,
+    nextActions: [`等待 ${nextSpec.roleId} 完成 ${nextSpec.nextStage} 阶段交付`]
+  });
 }
 
 function collectGoalExecutionEvidence(task: TaskRecord): {
@@ -2252,6 +4183,103 @@ function buildGoalRunResult(run: GoalRunRecord): GoalRunResult {
   };
 }
 
+function summarizeGoalRunInputs(run: GoalRunRecord): string {
+  const inputMap = store.getGoalRunInputMap(run.id);
+  const entries = Object.entries(inputMap)
+    .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
+    .slice(0, 8);
+  if (entries.length === 0) {
+    return run.objective.slice(0, 400);
+  }
+  return `${run.objective}\n${entries.join("\n")}`.slice(0, 1200);
+}
+
+export function resolveGoalRunHandoffNextActions(input: {
+  task?: Pick<TaskRecord, "result"> | undefined;
+  runContext: Record<string, unknown>;
+  nextActions?: string[] | undefined;
+}): string[] {
+  if (input.nextActions !== undefined) {
+    return normalizeGoalRunHandoffNextActions(input.nextActions);
+  }
+  const taskFollowUps = input.task?.result?.followUps;
+  if (Array.isArray(taskFollowUps) && taskFollowUps.length > 0) {
+    return normalizeGoalRunHandoffNextActions(taskFollowUps);
+  }
+  return normalizeGoalRunHandoffNextActions(contextStringArray(input.runContext, "next_actions"));
+}
+
+function buildGoalRunHandoffArtifact(input: {
+  run: GoalRunRecord;
+  stage: GoalRunRecord["currentStage"];
+  task?: TaskRecord | undefined;
+  taskTraceId?: string | undefined;
+  summary: string;
+  artifactFiles?: string[] | undefined;
+  completedRoles?: RoleId[] | undefined;
+  failedRoles?: RoleId[] | undefined;
+  approvalNeeds?: string[] | undefined;
+  nextActions?: string[] | undefined;
+}): { id: string; artifact: import("@vinko/shared").StageHandoffArtifact } {
+  const decisions = dedupeSortedStrings([
+    ...(input.completedRoles ?? []).map((roleId) => `completed:${roleId}`),
+    ...(input.failedRoles ?? []).map((roleId) => `failed:${roleId}`)
+  ]);
+  const unresolvedQuestions =
+    input.run.status === "awaiting_input"
+      ? input.run.awaitingInputFields.map((field) => field.trim()).filter(Boolean)
+      : [];
+  const nextActions = resolveGoalRunHandoffNextActions({
+    task: input.task,
+    runContext: input.run.context,
+    nextActions: input.nextActions
+  });
+  return store.appendGoalRunHandoffArtifact({
+    goalRunId: input.run.id,
+    stage: input.stage,
+    taskId: input.task?.id,
+    taskTraceId: input.taskTraceId,
+    summary: input.summary,
+    artifacts: dedupeSortedStrings(input.artifactFiles ?? []),
+    decisions,
+    unresolvedQuestions,
+    nextActions,
+    approvalNeeds: dedupeSortedStrings(input.approvalNeeds ?? [])
+  });
+}
+
+function appendGoalRunTrace(input: {
+  run: GoalRunRecord;
+  stage: GoalRunRecord["currentStage"];
+  status: import("@vinko/shared").GoalRunTraceRecord["status"];
+  task?: TaskRecord | undefined;
+  outputSummary?: string | undefined;
+  artifactFiles?: string[] | undefined;
+  completedRoles?: RoleId[] | undefined;
+  failedRoles?: RoleId[] | undefined;
+  approvalGateHits?: number | undefined;
+  failureCategory?: string | undefined;
+  handoffArtifactId?: string | undefined;
+  metadata?: Record<string, unknown> | undefined;
+}): void {
+  store.appendGoalRunTrace({
+    goalRunId: input.run.id,
+    stage: input.stage,
+    status: input.status,
+    taskId: input.task?.id,
+    taskTraceId: input.task?.id,
+    inputSummary: summarizeGoalRunInputs(input.run),
+    outputSummary: input.outputSummary ?? "",
+    artifactFiles: input.artifactFiles ?? [],
+    completedRoles: input.completedRoles ?? [],
+    failedRoles: input.failedRoles ?? [],
+    approvalGateHits: input.approvalGateHits ?? 0,
+    failureCategory: input.failureCategory,
+    handoffArtifactId: input.handoffArtifactId,
+    metadata: input.metadata
+  });
+}
+
 async function processGoalRun(): Promise<boolean> {
   const claimed = store.claimNextQueuedGoalRun() ?? store.listGoalRuns({ status: "running", limit: 1 })[0];
   if (!claimed) {
@@ -2288,6 +4316,16 @@ async function processGoalRun(): Promise<boolean> {
             fields: missing
           }
         });
+        appendGoalRunTrace({
+          run,
+          stage: "discover",
+          status: "awaiting_input",
+          outputSummary: prompt,
+          failureCategory: "input_required",
+          metadata: {
+            fields: missing
+          }
+        });
         await notifyGoalRunProgress(updated, prompt);
         return true;
       }
@@ -2298,6 +4336,13 @@ async function processGoalRun(): Promise<boolean> {
         eventType: "stage_changed",
         message: "Discover completed, moving to plan",
         payload: {}
+      });
+      appendGoalRunTrace({
+        run,
+        stage: "discover",
+        status: "completed",
+        outputSummary: "Discover completed",
+        metadata: {}
       });
       store.queueGoalRun(run.id, "plan");
       return true;
@@ -2313,6 +4358,15 @@ async function processGoalRun(): Promise<boolean> {
         message: "Plan generated, moving to execute",
         payload: {
           plan
+        }
+      });
+      appendGoalRunTrace({
+        run: planned,
+        stage: "plan",
+        status: "completed",
+        outputSummary: JSON.stringify(plan).slice(0, 1200),
+        metadata: {
+          planGenerated: true
         }
       });
       store.queueGoalRun(planned.id, "execute");
@@ -2368,7 +4422,7 @@ async function processGoalRun(): Promise<boolean> {
         const task = store.createTask({
           sessionId: run.sessionId,
           source: run.source,
-          roleId: "ceo",
+          roleId: "cto",
           title: `GoalRun执行: ${run.objective.slice(0, 48)}`,
           instruction: buildGoalExecutionInstruction(run),
           priority: 95,
@@ -2391,6 +4445,16 @@ async function processGoalRun(): Promise<boolean> {
           message: "Execution task created",
           payload: {
             taskId: task.id,
+            roleId: task.roleId
+          }
+        });
+        appendGoalRunTrace({
+          run,
+          stage: "execute",
+          status: "started",
+          task,
+          outputSummary: "Execution task created",
+          metadata: {
             roleId: task.roleId
           }
         });
@@ -2438,6 +4502,17 @@ async function processGoalRun(): Promise<boolean> {
                 timeoutMs: goalRunCollaborationTimeoutMs
               }
             });
+            appendGoalRunTrace({
+              run: failed,
+              stage: "execute",
+              status: "failed",
+              task,
+              outputSummary: "Collaboration execution timeout",
+              failureCategory: "execution_timeout",
+              metadata: {
+                timeoutMs: goalRunCollaborationTimeoutMs
+              }
+            });
             await notifyGoalRunProgress(failed, "执行失败：协作执行超时，请重试或拆分更小任务。");
             return true;
           }
@@ -2454,6 +4529,17 @@ async function processGoalRun(): Promise<boolean> {
               message: "Execution hard-timeout before artifact delivery",
               payload: {
                 taskId: task.id,
+                timeoutMs: goalRunExecHardTimeoutMs
+              }
+            });
+            appendGoalRunTrace({
+              run: failed,
+              stage: "execute",
+              status: "failed",
+              task,
+              outputSummary: "Execution hard-timeout before artifact delivery",
+              failureCategory: "execution_timeout",
+              metadata: {
                 timeoutMs: goalRunExecHardTimeoutMs
               }
             });
@@ -2480,14 +4566,24 @@ async function processGoalRun(): Promise<boolean> {
             last_task_deliverable: fallbackDeliverable
           });
           store.setGoalRunCurrentTask(run.id, undefined);
-          store.appendGoalRunTimelineEvent({
-            goalRunId: run.id,
-            stage: "execute",
-            eventType: "task_failed",
+        store.appendGoalRunTimelineEvent({
+          goalRunId: run.id,
+          stage: "execute",
+          eventType: "task_failed",
             message: "Execution task soft-timeout fallback triggered",
             payload: {
               taskId: task.id,
               timeoutMs: goalRunExecSoftTimeoutMs
+            }
+          });
+          appendGoalRunTrace({
+            run,
+            stage: "execute",
+            status: "completed",
+            task,
+            outputSummary: fallbackSummary,
+            metadata: {
+              fallback: "timeout_fallback"
             }
           });
           store.queueGoalRun(run.id, "verify");
@@ -2514,6 +4610,16 @@ async function processGoalRun(): Promise<boolean> {
           last_failed_roles: evidence.failedRoles,
           last_collaboration_enabled: evidence.collaborationEnabled
         });
+        const handoff = buildGoalRunHandoffArtifact({
+          run,
+          stage: "execute",
+          task,
+          taskTraceId: task.id,
+          summary: task.result?.summary ?? "Execution task completed",
+          artifactFiles,
+          completedRoles: evidence.completedRoles,
+          failedRoles: evidence.failedRoles
+        });
         store.setGoalRunCurrentTask(run.id, undefined);
         store.appendGoalRunTimelineEvent({
           goalRunId: run.id,
@@ -2525,6 +4631,20 @@ async function processGoalRun(): Promise<boolean> {
             artifactCount: artifactFiles.length,
             completedRoles: evidence.completedRoles,
             failedRoles: evidence.failedRoles,
+            collaborationEnabled: evidence.collaborationEnabled
+          }
+        });
+        appendGoalRunTrace({
+          run,
+          stage: "execute",
+          status: "completed",
+          task,
+          outputSummary: task.result?.summary ?? "",
+          artifactFiles,
+          completedRoles: evidence.completedRoles,
+          failedRoles: evidence.failedRoles,
+          handoffArtifactId: handoff.id,
+          metadata: {
             collaborationEnabled: evidence.collaborationEnabled
           }
         });
@@ -2613,6 +4733,17 @@ async function processGoalRun(): Promise<boolean> {
               failedRoles: evidence.failedRoles
             }
           });
+          appendGoalRunTrace({
+            run: failed,
+            stage: "execute",
+            status: "failed",
+            task,
+            outputSummary: task.errorText ?? "",
+            completedRoles: evidence.completedRoles,
+            failedRoles: evidence.failedRoles,
+            failureCategory: "runtime",
+            metadata: {}
+          });
           await notifyGoalRunProgress(
             failed,
             `执行失败：协作任务未通过（完成角色：${evidence.completedRoles.join("、") || "无"}；失败角色：${
@@ -2648,6 +4779,15 @@ async function processGoalRun(): Promise<boolean> {
             errorText: task.errorText ?? ""
           }
         });
+        appendGoalRunTrace({
+          run: failed,
+          stage: "execute",
+          status: "failed",
+          task,
+          outputSummary: task.errorText ?? "",
+          failureCategory: "runtime",
+          metadata: {}
+        });
         await notifyGoalRunProgress(failed, `执行失败：${task.errorText ?? "未知错误"}`);
         return true;
       }
@@ -2669,6 +4809,16 @@ async function processGoalRun(): Promise<boolean> {
               lastStatus: lastStatus ?? ""
             }
           });
+          appendGoalRunTrace({
+            run: failed,
+            stage: "verify",
+            status: "failed",
+            outputSummary: "verify failed: concrete artifact task not completed",
+            failureCategory: "validation",
+            metadata: {
+              lastStatus: lastStatus ?? ""
+            }
+          });
           await notifyGoalRunProgress(failed, "校验失败：需要完成真实执行任务，不能使用文本兜底。");
           return true;
         }
@@ -2680,6 +4830,14 @@ async function processGoalRun(): Promise<boolean> {
             eventType: "run_failed",
             message: "Verification failed: no artifact files",
             payload: {}
+          });
+          appendGoalRunTrace({
+            run: failed,
+            stage: "verify",
+            status: "failed",
+            outputSummary: "verify failed: no filesystem artifacts generated",
+            failureCategory: "validation",
+            metadata: {}
           });
           await notifyGoalRunProgress(failed, "校验失败：未检测到产物文件变更。");
           return true;
@@ -2744,6 +4902,20 @@ async function processGoalRun(): Promise<boolean> {
                 failedRequired
               }
             });
+            appendGoalRunTrace({
+              run: failed,
+              stage: "verify",
+              status: "failed",
+              outputSummary: "verify failed: required collaboration roles missing/failed",
+              artifactFiles,
+              completedRoles,
+              failedRoles,
+              failureCategory: "validation",
+              metadata: {
+                missingRequired,
+                failedRequired
+              }
+            });
             await notifyGoalRunProgress(
               failed,
               `校验失败：关键角色交付不完整（缺失：${missingRequired.join("、") || "无"}；失败：${
@@ -2764,6 +4936,16 @@ async function processGoalRun(): Promise<boolean> {
             lastStatus: lastStatus ?? ""
           }
         });
+        appendGoalRunTrace({
+          run: failed,
+          stage: "verify",
+          status: "failed",
+          outputSummary: "verify failed: last task not completed",
+          failureCategory: "validation",
+          metadata: {
+            lastStatus: lastStatus ?? ""
+          }
+        });
         await notifyGoalRunProgress(failed, "校验失败：缺少可验证的执行结果。");
         return true;
       }
@@ -2773,6 +4955,20 @@ async function processGoalRun(): Promise<boolean> {
         eventType: "stage_changed",
         message: "Verify completed, moving to deploy",
         payload: {}
+      });
+      appendGoalRunTrace({
+        run,
+        stage: "verify",
+        status: "completed",
+        outputSummary: "Verify completed",
+        artifactFiles: contextStringArray(run.context, "last_artifact_files"),
+        completedRoles: contextStringArray(run.context, "last_completed_roles")
+          .map((role) => normalizeRoleId(role))
+          .filter((role): role is RoleId => role !== undefined),
+        failedRoles: contextStringArray(run.context, "last_failed_roles")
+          .map((role) => normalizeRoleId(role))
+          .filter((role): role is RoleId => role !== undefined),
+        metadata: {}
       });
       store.queueGoalRun(run.id, "deploy");
       return true;
@@ -2809,6 +5005,16 @@ async function processGoalRun(): Promise<boolean> {
           eventType: "input_required",
           message: prompt,
           payload: {
+            fields: ["deploy_target"]
+          }
+        });
+        appendGoalRunTrace({
+          run,
+          stage: "deploy",
+          status: "awaiting_input",
+          outputSummary: prompt,
+          failureCategory: "input_required",
+          metadata: {
             fields: ["deploy_target"]
           }
         });
@@ -2859,6 +5065,17 @@ async function processGoalRun(): Promise<boolean> {
               fields: missingKeys
             }
           });
+          appendGoalRunTrace({
+            run,
+            stage: "deploy",
+            status: "awaiting_input",
+            outputSummary: prompt,
+            failureCategory: "configuration",
+            metadata: {
+              fields: missingKeys,
+              target
+            }
+          });
           await notifyGoalRunProgress(waiting ?? run, prompt);
           return true;
         }
@@ -2889,6 +5106,18 @@ async function processGoalRun(): Promise<boolean> {
             expiresAt: token.expiresAt
           }
         });
+        appendGoalRunTrace({
+          run,
+          stage: "deploy",
+          status: "awaiting_authorization",
+          outputSummary: "Deployment authorization required",
+          approvalGateHits: 1,
+          failureCategory: "authorization_required",
+          metadata: {
+            scope,
+            target
+          }
+        });
         await notifyGoalRunProgress(
           waiting ?? run,
           `部署前需要一次授权。请在控制台调用 /api/goal-runs/${run.id}/authorize 并提交 token（前缀 ${token.token.slice(0, 8)}）。`
@@ -2905,6 +5134,24 @@ async function processGoalRun(): Promise<boolean> {
           target
         }
       });
+      const deployHandoff = buildGoalRunHandoffArtifact({
+        run,
+        stage: "deploy",
+        summary: `Deployment preflight passed for ${target}`,
+        artifactFiles: contextStringArray(run.context, "last_artifact_files")
+      });
+      appendGoalRunTrace({
+        run,
+        stage: "deploy",
+        status: "completed",
+        outputSummary: `Deployment preflight passed for ${target}`,
+        artifactFiles: contextStringArray(run.context, "last_artifact_files"),
+        approvalGateHits: contextString(run.context, "deploy_authorized_at") ? 1 : 0,
+        handoffArtifactId: deployHandoff.id,
+        metadata: {
+          target
+        }
+      });
       store.queueGoalRun(run.id, "accept");
       return true;
     }
@@ -2912,6 +5159,13 @@ async function processGoalRun(): Promise<boolean> {
     if (run.currentStage === "accept") {
       const result = buildGoalRunResult(run);
       const completed = store.completeGoalRun(run.id, result) ?? run;
+      const acceptHandoff = buildGoalRunHandoffArtifact({
+        run: completed,
+        stage: "accept",
+        summary: result.summary,
+        artifactFiles: contextStringArray(completed.context, "last_artifact_files"),
+        nextActions: result.nextActions
+      });
       store.appendGoalRunTimelineEvent({
         goalRunId: run.id,
         stage: "accept",
@@ -2919,6 +5173,17 @@ async function processGoalRun(): Promise<boolean> {
         message: "Goal run completed",
         payload: {
           summary: result.summary
+        }
+      });
+      appendGoalRunTrace({
+        run: completed,
+        stage: "accept",
+        status: "completed",
+        outputSummary: result.summary,
+        artifactFiles: contextStringArray(completed.context, "last_artifact_files"),
+        handoffArtifactId: acceptHandoff.id,
+        metadata: {
+          nextActions: result.nextActions
         }
       });
       await notifyGoalRunProgress(
@@ -2992,6 +5257,11 @@ async function processTask(): Promise<boolean> {
       improvements: []
     };
     const completed = store.completeTask(task.id, result, reflection) ?? task;
+    updateSessionProjectMemoryFromTask(completed, {
+      currentStage: "direct_reply_delivered"
+    });
+    syncSkillIntegrationOutcome(completed);
+    syncInstalledSkillVerification(completed);
     if (completed.sessionId) {
       store.appendSessionMessage({
         sessionId: completed.sessionId,
@@ -3032,6 +5302,7 @@ async function processTask(): Promise<boolean> {
     collaborationMode?: boolean;
     collaborationId?: string;
     isAggregation?: boolean;
+    collaborationResumeRequested?: boolean;
   };
 
   await safeEmitTaskLifecycleEvent({
@@ -3043,6 +5314,27 @@ async function processTask(): Promise<boolean> {
   });
 
   try {
+    if (metadata.collaborationId && metadata.collaborationResumeRequested) {
+      const feishuClient = createFeishuClient();
+      const manager = new CollaborationManager(feishuClient ? { store, feishuClient } : { store });
+      const resumed = await manager.resumeAwaitingCollaboration(task);
+      updateSessionProjectMemoryFromTask(store.getTask(task.id) ?? task, {
+        currentStage: resumed ? "resuming_collaboration" : "awaiting_input",
+        unresolvedQuestions: resumed ? [] : undefined,
+        nextActions: resumed ? ["等待团队重新汇总并继续交付"] : undefined
+      });
+      const current = store.getTask(task.id) ?? task;
+      await safeEmitTaskLifecycleEvent({
+        phase: "after_task",
+        taskId: task.id,
+        roleId: task.roleId,
+        source: task.source,
+        status: current.status,
+        summary: resumed ? "Collaboration resumed from user input" : "Collaboration resume skipped"
+      });
+      return resumed;
+    }
+
     // 检查是否需要启动协作流程
     if (metadata.collaborationMode && !metadata.collaborationId) {
       const feishuClient = createFeishuClient();
@@ -3052,6 +5344,10 @@ async function processTask(): Promise<boolean> {
         collaborationId,
         collaborationStatus: "active"
       }) ?? task;
+      updateSessionProjectMemoryFromTask(current, {
+        currentStage: "collaboration_active",
+        nextActions: ["等待多角色执行、收敛并交付结果"]
+      });
       await safeEmitTaskLifecycleEvent({
         phase: "after_task",
         taskId: task.id,
@@ -3074,9 +5370,9 @@ async function processTask(): Promise<boolean> {
         skillIds
       })
     ) {
-      handled = await processCodeExecutionTask(task);
+      handled = await processCodeExecutionTask(task, skillIds, skills);
     } else {
-      handled = await processNormalTask(task);
+      handled = await processNormalTask(task, skillIds, skills);
     }
 
     // 检查是否是协作任务的完成
@@ -3118,6 +5414,13 @@ async function processTask(): Promise<boolean> {
       instanceId: runnerInstanceId
     });
     const failed = store.failTask(task.id, error instanceof Error ? error.message : String(error));
+    if (failed) {
+      updateSessionProjectMemoryFromTask(failed, {
+        currentStage: "blocked"
+      });
+      syncInstalledSkillVerification(failed);
+      syncFounderWorkflowFailure(failed);
+    }
     if (metadata.collaborationId) {
       const feishuClient = createFeishuClient();
       const manager = new CollaborationManager(feishuClient ? { store, feishuClient } : { store });
@@ -3147,7 +5450,12 @@ async function processTask(): Promise<boolean> {
       errorText: failed?.errorText ?? (error instanceof Error ? error.message : String(error))
     });
     if (failed?.source === "feishu" && failed.chatId) {
-      await notifyFeishu(failed.chatId, `任务「${failed.title}」执行失败：${failed.errorText ?? "未知错误"}`);
+      const card = buildTaskFailedCard({
+        title: failed.title,
+        roleLabel: ROLE_LABELS[failed.roleId] ?? failed.roleId,
+        reason: failed.errorText ?? "未知错误",
+      });
+      await notifyFeishuCard(failed.chatId, card);
     }
     return true;
   } finally {
