@@ -13,6 +13,7 @@ Development, bootstrap, and deployment scripts live here.
 - `self-check-founder-research.mjs`: founder research-report workflow check (`structured report -> artifact-required task`).
 - `self-check-founder-recap.mjs`: founder weekly recap workflow check (`completed work -> blockers -> next plan`).
 - `self-check-founder-implementation.mjs`: founder implementation workflow check (`frontend build task + QA verify task`).
+- `self-check-artifact-export.mjs`: artifact export check (`markdown artifact -> html/csv companion files`).
 - `self-check-collaboration.mjs`: collaboration-focused self-check for execute-stage real collaboration creation.
 - `self-check-skill-lifecycle.mjs`: skill marketplace lifecycle check (`search -> install -> verify-task`).
 - Founder / collaboration / skill-lifecycle self-checks now start a temporary `@vinko/task-runner` process themselves, so harness runs do not depend on an external `tsx watch` runner staying healthy.
@@ -23,6 +24,7 @@ Development, bootstrap, and deployment scripts live here.
   - `npm run harness:founder-research`: writes `.run/harness/founder-research/latest.json`.
   - `npm run harness:founder-recap`: writes `.run/harness/founder-recap/latest.json`.
   - `npm run harness:founder-implementation`: writes `.run/harness/founder-implementation/latest.json`.
+  - `npm run harness:artifact-export`: writes `.run/harness/artifact-export/latest.json`.
   - `npm run harness:collaboration`: writes `.run/harness/collaboration/latest.json`.
   - `npm run harness:skill-lifecycle`: writes `.run/harness/skill-lifecycle/latest.json`.
   - By default, harness records whether a suite exceeded its budget but does not kill it.

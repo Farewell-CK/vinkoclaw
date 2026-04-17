@@ -40,6 +40,11 @@ const SUITES = {
     command: ["npm", "run", "self-check:founder-implementation"],
     budgetMs: 5 * 60_000
   },
+  "artifact-export": {
+    label: "Artifact Export Self Check",
+    command: ["npm", "run", "self-check:artifact-export"],
+    budgetMs: 6 * 60_000
+  },
   persona: {
     label: "Persona Test",
     command: ["npm", "run", "persona-test"],
