@@ -29,11 +29,15 @@ describe("buildWorkflowStatusSummary", () => {
             entries: []
           },
           artifactIndex: {
-            items: [{ path: "login-page.md", title: "登录页说明", stage: "implementation", status: "produced" }]
+            items: [
+              { path: "login-page.md", title: "登录页说明", stage: "implementation", status: "produced" },
+              { path: "login-page.html", title: "登录页导出", stage: "implementation", status: "produced" }
+            ]
           },
           updatedAt: new Date().toISOString(),
           updatedBy: "product"
-        }
+        },
+        toolChangedFiles: ["exports/login-page.csv"]
       }
     }, { includeArtifacts: true });
 
@@ -42,6 +46,7 @@ describe("buildWorkflowStatusSummary", () => {
     expect(summary).toContain("**下一步**：完成表单校验；补错误提示");
     expect(summary).toContain("**待补充**：确认是否要第三方登录");
     expect(summary).toContain("**阻塞**：等待设计确认");
-    expect(summary).toContain("**产物**：登录页说明");
+    expect(summary).toContain("**产物**：登录页说明；登录页导出");
+    expect(summary).toContain("**导出**：Markdown / HTML / CSV");
   });
 });
