@@ -4,6 +4,7 @@ import {
   orchestratorInboundMessageSchema,
   orchestratorTaskSplitSchema
 } from "@vinko/protocol";
+import { buildWorkflowStatusSummary } from "@vinko/shared";
 import type { RoleId, TaskAttachment, TaskMetadata, TaskRecord, VinkoStore } from "@vinko/shared";
 import { enrichTaskRecord } from "./response-utils.js";
 
@@ -102,7 +103,14 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
       response.status(404).json({ error: "task_not_found" });
       return;
     }
-    response.json(enrichTaskRecord(store, task));
+    response.json({
+      task: enrichTaskRecord(store, task),
+      session: task.sessionId ? store.getSession(task.sessionId) : undefined,
+      workflowSummary: buildWorkflowStatusSummary(task, {
+        includeGoal: true,
+        includeArtifacts: true
+      })
+    });
   });
 
   app.post("/api/tasks/:taskId/cancel", (request, response) => {
@@ -257,8 +265,13 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
 
     response.json({
       task: enrichTaskRecord(store, task),
+      session: task.sessionId ? store.getSession(task.sessionId) : undefined,
       relations: store.listTaskRelationsByParent(task.id),
-      children: store.listTaskChildren(task.id).map((child) => enrichTaskRecord(store, child))
+      children: store.listTaskChildren(task.id).map((child) => enrichTaskRecord(store, child)),
+      workflowSummary: buildWorkflowStatusSummary(task, {
+        includeGoal: true,
+        includeArtifacts: true
+      })
     });
   });
 
@@ -282,10 +295,15 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
     });
     response.json({
       task: enrichTaskRecord(store, task),
+      session: task.sessionId ? store.getSession(task.sessionId) : undefined,
       collaboration,
       children: children.map((child) => enrichTaskRecord(store, child)),
       messages: store.listAgentMessages(collaboration.id),
-      timeline: store.listCollaborationTimelineEvents(collaboration.id)
+      timeline: store.listCollaborationTimelineEvents(collaboration.id),
+      workflowSummary: buildWorkflowStatusSummary(task, {
+        includeGoal: true,
+        includeArtifacts: true
+      })
     });
   });
 
