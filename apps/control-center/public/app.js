@@ -11,8 +11,18 @@ const approvalsContainer = document.querySelector("#approvals");
 const tasksContainer = document.querySelector("#tasks");
 const toolRunsContainer = document.querySelector("#tool-runs");
 const auditContainer = document.querySelector("#audit");
+const telemetryBoardContainer = document.querySelector("#telemetry-board");
+const traceDetailContainer = document.querySelector("#trace-detail");
+const goalRunsContainer = document.querySelector("#goal-runs");
+const goalRunDetailContainer = document.querySelector("#goal-run-detail");
 const messageResult = document.querySelector("#message-result");
 const taskResult = document.querySelector("#task-result");
+const taskDetailContainer = document.querySelector("#task-detail");
+const projectMemoryBoardContainer = document.querySelector("#project-memory-board");
+const harnessBoardContainer = document.querySelector("#harness-board");
+const skillsMarketRoleSelect = document.querySelector("#skills-market-role");
+const skillsMarketResult = document.querySelector("#skills-market-result");
+const skillsMarketListContainer = document.querySelector("#skills-market-list");
 const routingTemplatesContainer = document.querySelector("#routing-templates");
 const templateResult = document.querySelector("#template-result");
 const queueOverviewContainer = document.querySelector("#queue-overview");
@@ -22,11 +32,20 @@ const queueByTemplateContainer = document.querySelector("#queue-by-template");
 const queueSlaResult = document.querySelector("#queue-sla-result");
 const channelsStatusContainer = document.querySelector("#channels-status");
 const providersStatusContainer = document.querySelector("#providers-status");
+const workflowShortcutContainer = document.querySelector("#workflow-shortcuts");
 const navButtons = Array.from(document.querySelectorAll(".nav-btn"));
 const viewPanels = Array.from(document.querySelectorAll(".view-panel"));
 const langButtons = Array.from(document.querySelectorAll(".lang-btn"));
 const menuToggle = document.querySelector(".menu-toggle");
 const viewNav = document.querySelector(".view-nav");
+let selectedTaskId = "";
+let selectedTaskDetail = null;
+let selectedGoalRunId = "";
+let selectedGoalRunDetail = null;
+let lastRolesPayload = null;
+let lastSkillsMarketResults = [];
+let selectedTraceTaskId = "";
+let lastRuntimeHarnessPayload = null;
 
 const I18N = {
   zh: {
@@ -35,6 +54,7 @@ const I18N = {
     "nav.routing": "模板与队列",
     "nav.config": "团队与渠道",
     "nav.execution": "审批与执行",
+    "nav.telemetry": "遥测",
     "nav.audit": "审计",
     "nav.logout": "退出",
     "hero.title": "OPC 指挥中心",
@@ -57,6 +77,18 @@ const I18N = {
     "panel.task.imagePlaceholder": "图片 URL（每行一个，可选）",
     "panel.task.videoPlaceholder": "视频 URL（每行一个，可选）",
     "panel.task.submit": "入队任务",
+    "panel.projects.title": "CEO 项目记忆",
+    "panel.projects.desc": "最近会话、当前目标、阶段和待解决问题。",
+    "panel.skillsMarket.title": "Skill Marketplace",
+    "panel.skillsMarket.desc": "搜索 skill、查看候选并安装到角色。",
+    "panel.skillsMarket.queryPlaceholder": "搜索 skill，例如：写 PRD / 调研报告 / 测试回归",
+    "panel.skillsMarket.search": "搜索",
+    "panel.workflows.title": "Founder 工作流入口",
+    "panel.workflows.desc": "给创始人常用工作流的快捷触发入口。",
+    "panel.harness.title": "Product Harness",
+    "panel.harness.desc": "最近回归套件、通过状态和输出尾部。",
+    "panel.goalRuns.title": "Goal Runs",
+    "panel.goalRuns.desc": "分阶段推进的运行流，包含 harness 评分、handoff、恢复态与审批。",
     "panel.routing.title": "路由模板",
     "panel.routing.desc": "管理任务路由模板，支持创建、更新、删除。",
     "panel.routing.templateNamePlaceholder": "模板名称",
@@ -89,6 +121,18 @@ const I18N = {
     "panel.toolRuns.desc": "通过 opencode、codex、claude 的开发任务执行记录。",
     "panel.audit.title": "审计轨迹",
     "panel.audit.desc": "所有运维动作、审批与任务状态变更可追踪。",
+    "panel.traces.title": "Agent 遥测轨迹",
+    "panel.traces.desc": "LLM 决策时间线、工具调用、Token 用量和规则拦截。",
+    "trace.round": "轮次 {round}",
+    "trace.backend": "后端: {backend}",
+    "trace.model": "模型: {model}",
+    "trace.duration": "耗时: {duration}ms",
+    "trace.tokens": "Tokens: {tokens}",
+    "trace.toolCalls": "工具调用: {count}",
+    "trace.blocked": "拦截: {count}",
+    "trace.noTrace": "暂无遥测数据",
+    "trace.noData": "该任务尚无遥测记录",
+    "trace.back": "← 返回遥测列表",
     "common.yes": "是",
     "common.no": "否",
     "common.none": "无",
@@ -99,6 +143,16 @@ const I18N = {
     "common.failedLoadChannels": "无法加载 /api/channels/status。",
     "common.failedLoadProviders": "无法加载 /api/tool-providers。",
     "status.pending": "待审批",
+    "status.queued": "排队中",
+    "status.completed": "已完成",
+    "status.running": "执行中",
+    "status.resuming": "恢复中",
+    "status.failed": "失败",
+    "status.cancelled": "已取消",
+    "status.awaiting_input": "待补充输入",
+    "status.awaiting_authorization": "待授权",
+    "status.await_user": "待补充",
+    "status.partial": "部分完成",
     "status.approved": "已通过",
     "status.rejected": "已拒绝",
     "status.enabled": "启用",
@@ -180,6 +234,7 @@ const I18N = {
     "nav.routing": "Templates & Queue",
     "nav.config": "Team & Channels",
     "nav.execution": "Approvals & Execution",
+    "nav.telemetry": "Telemetry",
     "nav.audit": "Audit",
     "nav.logout": "Logout",
     "hero.title": "OPC Command Room",
@@ -202,6 +257,18 @@ const I18N = {
     "panel.task.imagePlaceholder": "Image URL(s), one per line. Optional.",
     "panel.task.videoPlaceholder": "Video URL(s), one per line. Optional.",
     "panel.task.submit": "Queue Task",
+    "panel.projects.title": "CEO Project Memory",
+    "panel.projects.desc": "Recent sessions, current goals, stages, and unresolved questions.",
+    "panel.skillsMarket.title": "Skill Marketplace",
+    "panel.skillsMarket.desc": "Search skills, inspect matches, and install them to a role.",
+    "panel.skillsMarket.queryPlaceholder": "Search skill, e.g. PRD writing / research report / regression testing",
+    "panel.skillsMarket.search": "Search",
+    "panel.workflows.title": "Founder Workflows",
+    "panel.workflows.desc": "Shortcut prompts for founder delivery, PRD, research, and recap flows.",
+    "panel.harness.title": "Product Harness",
+    "panel.harness.desc": "Latest regression suites, pass/fail status, and output tails.",
+    "panel.goalRuns.title": "Goal Runs",
+    "panel.goalRuns.desc": "Stage-driven runs with harness evidence, handoffs, resume state, and approvals.",
     "panel.routing.title": "Routing Templates",
     "panel.routing.desc": "Manage task-routing templates with create, update, and delete operations.",
     "panel.routing.templateNamePlaceholder": "Template name",
@@ -234,6 +301,18 @@ const I18N = {
     "panel.toolRuns.desc": "Developer/code-executor task runs through opencode, codex, or claude.",
     "panel.audit.title": "Audit Trail",
     "panel.audit.desc": "Every operator action, approval, and task transition stays visible.",
+    "panel.traces.title": "Agent Traces",
+    "panel.traces.desc": "LLM decision timeline, tool calls, token usage, and rule blocks per task.",
+    "trace.round": "Round {round}",
+    "trace.backend": "Backend: {backend}",
+    "trace.model": "Model: {model}",
+    "trace.duration": "Duration: {duration}ms",
+    "trace.tokens": "Tokens: {tokens}",
+    "trace.toolCalls": "Tool calls: {count}",
+    "trace.blocked": "Blocked: {count}",
+    "trace.noTrace": "No telemetry data yet",
+    "trace.noData": "No trace recorded for this task.",
+    "trace.back": "← Back to Traces",
     "common.yes": "yes",
     "common.no": "no",
     "common.none": "none",
@@ -244,6 +323,16 @@ const I18N = {
     "common.failedLoadChannels": "Cannot load /api/channels/status.",
     "common.failedLoadProviders": "Cannot load /api/tool-providers.",
     "status.pending": "pending",
+    "status.queued": "queued",
+    "status.completed": "completed",
+    "status.running": "running",
+    "status.resuming": "resuming",
+    "status.failed": "failed",
+    "status.cancelled": "cancelled",
+    "status.awaiting_input": "awaiting input",
+    "status.awaiting_authorization": "awaiting authorization",
+    "status.await_user": "awaiting input",
+    "status.partial": "partial",
     "status.approved": "approved",
     "status.rejected": "rejected",
     "status.enabled": "enabled",
@@ -321,7 +410,7 @@ const I18N = {
   }
 };
 
-const VIEW_IDS = new Set(["workbench", "routing", "config", "execution", "audit"]);
+const VIEW_IDS = new Set(["workbench", "routing", "config", "execution", "telemetry", "audit"]);
 let currentLang = localStorage.getItem("vinkoclaw.lang") === "en" ? "en" : "zh";
 let currentView = VIEW_IDS.has(localStorage.getItem("vinkoclaw.view")) ? localStorage.getItem("vinkoclaw.view") : "workbench";
 
@@ -470,6 +559,17 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;");
 }
 
+function formatStructuredValue(value) {
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 const PLAYGROUND_PREFIX = "/home/xsuper/workspace/playground/";
 
 function normalizeArtifactPath(input) {
@@ -516,6 +616,21 @@ function collectTaskArtifactPaths(task) {
   return Array.from(
     new Set([...fromEvidence, ...fromMetadata, ...fromText].map((value) => normalizeArtifactPath(value)).filter(Boolean))
   );
+}
+
+function inferArtifactFormats(paths) {
+  const formats = new Map();
+  for (const item of Array.isArray(paths) ? paths : []) {
+    const value = normalizeArtifactPath(item).toLowerCase();
+    if (!value) continue;
+    if (value.endsWith(".md")) formats.set("md", "Markdown");
+    else if (value.endsWith(".html")) formats.set("html", "HTML");
+    else if (value.endsWith(".csv")) formats.set("csv", "CSV");
+    else if (value.endsWith(".pdf")) formats.set("pdf", "PDF");
+    else if (value.endsWith(".doc") || value.endsWith(".docx")) formats.set("doc", "DOCX");
+    else if (value.endsWith(".xls") || value.endsWith(".xlsx")) formats.set("xls", "Excel");
+  }
+  return Array.from(formats.values());
 }
 
 function renderTaskArtifactLinks(task) {
@@ -672,6 +787,202 @@ function formatDuration(ms) {
   return `${minutes}m ${seconds}s`;
 }
 
+function formatPercent(value, total) {
+  const safeTotal = Number(total || 0);
+  if (safeTotal <= 0) {
+    return "0%";
+  }
+  return `${Math.round((Number(value || 0) / safeTotal) * 100)}%`;
+}
+
+function renderHarnessGradeBadge(harness) {
+  const grade = String(harness?.grade || "F").toUpperCase();
+  const score = Number(harness?.score || 0);
+  return `<span class="pill harness-grade harness-grade-${grade.toLowerCase()}">${escapeHtml(grade)} · ${score}</span>`;
+}
+
+function renderHarnessSummaryLine(harness) {
+  if (!harness) {
+    return "";
+  }
+  const status = String(harness.status || "");
+  const summary = String(harness.summary || "");
+  return [status, summary].filter(Boolean).join(" · ");
+}
+
+function renderHarnessBlock(harness, options = {}) {
+  if (!harness || typeof harness !== "object") {
+    return "";
+  }
+  const title = options.title || (currentLang === "zh" ? "Harness 评分" : "Harness grade");
+  const dimensions = harness.dimensions && typeof harness.dimensions === "object" ? harness.dimensions : {};
+  const strengths = Array.isArray(harness.strengths) ? harness.strengths : [];
+  const gaps = Array.isArray(harness.gaps) ? harness.gaps : [];
+  return `
+    <article class="list-card compact harness-card">
+      <div class="list-head">
+        <strong>${escapeHtml(title)}</strong>
+        ${renderHarnessGradeBadge(harness)}
+      </div>
+      <p class="muted">${escapeHtml(renderHarnessSummaryLine(harness))}</p>
+      <div class="pill-row">
+        ${Object.entries(dimensions)
+          .map(([key, value]) => `<span class="pill">${escapeHtml(key)}:${escapeHtml(String(value))}</span>`)
+          .join("")}
+      </div>
+      <div class="memory-block">
+        <strong>${currentLang === "zh" ? "Strengths" : "Strengths"}</strong>
+        ${
+          strengths.length > 0
+            ? `<div class="pill-row">${strengths.map((item) => `<span class="pill">${escapeHtml(String(item))}</span>`).join("")}</div>`
+            : `<p class="muted">${currentLang === "zh" ? "暂无显式强项" : "No explicit strengths"}</p>`
+        }
+      </div>
+      <div class="memory-block">
+        <strong>${currentLang === "zh" ? "Gaps" : "Gaps"}</strong>
+        ${
+          gaps.length > 0
+            ? `<div class="pill-row">${gaps.map((item) => `<span class="pill">${escapeHtml(String(item))}</span>`).join("")}</div>`
+            : `<p class="muted">${currentLang === "zh" ? "暂无缺口" : "No visible gaps"}</p>`
+        }
+      </div>
+    </article>
+  `;
+}
+
+function renderSkillBindingsSummary(skills) {
+  if (!skills || typeof skills !== "object") {
+    return "";
+  }
+  const bindings = Array.isArray(skills.bindings) ? skills.bindings : [];
+  return `
+    <article class="list-card compact harness-card">
+      <div class="list-head">
+        <strong>${currentLang === "zh" ? "Skill Harness" : "Skill Harness"}</strong>
+        <span>${escapeHtml(skills.roleId || "-")}</span>
+      </div>
+      <p class="muted">${
+        currentLang === "zh"
+          ? `总数 ${skills.total || 0} · 已验证 ${skills.verified || 0} · 未验证 ${skills.unverified || 0} · 失败 ${skills.failed || 0}`
+          : `total ${skills.total || 0} · verified ${skills.verified || 0} · unverified ${skills.unverified || 0} · failed ${skills.failed || 0}`
+      }</p>
+      ${
+        bindings.length > 0
+          ? `<div class="pill-row">${bindings
+              .map((binding) => {
+                const label = [binding.skillId, binding.verificationStatus, binding.sourceLabel || binding.source || ""]
+                  .filter(Boolean)
+                  .join(" · ");
+                return `<span class="pill">${escapeHtml(label)}</span>`;
+              })
+              .join("")}</div>`
+          : `<p class="muted">${currentLang === "zh" ? "当前没有绑定的 skill" : "No bound skills for this execution"}</p>`
+      }
+    </article>
+  `;
+}
+
+function renderRuntimeEvidenceSummary(evidence) {
+  if (!evidence || typeof evidence !== "object") {
+    return "";
+  }
+  const runtime = evidence.runtime && typeof evidence.runtime === "object" ? evidence.runtime : {};
+  const context = evidence.context && typeof evidence.context === "object" ? evidence.context : {};
+  const tools = evidence.tools && typeof evidence.tools === "object" ? evidence.tools : {};
+  const rules = evidence.rules && typeof evidence.rules === "object" ? evidence.rules : {};
+  const telemetry = evidence.telemetry && typeof evidence.telemetry === "object" ? evidence.telemetry : {};
+  const exportFormats = inferArtifactFormats(tools.changedFiles);
+  return `
+    <article class="list-card compact harness-card">
+      <div class="list-head">
+        <strong>${currentLang === "zh" ? "Runtime Evidence" : "Runtime Evidence"}</strong>
+        <span>${escapeHtml(runtime.backendUsed || runtime.modelUsed || "-")}</span>
+      </div>
+      <div class="pill-row">
+        <span class="pill">backend:${escapeHtml(runtime.backendUsed || "-")}</span>
+        <span class="pill">model:${escapeHtml(runtime.modelUsed || "-")}</span>
+        <span class="pill">toolLoop:${escapeHtml(String(runtime.toolLoopEnabled === true))}</span>
+        <span class="pill">tools:${escapeHtml(String(tools.totalCalls || 0))}</span>
+        <span class="pill">blocked:${escapeHtml(String(rules.blockedToolCalls || 0))}</span>
+        <span class="pill">turns:${escapeHtml(String(telemetry.turns || 0))}</span>
+      </div>
+      <p class="muted">${
+        currentLang === "zh"
+          ? `session=${context.sessionAttached === true ? "yes" : "no"} · memory=${context.projectMemoryPresent === true ? "yes" : "no"} · changedFiles=${
+              Array.isArray(tools.changedFiles) ? tools.changedFiles.length : 0
+            } · duration=${formatDuration(telemetry.durationMs || 0)}`
+          : `session=${context.sessionAttached === true ? "yes" : "no"} · memory=${context.projectMemoryPresent === true ? "yes" : "no"} · changedFiles=${
+              Array.isArray(tools.changedFiles) ? tools.changedFiles.length : 0
+            } · duration=${formatDuration(telemetry.durationMs || 0)}`
+      }</p>
+      ${
+        exportFormats.length > 0
+          ? `<p class="muted">${currentLang === "zh" ? "导出格式" : "Export formats"}: ${escapeHtml(exportFormats.join(" / "))}</p>`
+          : ""
+      }
+    </article>
+  `;
+}
+
+function renderWorkflowSummaryBlock(summary) {
+  if (typeof summary !== "string" || !summary.trim()) {
+    return "";
+  }
+  return `
+    <article class="list-card compact">
+      <div class="list-head">
+        <strong>${currentLang === "zh" ? "Workflow Summary" : "Workflow Summary"}</strong>
+      </div>
+      <div class="markdown-content">${renderMarkdown(summary.trim())}</div>
+    </article>
+  `;
+}
+
+function renderRuntimeHarnessBoard(payload) {
+  if (!payload) {
+    return "";
+  }
+  const toolRegistry = payload.toolRegistry || {};
+  const rulesEngine = payload.rulesEngine || {};
+  const skills = payload.skills || {};
+  const roles = Array.isArray(skills.roles) ? skills.roles : [];
+  const totalBoundSkills = roles.reduce((sum, role) => sum + Number(role.total || 0), 0);
+  const verifiedBoundSkills = roles.reduce((sum, role) => sum + Number(role.verified || 0), 0);
+  const failedBoundSkills = roles.reduce((sum, role) => sum + Number(role.failed || 0), 0);
+  return `
+    <article class="list-card compact harness-card">
+      <div class="list-head">
+        <strong>${currentLang === "zh" ? "Runtime Harness Snapshot" : "Runtime Harness Snapshot"}</strong>
+        <span>${escapeHtml(String(toolRegistry.mode || "default"))}</span>
+      </div>
+      <div class="pill-row">
+        <span class="pill">tools:${escapeHtml(String(toolRegistry.total || 0))}</span>
+        <span class="pill">rules:${escapeHtml(String(rulesEngine.total || 0))}</span>
+        <span class="pill">catalog:${escapeHtml(String(skills.catalogTotal || 0))}</span>
+        <span class="pill">bound:${escapeHtml(String(totalBoundSkills))}</span>
+        <span class="pill">verified:${escapeHtml(String(verifiedBoundSkills))}</span>
+        ${failedBoundSkills > 0 ? `<span class="pill">failed:${escapeHtml(String(failedBoundSkills))}</span>` : ""}
+      </div>
+      <div class="memory-block">
+        <strong>${currentLang === "zh" ? "Role Bindings" : "Role Bindings"}</strong>
+        ${
+          roles.length > 0
+            ? `<div class="pill-row">${roles
+                .filter((role) => Number(role.total || 0) > 0)
+                .map(
+                  (role) =>
+                    `<span class="pill">${escapeHtml(role.roleId)} · ${escapeHtml(
+                      `${role.total} / ${formatPercent(role.verified || 0, role.total || 0)} verified`
+                    )}</span>`
+                )
+                .join("")}</div>`
+            : `<p class="muted">${currentLang === "zh" ? "暂无角色 skill 绑定" : "No role skill bindings yet"}</p>`
+        }
+      </div>
+    </article>
+  `;
+}
+
 async function request(url, options = {}) {
   const response = await fetch(url, {
     headers: {
@@ -693,17 +1004,61 @@ async function request(url, options = {}) {
 }
 
 function renderRoles(payload) {
+  lastRolesPayload = payload;
   roleSelect.innerHTML = payload.roles
     .map((role) => `<option value="${role.id}">${role.name}</option>`)
     .join("");
+  if (skillsMarketRoleSelect) {
+    skillsMarketRoleSelect.innerHTML = payload.roles
+      .map((role) => `<option value="${role.id}">${role.name}</option>`)
+      .join("");
+  }
 
   rolesContainer.innerHTML = payload.roles
     .map((role) => {
       const skills = role.skills.length
         ? role.skills
-            .map((skill) => `<span class="pill">${escapeHtml(skill.skillId)}</span>`)
+            .map((skill) => {
+              const label = [skill.skillId, skill.version ? `v${skill.version}` : "", skill.sourceLabel || skill.source || ""]
+                .filter(Boolean)
+                .join(" · ");
+              const verificationLabel =
+                skill.verificationStatus === "verified"
+                  ? currentLang === "zh"
+                    ? "已验证"
+                    : "verified"
+                  : skill.verificationStatus === "failed"
+                    ? currentLang === "zh"
+                      ? "验证失败"
+                      : "verify-failed"
+                    : currentLang === "zh"
+                      ? "未验证"
+                      : "unverified";
+              return `<span class="pill" title="${escapeHtml(
+                `${skill.skillId}${skill.installedAt ? ` @ ${skill.installedAt}` : ""}${skill.verifiedAt ? ` / verified @ ${skill.verifiedAt}` : ""}${skill.sourceUrl ? ` (${skill.sourceUrl})` : ""}`
+              )}">${escapeHtml(label)}</span>`;
+            })
             .join("")
         : `<span class="muted">${t("common.skillsEmpty")}</span>`;
+      const verificationPills = role.skills.length
+        ? role.skills
+            .map((skill) => {
+              const verificationLabel =
+                skill.verificationStatus === "verified"
+                  ? currentLang === "zh"
+                    ? "已验证"
+                    : "verified"
+                  : skill.verificationStatus === "failed"
+                    ? currentLang === "zh"
+                      ? "验证失败"
+                      : "verify-failed"
+                    : currentLang === "zh"
+                      ? "未验证"
+                      : "unverified";
+              return `<span class="pill">${escapeHtml(skill.skillId)} · ${escapeHtml(verificationLabel)}</span>`;
+            })
+            .join("")
+        : "";
 
       return `
         <article class="role-card">
@@ -713,10 +1068,184 @@ function renderRoles(payload) {
           </div>
           <p>${escapeHtml(role.responsibility)}</p>
           <div class="pill-row">${skills}</div>
+          ${verificationPills ? `<div class="pill-row" style="margin-top:8px;">${verificationPills}</div>` : ""}
         </article>
       `;
     })
     .join("");
+}
+
+function renderSkillsMarketResults(results) {
+  lastSkillsMarketResults = Array.isArray(results) ? results : [];
+  if (!skillsMarketListContainer) {
+    return;
+  }
+  if (lastSkillsMarketResults.length === 0) {
+    skillsMarketListContainer.innerHTML = `
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "暂无候选 skill" : "No skill matches yet"}</strong>
+        </div>
+        <p class="muted">${
+          currentLang === "zh"
+            ? "输入关键词后搜索，结果会显示在这里。"
+            : "Search with a keyword and results will appear here."
+        }</p>
+      </article>
+    `;
+    return;
+  }
+  skillsMarketListContainer.innerHTML = lastSkillsMarketResults
+    .map((entry) => {
+      const roles = Array.isArray(entry.allowedRoles) && entry.allowedRoles.length > 0 ? entry.allowedRoles.join(", ") : "n/a";
+      const tags = Array.isArray(entry.tags) ? entry.tags : [];
+      const roleBinding = entry.roleBinding || null;
+      const recommendation = entry.recommendation || null;
+      const alreadyInstalled = roleBinding?.installed === true;
+      const verificationLabel =
+        roleBinding?.verificationStatus === "verified"
+          ? currentLang === "zh"
+            ? "已安装并验证"
+            : "installed and verified"
+          : roleBinding?.verificationStatus === "failed"
+            ? currentLang === "zh"
+              ? "已安装但验证失败"
+              : "installed but verify failed"
+            : alreadyInstalled
+              ? currentLang === "zh"
+                ? "已安装未验证"
+                : "installed but unverified"
+              : "";
+      const installable = entry.installState !== "discover_only" && entry.installable !== false && !alreadyInstalled;
+      const sourceLabel = entry.sourceLabel || entry.source || "catalog";
+      const versionLabel = entry.version ? ` · v${escapeHtml(entry.version)}` : "";
+      const sourceLink = entry.sourceUrl
+        ? `<p class="muted"><a href="${escapeHtml(entry.sourceUrl)}" target="_blank" rel="noreferrer">${escapeHtml(entry.sourceUrl)}</a></p>`
+        : "";
+      const recommendationLabel =
+        recommendation?.state === "ready_verified"
+          ? currentLang === "zh"
+            ? "推荐：当前角色已验证，可直接复用"
+            : "Recommended: already verified on this role"
+          : recommendation?.state === "ready_unverified"
+            ? currentLang === "zh"
+              ? "提示：当前角色已安装，建议先跑验证"
+              : "Installed on role, verify before relying on it"
+            : recommendation?.state === "ready_failed"
+              ? currentLang === "zh"
+                ? "风险：当前角色已安装，但最近验证失败"
+                : "Risk: installed on role, but last verification failed"
+              : recommendation?.state === "install_recommended"
+                ? currentLang === "zh"
+                  ? "推荐：本地已接入，适合安装到当前角色"
+                  : "Recommended: available in local runtime for this role"
+                : currentLang === "zh"
+                  ? "需要先完成本地 runtime 接入"
+                  : "Requires local runtime integration first";
+      return `
+        <article class="list-card compact">
+          <div class="list-head">
+            <strong>${escapeHtml(entry.name || entry.skillId)}</strong>
+            <span>${escapeHtml(sourceLabel)}${versionLabel}</span>
+          </div>
+          <p>${escapeHtml(entry.summary || entry.description || "")}</p>
+          <p class="muted">${escapeHtml(entry.skillId || "")} · ${currentLang === "zh" ? "适用角色" : "Roles"}: ${escapeHtml(roles)}</p>
+          ${sourceLink}
+          <p class="muted">${escapeHtml(recommendationLabel)}</p>
+          ${verificationLabel ? `<p class="muted">${escapeHtml(verificationLabel)}</p>` : ""}
+          <p class="muted">${
+            installable
+              ? currentLang === "zh"
+                ? "状态：本地可安装"
+                : "State: installable in local runtime"
+              : currentLang === "zh"
+                ? "状态：仅可发现，暂未接入本地运行时"
+                : "State: discoverable only, not available in local runtime yet"
+          }</p>
+          <div class="pill-row">
+            ${tags.map((tag) => `<span class="pill">${escapeHtml(tag)}</span>`).join("")}
+          </div>
+          <div class="action-row">
+            <button type="button" data-skill-install="${escapeHtml(entry.skillId || "")}" ${installable ? "" : "disabled"}>
+              ${
+                installable
+                  ? currentLang === "zh"
+                    ? "安装到所选角色"
+                    : "Install to selected role"
+                  : alreadyInstalled
+                    ? currentLang === "zh"
+                      ? "当前角色已安装"
+                      : "Already installed on role"
+                  : currentLang === "zh"
+                    ? "暂不可直接安装"
+                    : "Not directly installable yet"
+              }
+            </button>
+            ${
+              installable
+                ? ""
+                : `<button type="button" class="ghost" data-skill-request-integration="${escapeHtml(entry.skillId || "")}">
+                    ${
+                      currentLang === "zh" ? "创建接入任务" : "Create integration task"
+                    }
+                  </button>`
+            }
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function inferInstalledBy() {
+  const currentUser = getCurrentUser();
+  if (currentUser?.username) {
+    return currentUser.username;
+  }
+  const messageUser = document.querySelector("#message-user")?.value?.trim();
+  if (messageUser) {
+    return messageUser;
+  }
+  const taskRequestedBy = document.querySelector("#task-requested-by")?.value?.trim();
+  if (taskRequestedBy) {
+    return taskRequestedBy;
+  }
+  return "owner";
+}
+
+function applyWorkflowPreset(preset) {
+  const messageInput = document.querySelector("#message-text");
+  const requestedByInput = document.querySelector("#message-user");
+  if (!messageInput) {
+    return;
+  }
+  const presets = {
+    founder_delivery:
+      currentLang === "zh"
+        ? "请按从想法到交付的方式推进这个需求：做一个登录页 MVP"
+        : "Run this request through idea-to-delivery workflow: build a login page MVP",
+    founder_prd:
+      currentLang === "zh"
+        ? "请帮我写一个 PRD：面向独立开发者的 AI 团队控制台"
+        : "Write a PRD for an AI team console for solo builders",
+    founder_research:
+      currentLang === "zh"
+        ? "请做一份调研报告：AI 个人创业团队产品的竞品分析"
+        : "Create a research report on competitors in AI execution teams for solo founders",
+    founder_recap:
+      currentLang === "zh"
+        ? "请帮我整理本周复盘：已完成、阻塞、下周计划和待决策项"
+        : "Create a weekly recap with completed work, blockers, next plan, and open decisions",
+    founder_ops_followup:
+      currentLang === "zh"
+        ? "请整理一份运营跟进清单：待办事项、提醒时间、责任归属、风险和下一步"
+        : "Create an ops follow-up checklist with todos, reminder timing, ownership, risks, and next actions"
+  };
+  messageInput.value = presets[preset] || presets.founder_delivery;
+  if (requestedByInput && !requestedByInput.value.trim()) {
+    requestedByInput.value = "owner";
+  }
+  messageInput.focus();
 }
 
 function statusBadge(status) {
@@ -792,6 +1321,7 @@ function renderApprovalCard(approval) {
 function taskStatusKey(status) {
   const s = String(status || "").toLowerCase();
   if (s === "completed") return "completed";
+  if (s === "resuming") return "running";
   if (s === "running" || s === "in_progress") return "running";
   if (s === "failed" || s === "error") return "failed";
   return s;
@@ -803,7 +1333,7 @@ function renderTasks(tasks) {
 
   let filtered = tasks;
   if (taskFilter !== "all") {
-    filtered = tasks.filter((t) => taskStatusKey(t.status) === taskFilter);
+    filtered = tasks.filter((t) => taskStatusKey(t.displayStatus || t.status) === taskFilter);
   }
 
   if (filtered.length === 0) {
@@ -814,7 +1344,7 @@ function renderTasks(tasks) {
   tasksContainer.innerHTML = filtered
     .map((task) => {
       const attachmentCount = Array.isArray(task.metadata?.attachments) ? task.metadata.attachments.length : 0;
-      const status = statusBadge(task.status);
+      const status = statusBadge(task.displayStatus || task.status);
       const reflection = task.reflection
         ? `<p class="muted">${t("task.reflection", { score: task.reflection.score, confidence: task.reflection.confidence })}</p>`
         : "";
@@ -824,6 +1354,113 @@ function renderTasks(tasks) {
         : "";
       const deliverable = renderMarkdown(task.result?.deliverable || "");
       const artifactLinks = renderTaskArtifactLinks(task);
+      const deliverableMode = task.completionEvidence?.deliverableMode;
+      const deliverableContractViolated = task.completionEvidence?.deliverableContractViolated === true;
+      const collaboration = task.completionEvidence?.collaboration;
+      const skillIntegration = task.completionEvidence?.skillIntegration;
+      const collaborationMeta = collaboration?.enabled
+        ? `<div class="pill-row" style="margin:8px 0;">
+            ${deliverableMode ? `<span class="pill">deliverable:${escapeHtml(deliverableMode)}</span>` : ""}
+            <span class="pill">collab:${escapeHtml(collaboration.status || "active")}</span>
+            ${collaboration.phase ? `<span class="pill">phase:${escapeHtml(collaboration.phase)}</span>` : ""}
+            ${collaboration.convergenceMode ? `<span class="pill">mode:${escapeHtml(collaboration.convergenceMode)}</span>` : ""}
+            ${collaboration.triggerReason ? `<span class="pill">reason:${escapeHtml(collaboration.triggerReason)}</span>` : ""}
+          </div>`
+        : deliverableMode
+          ? `<div class="pill-row" style="margin:8px 0;"><span class="pill">deliverable:${escapeHtml(deliverableMode)}</span></div>`
+        : "";
+      const deliverableWarning = deliverableContractViolated
+        ? `<div style="margin:10px 0;padding:10px 12px;border-radius:12px;background:rgba(255,59,48,0.08);border:1px solid rgba(255,59,48,0.2);">
+            <strong>${currentLang === "zh" ? "交付契约未满足" : "Deliverable Contract Failed"}</strong>
+            <p class="muted" style="margin-top:6px;">${
+              currentLang === "zh"
+                ? "该任务要求产出持久化文件，但当前没有检测到 artifact。"
+                : "This task required a persisted artifact, but none was detected."
+            }</p>
+          </div>`
+        : "";
+      const collaborationProgress = collaboration?.enabled
+        ? `<p class="muted">${
+            collaboration.resumeRequested
+              ? currentLang === "zh"
+                ? "已收到补充信息，正在重新汇总协作结果。"
+                : "Supplement received, re-aggregating collaboration."
+              : currentLang === "zh"
+                ? "协作进度"
+                : "Collaboration progress"
+          } ${
+            currentLang === "zh"
+              ? `已完成 ${collaboration.childCompleted || 0}/${collaboration.childTotal || 0}，进行中 ${
+                  collaboration.childRunning || 0
+                }，待处理 ${collaboration.childPending || 0}，受阻 ${collaboration.childFailed || 0}`
+              : `done ${collaboration.childCompleted || 0}/${collaboration.childTotal || 0}, running ${
+                  collaboration.childRunning || 0
+                }, pending ${collaboration.childPending || 0}, blocked ${collaboration.childFailed || 0}`
+          }</p>`
+        : "";
+      const collaborationRoles =
+        collaboration?.enabled &&
+        ((Array.isArray(collaboration.completedRoles) && collaboration.completedRoles.length > 0) ||
+          (Array.isArray(collaboration.failedRoles) && collaboration.failedRoles.length > 0))
+          ? `<p class="muted">${
+              Array.isArray(collaboration.completedRoles) && collaboration.completedRoles.length > 0
+                ? `${currentLang === "zh" ? "已完成角色" : "Completed roles"}: ${escapeHtml(collaboration.completedRoles.join(", "))}`
+                : ""
+            }${
+              Array.isArray(collaboration.completedRoles) &&
+              collaboration.completedRoles.length > 0 &&
+              Array.isArray(collaboration.failedRoles) &&
+              collaboration.failedRoles.length > 0
+                ? " · "
+                : ""
+            }${
+              Array.isArray(collaboration.failedRoles) && collaboration.failedRoles.length > 0
+                ? `${currentLang === "zh" ? "受阻角色" : "Blocked roles"}: ${escapeHtml(collaboration.failedRoles.join(", "))}`
+                : ""
+            }</p>`
+          : "";
+      const pendingQuestions = Array.isArray(collaboration?.pendingQuestions) && collaboration.pendingQuestions.length > 0
+        ? `<div style="margin:10px 0;padding:10px 12px;border-radius:12px;background:rgba(255,184,0,0.1);border:1px solid rgba(255,184,0,0.22);">
+            <strong>${currentLang === "zh" ? "待补充信息" : "Pending Input"}</strong>
+            <ul style="margin:8px 0 0 18px;padding:0;">
+              ${collaboration.pendingQuestions.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+            </ul>
+          </div>`
+        : "";
+      const skillIntegrationStatus =
+        skillIntegration?.skillId
+          ? `<div style="margin:10px 0;padding:10px 12px;border-radius:12px;background:${
+              skillIntegration.runtimeAvailable ? "rgba(52,199,89,0.08)" : "rgba(255,149,0,0.10)"
+            };border:1px solid ${
+              skillIntegration.runtimeAvailable ? "rgba(52,199,89,0.2)" : "rgba(255,149,0,0.22)"
+            };">
+              <strong>${currentLang === "zh" ? "Skill 接入状态" : "Skill Integration Status"}</strong>
+              <p class="muted" style="margin-top:6px;">${escapeHtml(skillIntegration.skillName || skillIntegration.skillId)} · ${
+                skillIntegration.targetRoleId
+                  ? `${currentLang === "zh" ? "目标角色" : "Target role"}: ${escapeHtml(skillIntegration.targetRoleId)} · `
+                  : ""
+              }${
+                skillIntegration.runtimeAvailable
+                  ? currentLang === "zh"
+                    ? "本地 runtime 已可安装"
+                    : "Available for local installation"
+                  : currentLang === "zh"
+                    ? "本地 runtime 仍未识别"
+                    : "Still not recognized by local runtime"
+              }</p>
+              ${
+                skillIntegration?.suggestedAction?.kind === "install_skill"
+                  ? `<div class="action-row" style="margin-top:8px;">
+                      <button
+                        type="button"
+                        data-skill-install-ready="${escapeHtml(skillIntegration.skillId)}"
+                        data-skill-install-role="${escapeHtml(skillIntegration.targetRoleId || "")}"
+                      >${currentLang === "zh" ? "立即安装到目标角色" : "Install to target role now"}</button>
+                    </div>`
+                  : ""
+              }
+            </div>`
+          : "";
 
       return `
         <article class="list-card">
@@ -833,14 +1470,542 @@ function renderTasks(tasks) {
           </div>
           <p class="muted">${escapeHtml(task.roleId)} · ${escapeHtml(task.source)} · ${attachmentCount} ${t("task.attachments")}</p>
           <p>${escapeHtml(task.instruction)}</p>
+          ${collaborationMeta}
+          ${deliverableWarning}
+          ${collaborationProgress}
+          ${collaborationRoles}
+          ${pendingQuestions}
+          ${skillIntegrationStatus}
           ${reflection}
           ${summary}
           ${artifactLinks}
           ${deliverable}
+          <div class="action-row">
+            <button type="button" class="ghost" data-task-detail="${escapeHtml(task.id)}">${
+              currentLang === "zh" ? "查看详情" : "View Details"
+            }</button>
+          </div>
         </article>
       `;
     })
     .join("");
+
+  renderTaskDetail(selectedTaskId, selectedTaskDetail);
+}
+
+function renderTaskDetail(taskId, detail) {
+  if (!taskId || !detail || !taskDetailContainer) {
+    if (taskDetailContainer) {
+      taskDetailContainer.classList.add("is-hidden");
+      taskDetailContainer.innerHTML = "";
+    }
+    return;
+  }
+
+  const timeline = Array.isArray(detail.timeline) ? detail.timeline : [];
+  const children = Array.isArray(detail.children) ? detail.children : [];
+  const collaboration = detail.collaboration;
+  const projectMemory = detail.session?.metadata?.projectMemory || null;
+  const completionEvidence = detail.task?.completionEvidence || {};
+  const harness = completionEvidence.harness || null;
+  const skills = completionEvidence.skills || null;
+  const orchestration = completionEvidence.orchestration || null;
+  const workflowSummary = typeof detail.workflowSummary === "string" ? detail.workflowSummary : "";
+  const memoryList = (items, emptyLabel) =>
+    Array.isArray(items) && items.length > 0
+      ? `<ul style="margin:8px 0 0 18px;padding:0;">${items.map((item) => `<li>${escapeHtml(String(item))}</li>`).join("")}</ul>`
+      : `<p class="muted">${emptyLabel}</p>`;
+  taskDetailContainer.classList.remove("is-hidden");
+  taskDetailContainer.innerHTML = `
+    <div class="task-detail-head">
+      <strong>${currentLang === "zh" ? "任务详情" : "Task Detail"}: ${escapeHtml(detail.task?.title || taskId)}</strong>
+      <button type="button" class="ghost" data-task-detail-close="true">${currentLang === "zh" ? "关闭" : "Close"}</button>
+    </div>
+    <div class="task-detail-grid">
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "协作概览" : "Collaboration Overview"}</strong>
+          <span>${escapeHtml(collaboration?.currentPhase || (currentLang === "zh" ? "未知" : "unknown"))}</span>
+        </div>
+        <p class="muted">${
+          currentLang === "zh"
+            ? `参与角色：${Array.isArray(collaboration?.participants) ? collaboration.participants.join(", ") : "无"}`
+            : `Participants: ${Array.isArray(collaboration?.participants) ? collaboration.participants.join(", ") : "none"}`
+        }</p>
+        <p class="muted">${
+          currentLang === "zh"
+            ? `子任务：${children.length} · 时间线事件：${timeline.length}`
+            : `Children: ${children.length} · Timeline events: ${timeline.length}`
+        }</p>
+      </article>
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "主 Agent 状态" : "Main Agent State"}</strong>
+          <span>${escapeHtml(orchestration?.progress?.stage || (currentLang === "zh" ? "未建立" : "not set"))}</span>
+        </div>
+        ${
+          orchestration
+            ? `
+              <p><strong>${currentLang === "zh" ? "目标" : "Goal"}:</strong> ${escapeHtml(orchestration.spec?.goal || "-")}</p>
+              <p><strong>${currentLang === "zh" ? "Owner" : "Owner"}:</strong> ${escapeHtml(orchestration.ownerRoleId || "-")}</p>
+              <p><strong>${currentLang === "zh" ? "状态" : "Status"}:</strong> ${escapeHtml(orchestration.progress?.status || "-")}</p>
+              <div class="memory-block">
+                <strong>${currentLang === "zh" ? "成功标准" : "Success criteria"}</strong>
+                ${memoryList(orchestration.spec?.successCriteria, currentLang === "zh" ? "暂无成功标准" : "No success criteria")}
+              </div>
+              <div class="memory-block">
+                <strong>${currentLang === "zh" ? "下一步动作" : "Next actions"}</strong>
+                ${memoryList(orchestration.progress?.nextActions, currentLang === "zh" ? "当前没有下一步动作" : "No next actions")}
+              </div>
+              <div class="memory-block">
+                <strong>${currentLang === "zh" ? "决策" : "Decisions"}</strong>
+                ${memoryList(orchestration.decision?.entries, currentLang === "zh" ? "当前没有记录决策" : "No decisions recorded")}
+              </div>
+              <div class="memory-block">
+                <strong>${currentLang === "zh" ? "产物索引" : "Artifact index"}</strong>
+                ${Array.isArray(orchestration.artifactIndex?.items) && orchestration.artifactIndex.items.length > 0
+                  ? `<ul style="margin:8px 0 0 18px;padding:0;">${orchestration.artifactIndex.items.map((item) => `<li>${escapeHtml(String(item.stage || ""))} · ${escapeHtml(String(item.title || item.path || ""))} · ${escapeHtml(String(item.status || "produced"))}</li>`).join("")}</ul>`
+                  : `<p class="muted">${currentLang === "zh" ? "当前没有记录产物" : "No artifacts recorded"}</p>`}
+              </div>
+            `
+            : `<p class="muted">${currentLang === "zh" ? "该任务尚未进入主 Agent 编排状态。" : "This task does not expose main-agent orchestration state yet."}</p>`
+        }
+      </article>
+      ${renderWorkflowSummaryBlock(workflowSummary)}
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "动态记忆" : "Dynamic Memory"}</strong>
+          <span>${escapeHtml(projectMemory?.currentStage || (currentLang === "zh" ? "未建立" : "not set"))}</span>
+        </div>
+        ${
+          projectMemory
+            ? `
+              <p><strong>${currentLang === "zh" ? "当前目标" : "Current goal"}:</strong> ${escapeHtml(projectMemory.currentGoal || "-")}</p>
+              <p><strong>${currentLang === "zh" ? "最近请求" : "Latest request"}:</strong> ${escapeHtml(projectMemory.latestUserRequest || "-")}</p>
+              <p><strong>${currentLang === "zh" ? "最近结论" : "Latest summary"}:</strong> ${escapeHtml(projectMemory.latestSummary || "-")}</p>
+              <p class="muted">${
+                currentLang === "zh"
+                  ? `最近更新：${formatDateTime(projectMemory.updatedAt)} · ${escapeHtml(projectMemory.updatedBy || "system")}`
+                  : `Updated: ${formatDateTime(projectMemory.updatedAt)} · ${escapeHtml(projectMemory.updatedBy || "system")}`
+              }</p>
+              <div class="memory-block">
+                <strong>${currentLang === "zh" ? "待解决问题" : "Open questions"}</strong>
+                ${memoryList(projectMemory.unresolvedQuestions, currentLang === "zh" ? "当前没有待解决问题" : "No open questions")}
+              </div>
+              <div class="memory-block">
+                <strong>${currentLang === "zh" ? "下一步动作" : "Next actions"}</strong>
+                ${memoryList(projectMemory.nextActions, currentLang === "zh" ? "当前没有下一步动作" : "No next actions")}
+              </div>
+              <div class="memory-block">
+                <strong>${currentLang === "zh" ? "最近产物" : "Latest artifacts"}</strong>
+                ${memoryList(projectMemory.latestArtifacts, currentLang === "zh" ? "当前没有记录的产物" : "No artifacts recorded")}
+              </div>
+            `
+            : `<p class="muted">${currentLang === "zh" ? "该会话还没有建立项目级动态记忆。" : "No project memory has been established for this session."}</p>`
+        }
+      </article>
+      ${renderHarnessBlock(harness, { title: currentLang === "zh" ? "Task Harness Grade" : "Task Harness Grade" })}
+      ${renderRuntimeEvidenceSummary(completionEvidence)}
+      ${renderSkillBindingsSummary(skills)}
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "子任务" : "Child Tasks"}</strong>
+        </div>
+        ${
+          children.length > 0
+            ? children
+                .map(
+                  (child) =>
+                    `<p>${escapeHtml(child.roleId)} · ${statusBadge(child.displayStatus || child.status)} · ${escapeHtml(child.title)}</p>`
+                )
+                .join("")
+            : `<p class="muted">${currentLang === "zh" ? "暂无子任务" : "No child tasks"}</p>`
+        }
+      </article>
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "关键时间线" : "Timeline"}</strong>
+        </div>
+        <div class="timeline-list">
+          ${
+            timeline.length > 0
+              ? timeline
+                  .slice(0, 12)
+                  .map(
+                    (entry) => `
+                      <div class="timeline-item">
+                        <strong>${escapeHtml(entry.eventType || "event")}</strong>
+                        <p>${escapeHtml(entry.message || "")}</p>
+                        <p class="muted">${formatDateTime(entry.createdAt)}</p>
+                      </div>`
+                  )
+                  .join("")
+              : `<p class="muted">${currentLang === "zh" ? "暂无时间线事件" : "No timeline events"}</p>`
+          }
+        </div>
+      </article>
+    </div>
+  `;
+}
+
+async function openTaskDetail(taskId) {
+  if (!taskId) {
+    return;
+  }
+  selectedTaskId = taskId;
+  try {
+    selectedTaskDetail = await request(`/api/tasks/${taskId}/collaboration`);
+  } catch {
+    selectedTaskDetail = await request(`/api/tasks/${taskId}/children`);
+  }
+  renderTaskDetail(selectedTaskId, selectedTaskDetail);
+}
+
+function renderGoalRuns(goalRuns) {
+  if (!goalRunsContainer) {
+    return;
+  }
+
+  const runs = Array.isArray(goalRuns) ? goalRuns : [];
+  if (runs.length === 0) {
+    goalRunsContainer.innerHTML = `<p class="muted" style="text-align:center;padding:24px 0;">${
+      currentLang === "zh" ? "暂无 GoalRun 记录" : "No GoalRun records yet"
+    }</p>`;
+    renderGoalRunDetail("", null);
+    return;
+  }
+
+  goalRunsContainer.innerHTML = runs
+    .map((run) => {
+      const completionEvidence = run?.completionEvidence || {};
+      const harness = completionEvidence.harness || null;
+      const telemetry = completionEvidence.telemetry || {};
+      const rules = completionEvidence.rules || {};
+      const completedRoles = Array.isArray(completionEvidence.completedRoles) ? completionEvidence.completedRoles : [];
+      const failedRoles = Array.isArray(completionEvidence.failedRoles) ? completionEvidence.failedRoles : [];
+      const preview = run?.result?.summary || run?.errorText || run?.objective || "";
+      return `
+        <article class="list-card ${selectedGoalRunId === run.id ? "is-selected" : ""}" data-goal-run-detail="${escapeHtml(run.id)}" style="cursor:pointer">
+          <div class="list-head">
+            <strong>${escapeHtml(String(run.objective || "").slice(0, 96))}${String(run.objective || "").length > 96 ? "..." : ""}</strong>
+            ${statusBadge(run.status)}
+          </div>
+          <p class="muted">${escapeHtml(run.currentStage || "-")} · ${escapeHtml(run.source || "-")} · ${
+            run.updatedAt ? formatDateTime(run.updatedAt) : "-"
+          }</p>
+          <p>${escapeHtml(String(preview).slice(0, 180))}${String(preview).length > 180 ? "..." : ""}</p>
+          <div class="pill-row">
+            ${harness ? renderHarnessGradeBadge(harness) : ""}
+            <span class="pill">retry:${escapeHtml(`${run.retryCount || 0}/${run.maxRetries || 0}`)}</span>
+            <span class="pill">turns:${escapeHtml(String(telemetry.turns || 0))}</span>
+            <span class="pill">approval:${escapeHtml(String(rules.approvalGateHits || completionEvidence.approvalGateHits || 0))}</span>
+            <span class="pill">handoff:${escapeHtml(String(completionEvidence.handoffArtifactPresent === true))}</span>
+            ${
+              run.currentTaskId
+                ? `<span class="pill">task:${escapeHtml(String(run.currentTaskId).slice(0, 8))}</span>`
+                : ""
+            }
+          </div>
+          <p class="muted">${
+            currentLang === "zh"
+              ? `完成角色 ${completedRoles.length} · 受阻角色 ${failedRoles.length}${run.requestedBy ? ` · 发起人 ${run.requestedBy}` : ""}`
+              : `completed roles ${completedRoles.length} · failed roles ${failedRoles.length}${run.requestedBy ? ` · requested by ${run.requestedBy}` : ""}`
+          }</p>
+        </article>
+      `;
+    })
+    .join("");
+
+  renderGoalRunDetail(selectedGoalRunId, selectedGoalRunDetail);
+}
+
+function renderGoalRunDetail(goalRunId, detail) {
+  if (!goalRunId || !detail || !goalRunDetailContainer || !detail.goalRun) {
+    if (goalRunDetailContainer) {
+      goalRunDetailContainer.classList.add("is-hidden");
+      goalRunDetailContainer.innerHTML = "";
+    }
+    return;
+  }
+
+  const goalRun = detail.goalRun;
+  const completionEvidence = goalRun.completionEvidence || {};
+  const harness = completionEvidence.harness || null;
+  const skills = completionEvidence.skills || null;
+  const orchestration = completionEvidence.orchestration || null;
+  const inputs = Array.isArray(detail.inputs) ? detail.inputs : [];
+  const authTokens = Array.isArray(detail.authTokens) ? detail.authTokens : [];
+  const timeline = Array.isArray(detail.timeline) ? detail.timeline : [];
+  const traces = Array.isArray(detail.traces) ? detail.traces : [];
+  const handoffs =
+    Array.isArray(detail.handoffs) && detail.handoffs.length > 0
+      ? detail.handoffs
+      : detail.latestHandoff
+        ? [detail.latestHandoff]
+        : [];
+  const awaitingFields = Array.isArray(goalRun.awaitingInputFields) ? goalRun.awaitingInputFields : [];
+  const result = goalRun.result || null;
+  const currentTask = detail.task || null;
+  const renderList = (items, emptyLabel) =>
+    Array.isArray(items) && items.length > 0
+      ? `<ul style="margin:8px 0 0 18px;padding:0;">${items.map((item) => `<li>${escapeHtml(String(item))}</li>`).join("")}</ul>`
+      : `<p class="muted">${emptyLabel}</p>`;
+
+  goalRunDetailContainer.classList.remove("is-hidden");
+  goalRunDetailContainer.innerHTML = `
+    <div class="task-detail-head">
+      <strong>${currentLang === "zh" ? "GoalRun 详情" : "GoalRun Detail"}: ${escapeHtml(goalRun.objective || goalRunId)}</strong>
+      <button type="button" class="ghost" data-goal-run-detail-close="true">${currentLang === "zh" ? "关闭" : "Close"}</button>
+    </div>
+    <div class="task-detail-grid">
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "运行概览" : "Run Overview"}</strong>
+          ${statusBadge(goalRun.status)}
+        </div>
+        <p class="muted">${escapeHtml(goalRun.currentStage || "-")} · ${escapeHtml(goalRun.language || "-")} · ${
+          goalRun.updatedAt ? formatDateTime(goalRun.updatedAt) : "-"
+        }</p>
+        <div class="pill-row">
+          <span class="pill">retry:${escapeHtml(`${goalRun.retryCount || 0}/${goalRun.maxRetries || 0}`)}</span>
+          <span class="pill">awaiting:${escapeHtml(String(awaitingFields.length))}</span>
+          <span class="pill">timeline:${escapeHtml(String(timeline.length))}</span>
+          <span class="pill">traces:${escapeHtml(String(traces.length))}</span>
+        </div>
+        <p class="muted">${
+          currentLang === "zh"
+            ? `发起人 ${goalRun.requestedBy || "-"} · 当前任务 ${goalRun.currentTaskId ? goalRun.currentTaskId.slice(0, 8) : "-"}`
+            : `requested by ${goalRun.requestedBy || "-"} · current task ${goalRun.currentTaskId ? goalRun.currentTaskId.slice(0, 8) : "-"}`
+        }</p>
+        ${
+          goalRun.errorText
+            ? `<pre style="background:var(--red-soft);color:var(--red);border:1px solid rgba(255,59,48,0.2);">${escapeHtml(goalRun.errorText)}</pre>`
+            : ""
+        }
+      </article>
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "结果与恢复态" : "Result & Resume State"}</strong>
+          <span>${escapeHtml(goalRun.currentStage || "-")}</span>
+        </div>
+        ${
+          result
+            ? `
+              <p><strong>${currentLang === "zh" ? "总结" : "Summary"}:</strong> ${escapeHtml(result.summary || "-")}</p>
+              ${result.deliverable ? renderMarkdown(result.deliverable) : ""}
+              <div class="memory-block">
+                <strong>${currentLang === "zh" ? "下一步" : "Next Actions"}</strong>
+                ${renderList(result.nextActions || [], currentLang === "zh" ? "暂无下一步" : "No next actions")}
+              </div>
+            `
+            : `<p class="muted">${currentLang === "zh" ? "该 GoalRun 还没有最终结果。" : "This GoalRun has not produced a final result yet."}</p>`
+        }
+        ${
+          goalRun.awaitingInputPrompt
+            ? `<div class="memory-block">
+                <strong>${currentLang === "zh" ? "待补充输入" : "Awaiting Input"}</strong>
+                <p>${escapeHtml(goalRun.awaitingInputPrompt)}</p>
+                ${renderList(awaitingFields, currentLang === "zh" ? "未声明字段" : "No explicit fields")}
+              </div>`
+            : ""
+        }
+      </article>
+      ${renderHarnessBlock(harness, { title: currentLang === "zh" ? "GoalRun Harness Grade" : "GoalRun Harness Grade" })}
+      ${renderRuntimeEvidenceSummary(completionEvidence)}
+      ${renderSkillBindingsSummary(skills)}
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "当前任务" : "Current Task"}</strong>
+          <span>${currentTask ? escapeHtml(currentTask.roleId || "-") : "-"}</span>
+        </div>
+        ${
+          currentTask
+            ? `
+              <p><strong>${escapeHtml(currentTask.title || currentTask.id)}</strong></p>
+              <p class="muted">${escapeHtml(currentTask.displayStatus || currentTask.status || "-")} · ${escapeHtml(
+                currentTask.source || "-"
+              )}</p>
+              <p>${escapeHtml(currentTask.instruction || "")}</p>
+              <div class="action-row">
+                <button type="button" class="ghost" data-goal-run-open-task="${escapeHtml(currentTask.id)}">${
+                  currentLang === "zh" ? "打开任务详情" : "Open Task Detail"
+                }</button>
+              </div>
+            `
+            : `<p class="muted">${currentLang === "zh" ? "当前没有关联任务。" : "No linked task for this GoalRun."}</p>`
+        }
+      </article>
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "输入与授权" : "Inputs & Authorizations"}</strong>
+          <span>${escapeHtml(String(inputs.length + authTokens.length))}</span>
+        </div>
+        <div class="memory-block">
+          <strong>${currentLang === "zh" ? "输入" : "Inputs"}</strong>
+          ${
+            inputs.length > 0
+              ? inputs
+                  .map(
+                    (entry) =>
+                      `<p><strong>${escapeHtml(entry.inputKey || "-")}</strong>: ${escapeHtml(formatStructuredValue(entry.value))}</p>`
+                  )
+                  .join("")
+              : `<p class="muted">${currentLang === "zh" ? "暂无补充输入" : "No supplemental inputs"}</p>`
+          }
+        </div>
+        <div class="memory-block">
+          <strong>${currentLang === "zh" ? "授权 Token" : "Authorization Tokens"}</strong>
+          ${
+            authTokens.length > 0
+              ? authTokens
+                  .map(
+                    (entry) =>
+                      `<p>${escapeHtml(entry.scope || "-")} · ${escapeHtml(entry.status || "-")} · ${escapeHtml(
+                        entry.token || "-"
+                      )} · ${entry.expiresAt ? formatDateTime(entry.expiresAt) : "-"}</p>`
+                  )
+                  .join("")
+              : `<p class="muted">${currentLang === "zh" ? "暂无授权 token" : "No authorization tokens"}</p>`
+          }
+        </div>
+      </article>
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "Handoff 产物" : "Handoff Artifacts"}</strong>
+          <span>${escapeHtml(String(handoffs.length))}</span>
+        </div>
+        ${
+          handoffs.length > 0
+            ? handoffs
+                .slice(0, 8)
+                .map(
+                  (handoff) => `
+                    <div class="timeline-item">
+                      <strong>${escapeHtml(handoff.stage || "-")}</strong>
+                      <p>${escapeHtml(handoff.summary || "-")}</p>
+                      <p class="muted">${handoff.createdAt ? formatDateTime(handoff.createdAt) : "-"}</p>
+                      <div class="pill-row">
+                        ${(Array.isArray(handoff.artifacts) ? handoff.artifacts : [])
+                          .slice(0, 4)
+                          .map((item) => `<span class="pill">${escapeHtml(String(item))}</span>`)
+                          .join("")}
+                        ${(Array.isArray(handoff.nextActions) ? handoff.nextActions : [])
+                          .slice(0, 2)
+                          .map((item) => `<span class="pill">${escapeHtml(String(item))}</span>`)
+                          .join("")}
+                      </div>
+                    </div>
+                  `
+                )
+                .join("")
+            : `<p class="muted">${currentLang === "zh" ? "暂无 handoff 产物" : "No handoff artifacts yet"}</p>`
+        }
+      </article>
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "GoalRun Traces" : "GoalRun Traces"}</strong>
+          <span>${escapeHtml(String(traces.length))}</span>
+        </div>
+        ${
+          traces.length > 0
+            ? traces
+                .slice(0, 10)
+                .map(
+                  (trace) => `
+                    <div class="timeline-item">
+                      <strong>${escapeHtml(trace.stage || "-")} · ${escapeHtml(trace.status || "-")}</strong>
+                      <p>${escapeHtml(trace.inputSummary || "-")}</p>
+                      <p>${escapeHtml(trace.outputSummary || "-")}</p>
+                      <div class="pill-row">
+                        <span class="pill">approval:${escapeHtml(String(trace.approvalGateHits || 0))}</span>
+                        <span class="pill">artifacts:${escapeHtml(String(Array.isArray(trace.artifactFiles) ? trace.artifactFiles.length : 0))}</span>
+                        ${
+                          trace.failureCategory
+                            ? `<span class="pill">${escapeHtml(String(trace.failureCategory))}</span>`
+                            : ""
+                        }
+                      </div>
+                      ${
+                        trace.taskId
+                          ? `<div class="action-row">
+                              <button type="button" class="ghost" data-goal-run-open-task="${escapeHtml(trace.taskId)}">${
+                                currentLang === "zh" ? "打开关联任务" : "Open Linked Task"
+                              }</button>
+                            </div>`
+                          : ""
+                      }
+                    </div>
+                  `
+                )
+                .join("")
+            : `<p class="muted">${currentLang === "zh" ? "暂无 GoalRun trace" : "No GoalRun traces yet"}</p>`
+        }
+      </article>
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "关键时间线" : "Timeline"}</strong>
+          <span>${escapeHtml(String(timeline.length))}</span>
+        </div>
+        <div class="timeline-list">
+          ${
+            timeline.length > 0
+              ? timeline
+                  .slice(0, 16)
+                  .map(
+                    (entry) => `
+                      <div class="timeline-item">
+                        <strong>${escapeHtml(entry.eventType || "event")}</strong>
+                        <p>${escapeHtml(entry.message || "")}</p>
+                        <p class="muted">${entry.createdAt ? formatDateTime(entry.createdAt) : "-"}</p>
+                      </div>
+                    `
+                  )
+                  .join("")
+              : `<p class="muted">${currentLang === "zh" ? "暂无时间线事件" : "No timeline events"}</p>`
+          }
+        </div>
+      </article>
+    </div>
+  `;
+}
+
+async function openGoalRunDetail(goalRunId, options = {}) {
+  if (!goalRunId) {
+    return;
+  }
+
+  if (!options.background) {
+    selectedGoalRunId = goalRunId;
+  }
+
+  const [detailResult, timelineResult, traceResult, handoffResult] = await Promise.allSettled([
+    request(`/api/goal-runs/${goalRunId}`),
+    request(`/api/goal-runs/${goalRunId}/timeline`),
+    request(`/api/goal-runs/${goalRunId}/trace`),
+    request(`/api/goal-runs/${goalRunId}/handoff?latest=false`)
+  ]);
+
+  if (detailResult.status !== "fulfilled") {
+    throw detailResult.reason;
+  }
+
+  const mergedDetail = {
+    ...detailResult.value,
+    timeline: timelineResult.status === "fulfilled" ? timelineResult.value.timeline || [] : [],
+    traces: traceResult.status === "fulfilled" ? traceResult.value.traces || [] : [],
+    handoffs:
+      handoffResult.status === "fulfilled"
+        ? handoffResult.value.handoffs || []
+        : detailResult.value.latestHandoff
+          ? [detailResult.value.latestHandoff]
+          : []
+  };
+
+  if (!options.background || selectedGoalRunId === goalRunId) {
+    selectedGoalRunDetail = mergedDetail;
+    renderGoalRuns(window._lastGoalRuns || []);
+    renderGoalRunDetail(selectedGoalRunId, selectedGoalRunDetail);
+  }
 }
 
 function renderToolRuns(toolRuns) {
@@ -1124,12 +2289,358 @@ function renderProviderStatus(payload) {
   `;
 }
 
+function renderProjectMemoryBoard(board) {
+  if (!projectMemoryBoardContainer) {
+    return;
+  }
+  const summary = board?.summary || null;
+  const primary = board?.primary || null;
+  const teamReadiness = Array.isArray(board?.teamReadiness) ? board.teamReadiness : [];
+  const workstreams = Array.isArray(board?.workstreams) ? board.workstreams : [];
+  const blockers = Array.isArray(board?.blockers) ? board.blockers.slice(0, 5) : [];
+  const pendingDecisions = Array.isArray(board?.pendingDecisions) ? board.pendingDecisions.slice(0, 5) : [];
+  const nextActions = Array.isArray(board?.nextActions) ? board.nextActions.slice(0, 5) : [];
+  const latestArtifacts = Array.isArray(board?.latestArtifacts) ? board.latestArtifacts.slice(0, 5) : [];
+  const renderMiniList = (items, emptyLabel) =>
+    items.length > 0
+      ? `<ul style="margin:8px 0 0 18px;padding:0;">${items.map((item) => `<li>${escapeHtml(String(item))}</li>`).join("")}</ul>`
+      : `<p class="muted">${emptyLabel}</p>`;
+
+  if (!primary && workstreams.length === 0) {
+    projectMemoryBoardContainer.innerHTML = `
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "暂无项目面板数据" : "No project board data yet"}</strong>
+          <span>0</span>
+        </div>
+        <p class="muted">${
+          currentLang === "zh"
+            ? "当 CEO 发起任务、团队交付结果或协作等待补充时，这里会自动累积项目态势。"
+            : "This board fills automatically as the CEO creates work, the team delivers, or collaboration pauses for input."
+        }</p>
+      </article>
+    `;
+    return;
+  }
+  const readinessCards = teamReadiness
+    .slice(0, 6)
+    .map((role) => {
+      const statusLabel =
+        role.failedSkills > 0
+          ? currentLang === "zh"
+            ? "有失败 skill"
+            : "has failed skills"
+          : role.unverifiedSkills > 0
+            ? currentLang === "zh"
+              ? "待验证"
+              : "verification debt"
+            : currentLang === "zh"
+              ? "就绪"
+              : "ready";
+      return `
+        <article class="list-card compact">
+          <div class="list-head">
+            <strong>${escapeHtml(role.roleName)}</strong>
+            <span>${escapeHtml(statusLabel)}</span>
+          </div>
+          <p class="muted">${escapeHtml(role.roleId)} · ${escapeHtml(role.responsibility)}</p>
+          <p class="muted">${
+            currentLang === "zh"
+              ? `已验证 ${role.verifiedSkills} / 未验证 ${role.unverifiedSkills} / 失败 ${role.failedSkills}`
+              : `verified ${role.verifiedSkills} / unverified ${role.unverifiedSkills} / failed ${role.failedSkills}`
+          }</p>
+          ${renderMiniList(
+            role.highlightedSkills || [],
+            currentLang === "zh" ? "当前没有高亮 skill" : "No highlighted skills"
+          )}
+        </article>
+      `;
+    })
+    .join("");
+
+  const workstreamCards = workstreams
+    .slice(0, 4)
+    .map(
+      (stream) => `
+        <article class="list-card compact">
+          <div class="list-head">
+            <strong>${escapeHtml(stream.currentGoal || stream.sessionTitle || stream.sessionId)}</strong>
+            <span>${escapeHtml(stream.currentStage || (currentLang === "zh" ? "未设阶段" : "no stage"))}</span>
+          </div>
+          <p class="muted">${escapeHtml(stream.source)} · ${formatDateTime(stream.updatedAt)}</p>
+          ${
+            stream.orchestrationMode
+              ? `<div class="pill-row" style="margin:8px 0;">
+                  <span class="pill">${escapeHtml(String(stream.orchestrationMode))}</span>
+                  ${stream.orchestrationOwnerRoleId ? `<span class="pill">owner:${escapeHtml(String(stream.orchestrationOwnerRoleId))}</span>` : ""}
+                  ${stream.orchestrationVerificationStatus ? `<span class="pill">verify:${escapeHtml(String(stream.orchestrationVerificationStatus))}</span>` : ""}
+                </div>`
+              : ""
+          }
+          <p><strong>${currentLang === "zh" ? "最近结论" : "Latest summary"}:</strong> ${escapeHtml(stream.latestSummary || "-")}</p>
+          <div class="memory-block">
+            <strong>${currentLang === "zh" ? "下一步动作" : "Next actions"}</strong>
+            ${renderMiniList(stream.nextActions || [], currentLang === "zh" ? "暂无动作" : "No actions")}
+          </div>
+        </article>
+      `
+    )
+    .join("");
+
+  projectMemoryBoardContainer.innerHTML = `
+    <article class="list-card compact">
+      <div class="list-head">
+        <strong>${currentLang === "zh" ? "CEO 总览" : "CEO Overview"}</strong>
+        <span>${formatDateTime(board?.generatedAt || new Date().toISOString())}</span>
+      </div>
+      <div class="pill-row">
+        <span class="pill">${currentLang === "zh" ? "项目" : "Projects"} · ${summary?.activeProjects ?? 0}</span>
+        <span class="pill">${currentLang === "zh" ? "阻塞任务" : "Blocked"} · ${summary?.blockedTasks ?? 0}</span>
+        <span class="pill">${currentLang === "zh" ? "待补充" : "Awaiting input"} · ${summary?.awaitingInputTasks ?? 0}</span>
+        <span class="pill">${currentLang === "zh" ? "角色就绪" : "Roles ready"} · ${summary?.readyRoles ?? 0}</span>
+        <span class="pill">${currentLang === "zh" ? "验证债务" : "Verification debt"} · ${summary?.verificationDebtRoles ?? 0}</span>
+      </div>
+    </article>
+    ${
+      primary
+        ? `
+          <article class="list-card compact">
+            <div class="list-head">
+              <strong>${escapeHtml(primary.currentGoal || primary.sessionTitle || primary.sessionId)}</strong>
+              <span>${escapeHtml(primary.currentStage || (currentLang === "zh" ? "未设阶段" : "no stage"))}</span>
+            </div>
+            <p class="muted">${escapeHtml(primary.source)} · ${formatDateTime(primary.updatedAt)}</p>
+            ${
+              primary.orchestrationMode
+                ? `<div class="pill-row" style="margin:8px 0;">
+                    <span class="pill">${escapeHtml(String(primary.orchestrationMode))}</span>
+                    ${primary.orchestrationOwnerRoleId ? `<span class="pill">owner:${escapeHtml(String(primary.orchestrationOwnerRoleId))}</span>` : ""}
+                    ${primary.orchestrationVerificationStatus ? `<span class="pill">verify:${escapeHtml(String(primary.orchestrationVerificationStatus))}</span>` : ""}
+                  </div>`
+                : ""
+            }
+            <p><strong>${currentLang === "zh" ? "最近请求" : "Latest request"}:</strong> ${escapeHtml(primary.latestUserRequest || "-")}</p>
+            <p><strong>${currentLang === "zh" ? "最近结论" : "Latest summary"}:</strong> ${escapeHtml(primary.latestSummary || "-")}</p>
+            <div class="memory-block">
+              <strong>${currentLang === "zh" ? "关键决策 / 待决策" : "Decisions / Pending"}</strong>
+              ${renderMiniList(pendingDecisions, currentLang === "zh" ? "暂无待决策项" : "No pending decisions")}
+            </div>
+            <div class="memory-block">
+              <strong>${currentLang === "zh" ? "阻塞与风险" : "Blockers & Risks"}</strong>
+              ${renderMiniList(blockers, currentLang === "zh" ? "暂无阻塞" : "No blockers")}
+            </div>
+            <div class="memory-block">
+              <strong>${currentLang === "zh" ? "下一步动作" : "Next actions"}</strong>
+              ${renderMiniList(nextActions, currentLang === "zh" ? "暂无下一步" : "No next actions")}
+            </div>
+            <div class="memory-block">
+              <strong>${currentLang === "zh" ? "最近产物" : "Recent artifacts"}</strong>
+              ${renderMiniList(latestArtifacts, currentLang === "zh" ? "暂无产物" : "No artifacts")}
+            </div>
+          </article>
+        `
+        : ""
+    }
+    ${readinessCards}
+    ${workstreamCards}
+  `;
+}
+
+function renderHarnessBoard(payload, gradesPayload, runtimeHarnessPayload) {
+  if (!harnessBoardContainer) {
+    return;
+  }
+  const grades = Array.isArray(gradesPayload?.grades) ? gradesPayload.grades : [];
+  const gradeBySuite = new Map(grades.map((entry) => [String(entry.suite || ""), entry]));
+  const runtimeCard = renderRuntimeHarnessBoard(runtimeHarnessPayload);
+  if (!payload?.configured) {
+    harnessBoardContainer.innerHTML = `
+      ${runtimeCard}
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "Harness 未配置" : "Harness not configured"}</strong>
+          <span>0</span>
+        </div>
+        <p class="muted">${
+          currentLang === "zh"
+            ? "运行一次 harness 脚本后，这里会显示最近的回归结果。"
+            : "Run a harness script once and the latest regression results will appear here."
+        }</p>
+      </article>
+    `;
+    return;
+  }
+  const suites = Array.isArray(payload?.suites) ? payload.suites : [];
+  if (suites.length === 0) {
+    harnessBoardContainer.innerHTML = `
+      ${runtimeCard}
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "暂无 Harness 结果" : "No harness results yet"}</strong>
+          <span>0</span>
+        </div>
+        <p class="muted">${
+          currentLang === "zh"
+            ? "执行 npm run harness:product 或 npm run harness:founder-delivery 后，这里会自动展示最近一次结果。"
+            : "Run npm run harness:product or npm run harness:founder-delivery and the latest result will appear here."
+        }</p>
+      </article>
+    `;
+    return;
+  }
+  harnessBoardContainer.innerHTML = `${runtimeCard}${suites
+    .map((suiteEntry) => {
+      const latest = suiteEntry?.latest ?? null;
+      const suiteGrade = gradeBySuite.get(String(suiteEntry?.suite ?? ""));
+      const ok = latest?.ok === true;
+      const statusLabel = latest
+        ? ok
+          ? currentLang === "zh"
+            ? "通过"
+            : "pass"
+          : currentLang === "zh"
+            ? "失败"
+            : "fail"
+        : currentLang === "zh"
+          ? "未运行"
+          : "not run";
+      const tail = [latest?.stderrTail, latest?.stdoutTail]
+        .find((value) => typeof value === "string" && value.trim())
+        ?.trim();
+      const stageSummary =
+        latest?.stageSummary && typeof latest.stageSummary === "object" ? latest.stageSummary : null;
+      const stageEntries = stageSummary ? Object.entries(stageSummary).slice(0, 6) : [];
+      const summaryBits = [];
+      if (typeof latest?.durationMs === "number") {
+        summaryBits.push(`${currentLang === "zh" ? "耗时" : "duration"} ${formatDuration(latest.durationMs)}`);
+      }
+      if (typeof latest?.budgetMs === "number") {
+        summaryBits.push(`${currentLang === "zh" ? "预算" : "budget"} ${formatDuration(latest.budgetMs)}`);
+      }
+      if (latest?.exceededBudget === true && typeof latest?.overBudgetMs === "number") {
+        summaryBits.push(`${currentLang === "zh" ? "超预算" : "over budget"} ${formatDuration(latest.overBudgetMs)}`);
+      }
+      if (typeof latest?.finishedAt === "string") {
+        summaryBits.push(`${currentLang === "zh" ? "完成于" : "finished"} ${formatDateTime(latest.finishedAt)}`);
+      }
+      if (typeof latest?.regressionCategory === "string" && latest.regressionCategory && latest.regressionCategory !== "none") {
+        summaryBits.push(
+          `${currentLang === "zh" ? "类别" : "category"} ${String(latest.regressionCategory)}`
+        );
+      }
+      if (typeof latest?.failedStage === "string" && latest.failedStage) {
+        summaryBits.push(`${currentLang === "zh" ? "阶段" : "stage"} ${String(latest.failedStage)}`);
+      }
+      if (typeof latest?.failedStageBudgetMs === "number") {
+        summaryBits.push(`${currentLang === "zh" ? "阶段预算" : "stage budget"} ${formatDuration(latest.failedStageBudgetMs)}`);
+      }
+      if (typeof latest?.failedStageOverBudgetMs === "number" && latest.failedStageOverBudgetMs > 0) {
+        summaryBits.push(`${currentLang === "zh" ? "阶段超预算" : "stage over budget"} ${formatDuration(latest.failedStageOverBudgetMs)}`);
+      }
+      if (typeof latest?.stateCompleteness === "boolean") {
+        summaryBits.push(
+          latest.stateCompleteness
+            ? currentLang === "zh"
+              ? "状态完整"
+              : "state complete"
+            : currentLang === "zh"
+              ? "状态缺失"
+              : "state incomplete"
+        );
+      }
+      if (latest?.projectBoardSummary && typeof latest.projectBoardSummary === "object") {
+        const board = latest.projectBoardSummary;
+        if (typeof board.blockedTasks === "number" || typeof board.awaitingInputTasks === "number") {
+          summaryBits.push(
+            `${
+              currentLang === "zh" ? "阻塞" : "blocked"
+            } ${Number(board.blockedTasks ?? 0)} / ${currentLang === "zh" ? "待补充" : "awaiting"} ${Number(
+              board.awaitingInputTasks ?? 0
+            )}`
+          );
+        }
+      }
+      return `
+        <article class="list-card compact">
+          <div class="list-head">
+            <strong>${escapeHtml(String(suiteEntry?.suite ?? "unknown"))}</strong>
+            <span>${escapeHtml(statusLabel)}${suiteGrade?.grade ? ` · ${escapeHtml(String(suiteGrade.grade))}` : ""}</span>
+          </div>
+          <p class="muted">${escapeHtml(summaryBits.join(" · ") || (currentLang === "zh" ? "暂无摘要" : "No summary"))}</p>
+          ${
+            suiteGrade
+              ? `<div class="pill-row">
+                  <span class="pill">grade:${escapeHtml(String(suiteGrade.grade || "unknown"))}</span>
+                  ${
+                    suiteGrade.failedInvariant
+                      ? `<span class="pill">${escapeHtml(String(suiteGrade.failedInvariant))}</span>`
+                      : ""
+                  }
+                  ${
+                    typeof suiteGrade.handoffCoverage === "number"
+                      ? `<span class="pill">handoff:${escapeHtml(String(suiteGrade.handoffCoverage))}</span>`
+                      : ""
+                  }
+                  ${
+                    typeof suiteGrade.approvalCoverage === "number"
+                      ? `<span class="pill">approval:${escapeHtml(String(suiteGrade.approvalCoverage))}</span>`
+                      : ""
+                  }
+                  ${
+                    typeof suiteGrade.stateCompleteness === "boolean"
+                      ? `<span class="pill">state:${suiteGrade.stateCompleteness ? "ok" : "missing"}</span>`
+                      : ""
+                  }
+                </div>`
+              : ""
+          }
+          ${
+            typeof latest?.detail === "string" && latest.detail.trim()
+              ? `<p><strong>${currentLang === "zh" ? "细节" : "Detail"}:</strong> ${escapeHtml(latest.detail.trim())}</p>`
+              : ""
+          }
+          ${
+            stageEntries.length > 0
+              ? `<div class="memory-block">
+                  <strong>${currentLang === "zh" ? "阶段摘要" : "Stage summary"}</strong>
+                  <ul style="margin:8px 0 0 18px;padding:0;">${stageEntries
+                    .map(([name, value]) => {
+                      const bits = [];
+                      if (value?.status) bits.push(String(value.status));
+                      if (typeof value?.artifactCount === "number") bits.push(`artifacts ${value.artifactCount}`);
+                      if (value?.deliverableMode) bits.push(String(value.deliverableMode));
+                      if (value?.deliverableContractViolated === true) bits.push("contract violated");
+                      return `<li>${escapeHtml(name)}${bits.length > 0 ? ` · ${escapeHtml(bits.join(" / "))}` : ""}</li>`;
+                    })
+                    .join("")}</ul>
+                </div>`
+              : ""
+          }
+          ${
+            tail
+              ? `<pre class="code-block" style="white-space:pre-wrap;margin-top:10px;">${escapeHtml(
+                  tail.slice(-600)
+                )}</pre>`
+              : `<p class="muted">${currentLang === "zh" ? "暂无输出尾部" : "No output tail"}</p>`
+          }
+        </article>
+      `;
+    })
+    .join("")}`;
+}
+
 async function refresh() {
-  const [dashboard, rolesPayload, channelsPayload, providersPayload] = await Promise.all([
+  const [dashboard, rolesPayload, channelsPayload, providersPayload, projectBoardPayload, goalRunsPayload, harnessPayload, telemetryPayload, runtimeHarnessPayload, harnessGradesPayload] = await Promise.all([
     request("/api/dashboard"),
     request("/api/roles"),
     request("/api/channels/status").catch(() => null),
-    request("/api/tool-providers").catch(() => null)
+    request("/api/tool-providers").catch(() => null),
+    request("/api/project-board").catch(() => null),
+    request("/api/goal-runs?limit=40").catch(() => []),
+    request("/api/system/harness").catch(() => null),
+    request("/api/system/telemetry").catch(() => null),
+    request("/api/system/runtime-harness").catch(() => null),
+    request("/api/system/harness/grades").catch(() => null)
   ]);
 
   renderRoles(rolesPayload);
@@ -1142,6 +2653,16 @@ async function refresh() {
   renderQueueMetrics(dashboard.queueMetrics);
   renderChannelsStatus(channelsPayload);
   renderProviderStatus(providersPayload);
+  renderProjectMemoryBoard(projectBoardPayload);
+  window._lastGoalRuns = Array.isArray(goalRunsPayload) ? goalRunsPayload : [];
+  renderGoalRuns(window._lastGoalRuns);
+  lastRuntimeHarnessPayload = runtimeHarnessPayload;
+  renderHarnessBoard(harnessPayload, harnessGradesPayload, runtimeHarnessPayload);
+  renderSkillsMarketResults(lastSkillsMarketResults);
+  renderTelemetryBoard(telemetryPayload, runtimeHarnessPayload);
+  if (selectedGoalRunId) {
+    openGoalRunDetail(selectedGoalRunId, { background: true }).catch(() => null);
+  }
 }
 
 navButtons.forEach((button) => {
@@ -1216,6 +2737,42 @@ document.querySelector("#task-form").addEventListener("submit", async (event) =>
   event.target.reset();
   document.querySelector("#task-requested-by").value = "owner";
   await refresh();
+});
+
+workflowShortcutContainer?.addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target.closest("[data-workflow-preset]") : null;
+  if (!target) {
+    return;
+  }
+  applyWorkflowPreset(target.getAttribute("data-workflow-preset") || "");
+});
+
+document.querySelector("#skills-market-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const query = document.querySelector("#skills-market-query")?.value?.trim() || "";
+  const roleId = skillsMarketRoleSelect?.value || "";
+  if (!query) {
+    skillsMarketResult.textContent =
+      currentLang === "zh" ? "请输入要搜索的 skill 关键词。" : "Enter a keyword to search skills.";
+    renderSkillsMarketResults([]);
+    return;
+  }
+
+  skillsMarketResult.textContent = currentLang === "zh" ? "正在搜索 skill..." : "Searching skills...";
+  try {
+    const payload = await request(
+      `/api/skills/market/search?q=${encodeURIComponent(query)}&limit=8&roleId=${encodeURIComponent(roleId)}`
+    );
+    const results = Array.isArray(payload?.results) ? payload.results : [];
+    renderSkillsMarketResults(results);
+    skillsMarketResult.textContent =
+      currentLang === "zh"
+        ? `已为角色 ${roleId || "-"} 找到 ${results.length} 个候选 skill。`
+        : `Found ${results.length} skill candidates for role ${roleId || "-"}.`;
+  } catch (error) {
+    renderSkillsMarketResults([]);
+    skillsMarketResult.textContent = error instanceof Error ? error.message : String(error);
+  }
 });
 
 document.querySelector("#queue-sla-form").addEventListener("submit", async (event) => {
@@ -1339,11 +2896,167 @@ document.querySelector("#template-import").addEventListener("click", async () =>
 });
 
 document.addEventListener("click", async (event) => {
-  const approveId = event.target.getAttribute("data-approve");
-  const rejectId = event.target.getAttribute("data-reject");
-  const templateEditId = event.target.getAttribute("data-template-edit");
-  const templateToggleId = event.target.getAttribute("data-template-toggle");
-  const templateDeleteId = event.target.getAttribute("data-template-delete");
+  const target = event.target instanceof Element ? event.target : null;
+  const skillInstallButton = target ? target.closest("[data-skill-install]") : null;
+  const skillReadyInstallButton = target ? target.closest("[data-skill-install-ready]") : null;
+  const skillIntegrationButton = target ? target.closest("[data-skill-request-integration]") : null;
+  const approveId = target ? target.getAttribute("data-approve") : null;
+  const rejectId = target ? target.getAttribute("data-reject") : null;
+  const templateEditId = target ? target.getAttribute("data-template-edit") : null;
+  const templateToggleId = target ? target.getAttribute("data-template-toggle") : null;
+  const templateDeleteId = target ? target.getAttribute("data-template-delete") : null;
+  const taskDetailId = target ? target.closest("[data-task-detail]")?.getAttribute("data-task-detail") : null;
+  const closeTaskDetail = target ? target.closest("[data-task-detail-close]") : null;
+  const goalRunDetailId = target ? target.closest("[data-goal-run-detail]")?.getAttribute("data-goal-run-detail") : null;
+  const closeGoalRunDetail = target ? target.closest("[data-goal-run-detail-close]") : null;
+  const goalRunTaskId = target ? target.closest("[data-goal-run-open-task]")?.getAttribute("data-goal-run-open-task") : null;
+
+  if (skillReadyInstallButton) {
+    const skillId = skillReadyInstallButton.getAttribute("data-skill-install-ready") || "";
+    const roleId =
+      skillReadyInstallButton.getAttribute("data-skill-install-role") || skillsMarketRoleSelect?.value || "";
+    if (!skillId || !roleId) {
+      skillsMarketResult.textContent =
+        currentLang === "zh" ? "缺少可安装的 skill 或目标角色。" : "Missing installable skill or target role.";
+      return;
+    }
+    skillReadyInstallButton.setAttribute("disabled", "true");
+    skillsMarketResult.textContent =
+      currentLang === "zh" ? `正在安装 ${skillId} 到 ${roleId}...` : `Installing ${skillId} to ${roleId}...`;
+    try {
+      const result = await request("/api/skills/market/install", {
+        method: "POST",
+        body: JSON.stringify({
+          skillId,
+          roleId,
+          installedBy: inferInstalledBy()
+        })
+      });
+      skillsMarketResult.textContent =
+        currentLang === "zh"
+          ? `已安装 ${result?.skill?.skillId || skillId} 到 ${result?.roleId || roleId}。${
+              result?.verifyTask?.id ? `已创建验证任务 ${String(result.verifyTask.id).slice(0, 8)}。` : ""
+            }`
+          : `Installed ${result?.skill?.skillId || skillId} to ${result?.roleId || roleId}.${
+              result?.verifyTask?.id ? ` Verification task ${String(result.verifyTask.id).slice(0, 8)} created.` : ""
+            }`;
+      await refresh();
+    } catch (error) {
+      skillsMarketResult.textContent = error instanceof Error ? error.message : String(error);
+    } finally {
+      skillReadyInstallButton.removeAttribute("disabled");
+    }
+    return;
+  }
+
+  if (skillInstallButton) {
+    const skillId = skillInstallButton.getAttribute("data-skill-install") || "";
+    const roleId = skillsMarketRoleSelect?.value || "";
+    if (!skillId || !roleId) {
+      skillsMarketResult.textContent =
+        currentLang === "zh" ? "请选择目标角色后再安装 skill。" : "Choose a target role before installing the skill.";
+      return;
+    }
+
+    skillInstallButton.setAttribute("disabled", "true");
+    skillsMarketResult.textContent =
+      currentLang === "zh" ? `正在安装 ${skillId} 到 ${roleId}...` : `Installing ${skillId} to ${roleId}...`;
+    try {
+      const result = await request("/api/skills/market/install", {
+        method: "POST",
+        body: JSON.stringify({
+          skillId,
+          roleId,
+          installedBy: inferInstalledBy()
+        })
+      });
+      skillsMarketResult.textContent =
+        currentLang === "zh"
+          ? `已安装 ${result?.skill?.skillId || skillId} 到 ${result?.roleId || roleId}。${
+              result?.verifyTask?.id ? `已创建验证任务 ${String(result.verifyTask.id).slice(0, 8)}。` : ""
+            }`
+          : `Installed ${result?.skill?.skillId || skillId} to ${result?.roleId || roleId}.${
+              result?.verifyTask?.id ? ` Verification task ${String(result.verifyTask.id).slice(0, 8)} created.` : ""
+            }`;
+      await refresh();
+    } catch (error) {
+      skillsMarketResult.textContent = error instanceof Error ? error.message : String(error);
+    } finally {
+      skillInstallButton.removeAttribute("disabled");
+    }
+    return;
+  }
+
+  if (skillIntegrationButton) {
+    const skillId = skillIntegrationButton.getAttribute("data-skill-request-integration") || "";
+    if (!skillId) {
+      return;
+    }
+    skillIntegrationButton.setAttribute("disabled", "true");
+    skillsMarketResult.textContent =
+      currentLang === "zh" ? `正在为 ${skillId} 创建接入任务...` : `Creating integration task for ${skillId}...`;
+    try {
+      const result = await request("/api/skills/market/request-integration", {
+        method: "POST",
+        body: JSON.stringify({
+          skillId,
+          targetRoleId: skillsMarketRoleSelect?.value || "",
+          requestedBy: inferInstalledBy(),
+          source: "control-center"
+        })
+      });
+      skillsMarketResult.textContent = result?.message || (currentLang === "zh" ? "已创建接入任务。" : "Integration task created.");
+      await refresh();
+    } catch (error) {
+      skillsMarketResult.textContent = error instanceof Error ? error.message : String(error);
+    } finally {
+      skillIntegrationButton.removeAttribute("disabled");
+    }
+    return;
+  }
+
+  if (closeTaskDetail) {
+    selectedTaskId = "";
+    selectedTaskDetail = null;
+    renderTaskDetail("", null);
+    return;
+  }
+
+  if (closeGoalRunDetail) {
+    selectedGoalRunId = "";
+    selectedGoalRunDetail = null;
+    renderGoalRunDetail("", null);
+    renderGoalRuns(window._lastGoalRuns || []);
+    return;
+  }
+
+  if (goalRunTaskId) {
+    await openTaskDetail(goalRunTaskId);
+    return;
+  }
+
+  if (taskDetailId) {
+    try {
+      await openTaskDetail(taskDetailId);
+    } catch (error) {
+      taskResult.textContent = error instanceof Error ? error.message : String(error);
+    }
+    return;
+  }
+
+  if (goalRunDetailId) {
+    try {
+      await openGoalRunDetail(goalRunDetailId);
+    } catch (error) {
+      if (goalRunDetailContainer) {
+        goalRunDetailContainer.innerHTML = `<p class="muted" style="padding:16px;color:var(--red);">${escapeHtml(
+          error instanceof Error ? error.message : String(error)
+        )}</p>`;
+        goalRunDetailContainer.classList.remove("is-hidden");
+      }
+    }
+    return;
+  }
 
   if (templateEditId || templateToggleId || templateDeleteId) {
     const templates = await request("/api/routing-templates");
@@ -1403,6 +3116,185 @@ setView(currentView);
 langButtons.forEach((button) => {
   button.classList.toggle("active", button.getAttribute("data-lang-switch") === currentLang);
 });
+
+// ─── Telemetry ──────────────────────────────────────────────────────────
+
+function buildHarnessAssessmentFromTrace(trace) {
+  const metrics = trace?.metrics || {};
+  const blockedToolCalls = Array.isArray(trace?.turns)
+    ? trace.turns.reduce(
+        (sum, turn) =>
+          sum +
+          ((Array.isArray(turn.toolCalls) ? turn.toolCalls : []).filter((call) => typeof call.blocked === "string" && call.blocked.trim()).length),
+        0
+      )
+    : 0;
+  const totalToolCalls = Number(metrics.toolCalls || 0);
+  const failedTools = Array.isArray(trace?.turns)
+    ? trace.turns.reduce(
+        (sum, turn) =>
+          sum +
+          ((Array.isArray(turn.toolCalls) ? turn.toolCalls : []).filter((call) => String(call.output || "").toLowerCase().includes("error")).length),
+        0
+      )
+    : 0;
+  return {
+    grade:
+      totalToolCalls > 0 && blockedToolCalls === 0 && Number(metrics.errors || 0) === 0
+        ? "A"
+        : blockedToolCalls === 0
+          ? "B"
+          : blockedToolCalls <= 1
+            ? "C"
+            : "D",
+    score: Math.max(
+      0,
+      Math.min(
+        100,
+        72 +
+          Math.min(20, Number(trace?.turns?.length || 0) * 4) +
+          Math.min(8, totalToolCalls * 2) -
+          blockedToolCalls * 10 -
+          Number(metrics.errors || 0) * 8 -
+          failedTools * 4
+      )
+    ),
+    status: blockedToolCalls > 1 ? "partial" : Number(metrics.errors || 0) > 0 ? "good" : "strong",
+    summary: blockedToolCalls > 0 ? "trace-with-guardrail-events" : "trace-clean",
+    strengths: [
+      "trace_recorded",
+      ...(trace?.turns?.length > 0 ? ["multi_turn_observed"] : []),
+      ...(totalToolCalls > 0 ? ["tool_usage_observed"] : [])
+    ],
+    gaps: [
+      ...(blockedToolCalls > 0 ? ["blocked_tool_calls_present"] : []),
+      ...(Number(metrics.errors || 0) > 0 ? ["execution_errors_present"] : [])
+    ],
+    dimensions: {
+      context: trace?.instruction ? 8 : 0,
+      runtime: trace?.backendUsed || trace?.turns?.[0]?.backendUsed ? 16 : 8,
+      skills: 0,
+      governance: Math.max(0, 12 - blockedToolCalls * 4),
+      observability: 24,
+      delivery: totalToolCalls > 0 ? 16 : 8
+    }
+  };
+}
+
+function renderTelemetryBoard(payload, runtimeHarnessPayload) {
+  if (!telemetryBoardContainer) return;
+
+  const traces = payload?.traces ?? [];
+  if (traces.length === 0) {
+    telemetryBoardContainer.innerHTML = `${renderRuntimeHarnessBoard(runtimeHarnessPayload)}<p class="muted" style="text-align:center;padding:24px 0;">${t("trace.noTrace")}</p>`;
+    if (traceDetailContainer) {
+      traceDetailContainer.classList.add("is-hidden");
+      traceDetailContainer.innerHTML = "";
+    }
+    return;
+  }
+
+  let html = `${renderRuntimeHarnessBoard(runtimeHarnessPayload)}${traces.map((trace) => {
+    const m = trace.metrics || {};
+    const status = trace.completedAt ? "completed" : "running";
+    const statusBadgeHtml = `<span class="pill status-${status}">${status}</span>`;
+    const harness = buildHarnessAssessmentFromTrace(trace);
+    const timeStr = trace.startedAt ? new Date(trace.startedAt).toLocaleTimeString() : "";
+
+    return `
+      <article class="list-card" style="cursor:pointer" data-trace-id="${escapeHtml(trace.taskId)}">
+        <div class="list-head">
+          <strong>${escapeHtml(trace.instruction.slice(0, 80))}${trace.instruction.length > 80 ? "..." : ""}</strong>
+          ${statusBadgeHtml}
+        </div>
+        <p class="muted">${escapeHtml(trace.roleId)} · ${timeStr}</p>
+        <div class="pill-row">
+          ${renderHarnessGradeBadge(harness)}
+          <span class="pill">rounds:${trace.turns.length}</span>
+          <span class="pill">tokens:${m.totalTokens ?? 0}</span>
+          <span class="pill">tools:${m.toolCalls ?? 0}</span>
+          ${m.roundsBlocked > 0 ? `<span class="pill" style="background:var(--red-soft);color:var(--red)">blocked:${m.roundsBlocked}</span>` : ""}
+        </div>
+      </article>
+    `;
+  }).join("")}`;
+
+  telemetryBoardContainer.innerHTML = html;
+  if (traceDetailContainer) {
+    traceDetailContainer.classList.add("is-hidden");
+    traceDetailContainer.innerHTML = "";
+  }
+
+  telemetryBoardContainer.querySelectorAll("[data-trace-id]").forEach((card) => {
+    card.addEventListener("click", () => {
+      loadTraceDetail(card.getAttribute("data-trace-id"));
+    });
+  });
+}
+
+async function loadTraceDetail(taskId) {
+  if (!traceDetailContainer) return;
+
+  try {
+    const trace = await request(`/api/tasks/${taskId}/trace`);
+    renderTraceDetail(trace);
+  } catch (err) {
+    traceDetailContainer.innerHTML = `<p class="muted" style="padding:16px;color:var(--red);">${t("trace.noData")} ${escapeHtml(err.message || "")}</p>`;
+    traceDetailContainer.classList.remove("is-hidden");
+  }
+}
+
+function renderTraceDetail(trace) {
+  if (!traceDetailContainer) return;
+
+  const m = trace.metrics || {};
+  const turns = trace.turns || [];
+  const harness = buildHarnessAssessmentFromTrace(trace);
+
+  const turnsHtml = turns.map((turn) => {
+    const toolTags = turn.toolCalls.map((tc) => {
+      if (tc.blocked) {
+        return `<span class="tool-tag blocked" title="${escapeHtml(tc.blocked)}">${escapeHtml(tc.toolName)} (blocked)</span>`;
+      }
+      return `<span class="tool-tag">${escapeHtml(tc.toolName)}</span>`;
+    }).join("");
+
+    return `
+      <div class="trace-turn">
+        <div class="turn-round">${t("trace.round", { round: turn.round })} · ${turn.backendUsed} · ${turn.modelUsed} · ${turn.durationMs > 0 ? turn.durationMs + "ms" : ""}</div>
+        <div class="turn-output">${escapeHtml(turn.modelOutputSummary.slice(0, 500))}</div>
+        ${toolTags ? `<div class="turn-tools">${toolTags}</div>` : ""}
+      </div>
+    `;
+  }).join("");
+
+  traceDetailContainer.innerHTML = `
+    <div class="trace-detail-panel">
+      <div class="trace-header">
+        <h3>${escapeHtml(trace.instruction.slice(0, 100))}</h3>
+        <div class="trace-meta">
+          ${trace.roleId} · started ${new Date(trace.startedAt).toLocaleString()}
+          ${trace.completedAt ? " → completed " + new Date(trace.completedAt).toLocaleString() : " (running)"}
+        </div>
+      </div>
+      ${renderHarnessBlock(harness, { title: currentLang === "zh" ? "Trace Harness Grade" : "Trace Harness Grade" })}
+      <div class="trace-metrics">
+        <span class="trace-metric"><strong>Token</strong> ${m.totalTokens ?? 0}</span>
+        <span class="trace-metric"><strong>Tool</strong> ${m.toolCalls ?? 0}</span>
+        <span class="trace-metric"><strong>Blocked</strong> ${m.roundsBlocked ?? 0}</span>
+        <span class="trace-metric"><strong>Duration</strong> ${m.durationMs ? (m.durationMs / 1000).toFixed(1) + "s" : "N/A"}</span>
+      </div>
+      <div class="trace-timeline">${turnsHtml || `<p class="muted" style="padding:16px">${t("trace.noData")}</p>`}</div>
+      <button class="trace-back" id="trace-back-btn">${t("trace.back")}</button>
+    </div>
+  `;
+  traceDetailContainer.classList.remove("is-hidden");
+
+  document.getElementById("trace-back-btn").addEventListener("click", () => {
+    traceDetailContainer.classList.add("is-hidden");
+    traceDetailContainer.innerHTML = "";
+  });
+}
 
 // 汉堡菜单交互
 if (menuToggle && viewNav) {

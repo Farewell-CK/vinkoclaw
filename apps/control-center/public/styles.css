@@ -370,6 +370,14 @@ button.ghost:hover { background: rgba(0,0,0,0.04); color: var(--ink); }
 }
 .badge-running { background: var(--blue-soft); color: var(--blue); }
 .badge-completed { background: var(--green-soft); color: #1b7a3d; }
+.badge-queued, .badge-cancelled {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--muted);
+}
+.badge-awaiting_input, .badge-awaiting_authorization {
+  background: var(--orange-soft);
+  color: #9a6700;
+}
 .badge-auto_approved { background: var(--purple-soft); color: var(--purple); }
 
 /* ===================================
@@ -392,6 +400,10 @@ button.ghost:hover { background: rgba(0,0,0,0.04); color: var(--ink); }
 }
 
 .role-card:hover, .list-card:hover { box-shadow: var(--shadow-md); }
+.list-card.is-selected {
+  border-color: rgba(0, 113, 227, 0.28);
+  box-shadow: 0 0 0 2px rgba(0, 113, 227, 0.10);
+}
 
 .role-head, .list-head, .action-row {
   display: flex;
@@ -499,6 +511,80 @@ button.ghost:hover { background: rgba(0,0,0,0.04); color: var(--ink); }
   text-decoration: underline;
 }
 
+.task-detail-panel {
+  margin-top: 14px;
+  padding: 16px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.9);
+}
+
+.task-detail-panel.is-hidden {
+  display: none;
+}
+
+.task-detail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.task-detail-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.timeline-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.timeline-item {
+  border-left: 3px solid var(--accent);
+  padding: 8px 10px;
+  background: rgba(0,0,0,0.02);
+  border-radius: 8px;
+}
+
+.memory-block {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.harness-card {
+  background: linear-gradient(180deg, rgba(245,247,250,0.92) 0%, rgba(255,255,255,0.96) 100%);
+}
+
+.harness-grade {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.harness-grade-a {
+  background: rgba(52,199,89,0.12);
+  color: #1f8f47;
+}
+
+.harness-grade-b {
+  background: rgba(64,156,255,0.12);
+  color: #1d64d6;
+}
+
+.harness-grade-c {
+  background: rgba(255,184,0,0.14);
+  color: #9a6700;
+}
+
+.harness-grade-d,
+.harness-grade-f {
+  background: rgba(255,59,48,0.12);
+  color: #c9362a;
+}
+
 /* ===================================
    Code Blocks
    =================================== */
@@ -594,6 +680,96 @@ pre {
 }
 .filter-tab:hover { background: rgba(0,0,0,0.04); color: var(--ink); }
 .filter-tab.active { background: var(--accent-soft); color: var(--accent); }
+
+/* ─── Telemetry Trace Panel ──────────────────────────────────────── */
+.trace-detail-panel {
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  overflow: hidden;
+}
+.trace-detail-panel.is-hidden { display: none; }
+.trace-header {
+  padding: 12px 16px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--line);
+}
+.trace-header h3 { margin: 0 0 4px; font-size: 0.95rem; }
+.trace-header .trace-meta { font-size: 0.8rem; color: var(--muted); }
+.trace-timeline { padding: 12px 16px; }
+.trace-turn {
+  position: relative;
+  padding: 12px 12px 12px 28px;
+  border-left: 2px solid var(--line);
+  margin-left: 8px;
+}
+.trace-turn:last-child { border-left-color: transparent; }
+.trace-turn::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  top: 14px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--panel);
+}
+.trace-turn:last-child::before { background: var(--green); }
+.trace-turn .turn-round { font-size: 0.75rem; color: var(--muted); margin-bottom: 4px; }
+.trace-turn .turn-output {
+  font-size: 0.82rem;
+  background: rgba(0,0,0,0.03);
+  border-radius: 6px;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+}
+.trace-turn .turn-tools {
+  margin-top: 6px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.trace-turn .turn-tools .tool-tag {
+  display: inline-block;
+  background: var(--purple-soft);
+  color: var(--purple);
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin: 2px 4px 2px 0;
+  font-size: 0.75rem;
+}
+.trace-turn .tool-tag.blocked {
+  background: var(--red-soft);
+  color: var(--red);
+}
+.trace-metrics {
+  display: flex;
+  gap: 12px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+  background: rgba(0,0,0,0.015);
+  flex-wrap: wrap;
+}
+.trace-metric {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.trace-metric strong { color: var(--ink); font-weight: 600; }
+.trace-back {
+  display: block;
+  margin: 8px 16px 12px;
+  font-size: 0.8rem;
+  color: var(--accent);
+  cursor: pointer;
+  border: none;
+  background: none;
+  padding: 4px 0;
+}
+.trace-back:hover { text-decoration: underline; }
 
 /* ===================================
    Responsive

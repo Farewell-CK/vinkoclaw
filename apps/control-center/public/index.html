@@ -18,6 +18,7 @@
           <button type="button" class="ghost nav-btn" data-view="routing" data-i18n="nav.routing">模板与队列</button>
           <button type="button" class="ghost nav-btn" data-view="config" data-i18n="nav.config">团队与渠道</button>
           <button type="button" class="ghost nav-btn" data-view="execution" data-i18n="nav.execution">审批与执行</button>
+          <button type="button" class="ghost nav-btn" data-view="telemetry" data-i18n="nav.telemetry">遥测</button>
           <button type="button" class="ghost nav-btn" data-view="audit" data-i18n="nav.audit">审计</button>
         </nav>
         <div class="lang-switch">
@@ -131,6 +132,36 @@
           <div id="task-result" class="feedback"></div>
         </article>
 
+        <article class="panel span-2 view-panel" data-view="workbench">
+          <header>
+            <h2 data-i18n="panel.projects.title">CEO Project Memory</h2>
+            <p data-i18n="panel.projects.desc">Recent sessions, current goals, stages, and unresolved questions.</p>
+          </header>
+          <div id="project-memory-board" class="list"></div>
+        </article>
+
+        <article class="panel view-panel" data-view="workbench">
+          <header>
+            <h2 data-i18n="panel.workflows.title">Founder Workflows</h2>
+            <p data-i18n="panel.workflows.desc">One-click entry prompts for founder delivery, PRD, research, and recap flows.</p>
+          </header>
+          <div id="workflow-shortcuts" class="stack">
+            <button type="button" class="ghost" data-workflow-preset="founder_delivery">从想法到交付</button>
+            <button type="button" class="ghost" data-workflow-preset="founder_prd">写 PRD</button>
+            <button type="button" class="ghost" data-workflow-preset="founder_research">调研报告</button>
+            <button type="button" class="ghost" data-workflow-preset="founder_recap">每周复盘</button>
+            <button type="button" class="ghost" data-workflow-preset="founder_ops_followup">待办提醒</button>
+          </div>
+        </article>
+
+        <article class="panel span-2 view-panel" data-view="workbench">
+          <header>
+            <h2 data-i18n="panel.harness.title">Product Harness</h2>
+            <p data-i18n="panel.harness.desc">Latest regression suites, pass/fail status, and recent output tails.</p>
+          </header>
+          <div id="harness-board" class="list"></div>
+        </article>
+
         <!-- Routing: Templates -->
         <article class="panel span-2 view-panel" data-view="routing">
           <header>
@@ -240,6 +271,26 @@
           <div id="roles" class="roles"></div>
         </article>
 
+        <article class="panel span-2 view-panel" data-view="config">
+          <header>
+            <h2 data-i18n="panel.skillsMarket.title">Skill Marketplace</h2>
+            <p data-i18n="panel.skillsMarket.desc">Search skills, inspect matches, and install them to a role.</p>
+          </header>
+          <form id="skills-market-form" class="stack">
+            <div class="row">
+              <input
+                id="skills-market-query"
+                data-i18n-placeholder="panel.skillsMarket.queryPlaceholder"
+                placeholder="Search skill, e.g. 写 PRD / 调研报告 / 测试回归"
+              />
+              <select id="skills-market-role"></select>
+              <button type="submit" data-i18n="panel.skillsMarket.search">Search</button>
+            </div>
+          </form>
+          <div id="skills-market-result" class="feedback"></div>
+          <div id="skills-market-list" class="list"></div>
+        </article>
+
         <!-- Execution: Approvals (with filter tabs) -->
         <article class="panel view-panel" data-view="execution">
           <header>
@@ -268,6 +319,7 @@
             <button class="filter-tab" data-filter="failed">失败</button>
           </div>
           <div id="tasks" class="list"></div>
+          <div id="task-detail" class="task-detail-panel is-hidden"></div>
         </article>
 
         <!-- Execution: Tool Runs -->
@@ -277,6 +329,25 @@
             <p data-i18n="panel.toolRuns.desc">Developer/code-executor task runs through opencode, codex, or claude.</p>
           </header>
           <div id="tool-runs" class="list"></div>
+        </article>
+
+        <article class="panel span-2 view-panel" data-view="execution">
+          <header>
+            <h2 data-i18n="panel.goalRuns.title">Goal Runs</h2>
+            <p data-i18n="panel.goalRuns.desc">Stage-driven runs with harness evidence, handoffs, resume state, and approvals.</p>
+          </header>
+          <div id="goal-runs" class="list"></div>
+          <div id="goal-run-detail" class="task-detail-panel is-hidden"></div>
+        </article>
+
+        <!-- Telemetry: Traces -->
+        <article class="panel span-2 view-panel" data-view="telemetry">
+          <header>
+            <h2 data-i18n="panel.traces.title">Agent Traces</h2>
+            <p data-i18n="panel.traces.desc">LLM decision timeline, tool calls, token usage, and rule blocks per task.</p>
+          </header>
+          <div id="telemetry-board" class="list"></div>
+          <div id="trace-detail" class="trace-detail-panel is-hidden"></div>
         </article>
 
         <!-- Audit -->
