@@ -395,6 +395,7 @@ describe("VinkoStore operator actions", () => {
     expect(defaults.some((template) => template.id === "tpl-founder-delivery-loop")).toBe(true);
     expect(defaults.some((template) => template.id === "tpl-founder-prd")).toBe(true);
     expect(defaults.some((template) => template.id === "tpl-founder-research-report")).toBe(true);
+    expect(defaults.some((template) => template.id === "tpl-founder-research-recurring")).toBe(true);
     expect(defaults.some((template) => template.id === "tpl-founder-weekly-recap")).toBe(true);
     expect(defaults.some((template) => template.id === "tpl-founder-ops-followup")).toBe(true);
     expect(defaults.some((template) => template.id === "tpl-founder-ops-recurring")).toBe(true);
@@ -445,6 +446,14 @@ describe("VinkoStore operator actions", () => {
       "责任归属",
       "完成信号",
       "下一步"
+    ]);
+    expect(defaults.find((template) => template.id === "tpl-founder-research-recurring")?.tasks[0]?.deliverableSections).toEqual([
+      "周期与触发规则",
+      "跟踪对象",
+      "核心观察维度",
+      "输出结构",
+      "完成信号",
+      "建议动作"
     ]);
 
     const created = store.createRoutingTemplate({

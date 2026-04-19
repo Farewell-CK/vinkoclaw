@@ -48,6 +48,7 @@ function collectLatestReports() {
     "founder-ops",
     "founder-ops-recurring",
     "founder-research",
+    "founder-research-recurring",
     "founder-recap",
     "founder-recap-recurring",
     "founder-implementation",

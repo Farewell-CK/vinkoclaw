@@ -1,10 +1,10 @@
 # Test Report 2026-04-19
 
-Generated at: 2026-04-19T11:40:43.301Z
+Generated at: 2026-04-19T11:45:41.381Z
 
 ## Summary
 
-- Pass: 12
+- Pass: 13
 - Warn: 0
 - Fail: 0
 
@@ -17,6 +17,7 @@ Generated at: 2026-04-19T11:40:43.301Z
 | founder-ops | Founder Ops Follow-up | pass | pass | 1902 | 2026-04-17T09:46:01.478Z |
 | founder-ops-recurring | Founder Ops Recurring | pass | pass | 14788 | 2026-04-19T11:10:32.667Z |
 | founder-research | Founder Research Report | pass | pass | 2667 | 2026-04-17T09:50:53.548Z |
+| founder-research-recurring | Founder Research Recurring | pass | pass | 2347 | 2026-04-19T11:45:29.883Z |
 | founder-recap | Founder Weekly Recap | pass | pass | 2215 | 2026-04-17T10:02:03.386Z |
 | founder-recap-recurring | Founder Recap Recurring | pass | pass | 2152 | 2026-04-19T11:40:31.702Z |
 | founder-implementation | Founder Implementation Task | pass | pass | 14994 | 2026-04-17T10:06:02.637Z |
@@ -56,6 +57,12 @@ Generated at: 2026-04-19T11:40:43.301Z
 - Status: pass
 - Grade: pass
 - Detail: template=tpl-founder-research-report, task=7a3e8b28-9cbe-4239-a062-f9b272dced70, status=queued
+
+### founder-research-recurring
+
+- Status: pass
+- Grade: pass
+- Detail: template=tpl-founder-research-recurring, task=469f1c36-a839-4e8f-b650-9203ca7cd433, status=queued
 
 ### founder-recap
 

@@ -434,6 +434,27 @@ function defaultRoutingTemplates(): RoutingTemplate[] {
       updatedAt: timestamp
     },
     {
+      id: "tpl-founder-research-recurring",
+      name: "Founder Research Recurring",
+      description: "将创始人的周期竞品/市场跟踪需求整理成固定节奏的调研执行清单。",
+      triggerKeywords: ["周期调研", "定期调研", "每周调研", "竞品跟踪", "市场跟踪", "weekly research", "recurring research", "competitor tracking"],
+      matchMode: "any",
+      enabled: true,
+      tasks: [
+        {
+          roleId: "research",
+          titleTemplate: "周期调研清单: {{input_short}}",
+          instructionTemplate:
+            "请将以下创始人请求整理为周期执行的调研清单，明确周期/触发规则、跟踪对象、核心观察维度、输出结构、完成信号和建议动作。原始输入：{{input}}",
+          deliverableMode: "artifact_required",
+          deliverableSections: ["周期与触发规则", "跟踪对象", "核心观察维度", "输出结构", "完成信号", "建议动作"],
+          priority: 91
+        }
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    },
+    {
       id: "tpl-founder-weekly-recap",
       name: "Founder Weekly Recap",
       description: "沉淀本周进展、阻塞与下周计划。",
