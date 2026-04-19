@@ -94,6 +94,7 @@ export interface TaskFailedCardInput {
   title: string;
   roleLabel: string;
   reason: string;
+  workflowSummary?: string;
 }
 
 export function buildTaskFailedCard(input: TaskFailedCardInput): Record<string, unknown> {
@@ -101,6 +102,7 @@ export function buildTaskFailedCard(input: TaskFailedCardInput): Record<string, 
     header(`✗ ${input.title}`, "red"),
     [
       md(`**${input.roleLabel}** 执行失败\n\n${input.reason}`),
+      ...(input.workflowSummary?.trim() ? [hr(), md(input.workflowSummary.trim())] : []),
       hr(),
       note("可重新描述任务，或补充更多信息后重试"),
     ],

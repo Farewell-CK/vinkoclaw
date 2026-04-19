@@ -760,7 +760,8 @@ async function failDeliverableContract(task: TaskRecord, mode: string, errorText
     const card = buildTaskFailedCard({
       title: failed.title,
       roleLabel: ROLE_LABELS[failed.roleId] ?? failed.roleId,
-      reason: errorText
+      reason: errorText,
+      workflowSummary: buildWorkflowStatusSummary(failed, { includeGoal: true, includeArtifacts: true })
     });
     await notifyFeishuCard(failed.chatId, card);
   }
@@ -5471,6 +5472,7 @@ async function processTask(): Promise<boolean> {
         title: failed.title,
         roleLabel: ROLE_LABELS[failed.roleId] ?? failed.roleId,
         reason: failed.errorText ?? "未知错误",
+        workflowSummary: buildWorkflowStatusSummary(failed, { includeGoal: true, includeArtifacts: true })
       });
       await notifyFeishuCard(failed.chatId, card);
     }
