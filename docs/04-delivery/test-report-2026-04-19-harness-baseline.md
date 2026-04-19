@@ -1,11 +1,11 @@
 # Test Report 2026-04-19
 
-Generated at: 2026-04-19T11:10:50.032Z
+Generated at: 2026-04-19T11:17:08.270Z
 
 ## Summary
 
-- Pass: 10
-- Warn: 1
+- Pass: 11
+- Warn: 0
 - Fail: 0
 
 ## Harness Matrix
@@ -19,7 +19,7 @@ Generated at: 2026-04-19T11:10:50.032Z
 | founder-research | Founder Research Report | pass | pass | 2667 | 2026-04-17T09:50:53.548Z |
 | founder-recap | Founder Weekly Recap | pass | pass | 2215 | 2026-04-17T10:02:03.386Z |
 | founder-implementation | Founder Implementation Task | pass | pass | 14994 | 2026-04-17T10:06:02.637Z |
-| artifact-export | Artifact Export Self Check | warn | fail | 117222 | 2026-04-17T10:33:27.206Z |
+| artifact-export | Artifact Export Self Check | pass | pass | 118894 | 2026-04-19T11:16:40.586Z |
 | persona | Persona Test | pass | pass | 25375 | 2026-04-17T09:36:01.201Z |
 | collaboration | Collaboration Self Check | pass | pass | 13858 | 2026-04-17T08:17:09.723Z |
 | skill-lifecycle | Skill Lifecycle Self Check | pass | pass | 1928 | 2026-04-17T08:17:20.258Z |
@@ -70,9 +70,9 @@ Generated at: 2026-04-19T11:10:50.032Z
 
 ### artifact-export
 
-- Status: warn
-- Grade: fail
-- Detail: .vinkoclaw/tasks/86d0cec4-4172-410f-b4f6-b7d7d1ec596b/ai-agent-markdown-research.csv, .vinkoclaw/tasks/86d0cec4-4172-410f-b4f6-b7d7d1ec596b/ai-agent-markdown-research.html, .vinkoclaw/tasks/86d0cec4-4172-410f-b4f6-b7d7d1ec596b/ai-agent-markdown-research.md | csv=true
+- Status: pass
+- Grade: pass
+- Detail: .vinkoclaw/tasks/1f902b91-91a0-4e6a-867f-267c485fe91d/ai-agent-markdown-research.html, .vinkoclaw/tasks/1f902b91-91a0-4e6a-867f-267c485fe91d/ai-agent-markdown-research.md, projects/ai-agent-comparison/docs/ai-agent-tools-comparison-report.md | csv=false
 
 ### persona
 

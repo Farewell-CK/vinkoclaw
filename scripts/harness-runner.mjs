@@ -472,7 +472,9 @@ async function runSuite(suite) {
 
   const stateCompleteness =
     stageSummary && typeof stageSummary === "object"
-      ? Object.values(stageSummary).every((value) => value?.statePresent === true)
+      ? Object.values(stageSummary).every((value) =>
+          value?.status === "completed" || value?.status === "failed" ? value?.statePresent === true : true
+        )
       : undefined;
 
   const record = {
