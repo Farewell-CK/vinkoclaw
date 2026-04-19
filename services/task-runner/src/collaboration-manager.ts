@@ -12,7 +12,12 @@ import {
   type RoleId,
   type TaskRecord,
   type TaskResult,
-  type VinkoStore
+  type VinkoStore,
+  collectProjectMemoryArtifactsFromTask,
+  createOrchestrationState,
+  mergeOrchestrationState,
+  normalizeOrchestrationState,
+  syncSessionProjectMemoryFromTask
 } from "@vinko/shared";
 
 const logger = createLogger("collaboration-manager");
@@ -44,8 +49,21 @@ const LEADERSHIP_FACILITATORS = new Set<RoleId>(["ceo", "cto"]);
 type LeaderAssignmentPlan = {
   participants: RoleId[];
   rationale: string;
-  backendUsed: "sglang" | "ollama" | "zhipu" | "fallback";
+  backendUsed: "sglang" | "ollama" | "zhipu" | "openai" | "fallback";
   modelUsed: string;
+};
+
+type AggregationDecision = {
+  shouldAggregate: boolean;
+  mode: "deliver" | "partial" | "await_user" | "blocked";
+  reason:
+    | "all_tasks_completed"
+    | "all_tasks_terminal_with_failures"
+    | "discussion_timeout"
+    | "aggregate_timeout"
+    | "max_rounds_reached"
+    | "manual_trigger"
+    | "not_ready";
 };
 
 function isLikelyFeishuChatId(chatId: string): boolean {
@@ -80,51 +98,125 @@ function formatTaskStatusLabel(status: TaskRecord["status"]): string {
   }
 }
 
-function parseFileArtifactsFromText(text: string): string[] {
-  const normalized = text.trim();
-  if (!normalized) {
-    return [];
+function updateParentSessionProjectMemory(
+  store: VinkoStore,
+  parentTask: TaskRecord,
+  input: {
+    currentStage: string;
+    latestSummary?: string | undefined;
+    unresolvedQuestions?: string[] | undefined;
+    nextActions?: string[] | undefined;
+    latestArtifacts?: string[] | undefined;
+    orchestrationVerificationStatus?: "pending" | "verified" | "failed" | undefined;
   }
-  const found: string[] = [];
-  const changedFilesPattern = /CHANGED_FILES\s*:\s*([^\n]+)/gi;
-  for (const match of normalized.matchAll(changedFilesPattern)) {
-    const group = (match[1] ?? "").trim();
-    if (!group) {
-      continue;
-    }
-    for (const piece of group.split(/[,\s]+/)) {
-      const candidate = piece.trim().replace(/^\.?\//, "");
-      if (candidate && /\.[a-z0-9]{1,8}$/i.test(candidate)) {
-        found.push(candidate);
-      }
-    }
-  }
-  const genericPathPattern = /(?:^|[\s`"'(:：])((?:\.{0,2}\/)?(?:[\w.-]+\/)*[\w.-]+\.[a-zA-Z0-9]{1,8})(?=$|[\s`"'),:;])/g;
-  for (const match of normalized.matchAll(genericPathPattern)) {
-    const candidate = (match[1] ?? "").trim().replace(/^\.?\//, "");
-    if (candidate) {
-      found.push(candidate);
-    }
-  }
-  return Array.from(new Set(found)).sort((left, right) => left.localeCompare(right));
+): void {
+  syncSessionProjectMemoryFromTask(store, parentTask, {
+    currentStage: input.currentStage,
+    latestSummary: input.latestSummary,
+    unresolvedQuestions: input.unresolvedQuestions,
+    nextActions: input.nextActions,
+    latestArtifacts: input.latestArtifacts,
+    orchestrationMode: "main_agent",
+    orchestrationOwnerRoleId: parentTask.roleId,
+    orchestrationVerificationStatus: input.orchestrationVerificationStatus
+  });
 }
 
-function normalizeFileList(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return value
-      .filter((entry): entry is string => typeof entry === "string")
-      .flatMap((entry) => parseFileArtifactsFromText(entry));
+function ensureParentOrchestrationState(parentTask: TaskRecord, fallbackStage: string) {
+  const metadata = parentTask.metadata as Record<string, unknown>;
+  const existing = normalizeOrchestrationState(metadata.orchestrationState);
+  if (existing) {
+    return existing;
   }
-  if (typeof value === "string") {
-    return parseFileArtifactsFromText(value);
-  }
-  return [];
+  return createOrchestrationState({
+    ownerRoleId: parentTask.roleId,
+    goal: parentTask.instruction,
+    stage: fallbackStage,
+    updatedBy: parentTask.roleId,
+    nextActions: []
+  });
+}
+
+function patchParentOrchestrationState(
+  store: VinkoStore,
+  parentTask: TaskRecord,
+  fallbackStage: string,
+  patch: Parameters<typeof mergeOrchestrationState>[1]
+): void {
+  const baseState = ensureParentOrchestrationState(parentTask, fallbackStage);
+  const nextState = mergeOrchestrationState(baseState, patch) ?? baseState;
+  store.patchTaskMetadata(parentTask.id, {
+    orchestrationMode: "main_agent",
+    orchestrationState: nextState
+  });
 }
 
 function dedupeSorted(values: string[]): string[] {
   return Array.from(new Set(values.map((entry) => entry.trim()).filter(Boolean))).sort((left, right) =>
     left.localeCompare(right)
   );
+}
+
+function extractAwaitUserPrompts(result: TaskResult | undefined): string[] {
+  if (!result) {
+    return [];
+  }
+
+  const prompts = result.followUps
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (prompts.length > 0) {
+    return Array.from(new Set(prompts)).slice(0, 3);
+  }
+
+  const text = `${result.summary}\n${result.deliverable}`;
+  const lines = text
+    .split(/\r?\n/g)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const candidates = lines.filter((line) =>
+    /(?:待确认|待补充|需要你|请提供|请确认|缺少|需补充|需要补充|还缺)/.test(line)
+  );
+  return Array.from(new Set(candidates)).slice(0, 3);
+}
+
+function normalizeSupplementEntries(value: unknown): Array<{
+  text: string;
+  requesterName?: string;
+  at?: string;
+}> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const normalized: Array<{
+    text: string;
+    requesterName?: string;
+    at?: string;
+  }> = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const candidate = entry as Record<string, unknown>;
+    const text = typeof candidate.text === "string" ? candidate.text.trim() : "";
+    if (!text) {
+      continue;
+    }
+    const normalizedEntry: {
+      text: string;
+      requesterName?: string;
+      at?: string;
+    } = { text };
+    if (typeof candidate.requesterName === "string" && candidate.requesterName.trim()) {
+      normalizedEntry.requesterName = candidate.requesterName.trim();
+    }
+    if (typeof candidate.at === "string" && candidate.at.trim()) {
+      normalizedEntry.at = candidate.at.trim();
+    }
+    normalized.push(normalizedEntry);
+  }
+  return normalized;
 }
 
 function normalizeRoleToken(value: string): RoleId | undefined {
@@ -308,10 +400,107 @@ export class CollaborationManager {
     return config.defaultConfig;
   }
 
+  private syncParentTaskCollaborationState(
+    parentTaskId: string,
+    patch: {
+      phase?: string;
+      mode?: AggregationDecision["mode"] | "";
+      reason?: AggregationDecision["reason"] | "";
+      status?: string;
+    }
+  ): void {
+    const metadataPatch: Record<string, unknown> = {};
+    if (patch.phase !== undefined) {
+      metadataPatch.collaborationPhase = patch.phase;
+    }
+    if (patch.mode !== undefined) {
+      metadataPatch.collaborationConvergenceMode = patch.mode;
+    }
+    if (patch.reason !== undefined) {
+      metadataPatch.collaborationTriggerReason = patch.reason;
+    }
+    if (patch.status !== undefined) {
+      metadataPatch.collaborationStatus = patch.status;
+    }
+    if (Object.keys(metadataPatch).length > 0) {
+      this.deps.store.patchTaskMetadata(parentTaskId, metadataPatch);
+    }
+  }
+
+  async resumeAwaitingCollaboration(parentTask: TaskRecord): Promise<boolean> {
+    const metadata = parentTask.metadata as {
+      collaborationId?: string;
+      collaborationUserSupplements?: unknown;
+      collaborationLatestUserReply?: unknown;
+    };
+    if (!metadata.collaborationId) {
+      return false;
+    }
+
+    const collaboration = this.deps.store.getAgentCollaboration(metadata.collaborationId);
+    if (!collaboration) {
+      return false;
+    }
+
+    const supplements = normalizeSupplementEntries(metadata.collaborationUserSupplements);
+    const latestReply =
+      typeof metadata.collaborationLatestUserReply === "string" ? metadata.collaborationLatestUserReply.trim() : "";
+
+    this.deps.store.updateAgentCollaboration(collaboration.id, {
+      status: "active",
+      currentPhase: "converge",
+      updatedAt: new Date().toISOString(),
+      completedAt: null
+    });
+    this.syncParentTaskCollaborationState(parentTask.id, {
+      phase: "converge",
+      mode: "",
+      reason: "manual_trigger",
+      status: "active"
+    });
+    this.deps.store.patchTaskMetadata(parentTask.id, {
+      collaborationResumeRequested: false,
+      collaborationPendingQuestions: [],
+      collaborationResumedAt: new Date().toISOString()
+    });
+    this.deps.store.createCollaborationTimelineEvent({
+      collaborationId: collaboration.id,
+      eventType: "status",
+      roleId: collaboration.facilitator,
+      taskId: parentTask.id,
+      message: "User supplied additional collaboration input",
+      metadata: {
+        latestReply,
+        supplementCount: supplements.length
+      }
+    });
+
+    if (collaboration.chatId && this.deps.feishuClient && isLikelyFeishuChatId(collaboration.chatId)) {
+      try {
+        await this.deps.feishuClient.sendTextToChat(
+          collaboration.chatId,
+          `📥 已收到补充信息，正在继续收敛协作并更新结果（${collaboration.id.slice(0, 8)}）。`
+        );
+      } catch (error) {
+        logger.error("Failed to notify collaboration resume to Feishu", error, {
+          chatId: collaboration.chatId,
+          collaborationId: collaboration.id
+        });
+      }
+    }
+
+    await this.performFinalAggregation(collaboration.id, {
+      shouldAggregate: true,
+      mode: "deliver",
+      reason: "manual_trigger"
+    });
+    return true;
+  }
+
   private getHeuristicParticipants(parentTask: TaskRecord): RoleId[] {
     const configParticipants = this.deps.store.getRuntimeConfig().collaboration.defaultParticipants;
     const fallbackParticipants: RoleId[] =
-      configParticipants.length > 0 ? configParticipants : ["product", "uiux", "frontend", "backend", "qa", "ceo"];
+      configParticipants.length > 0 ? configParticipants : ["product", "uiux", "frontend", "backend", "qa", "cto"];
     const normalizedInstruction = `${parentTask.title}\n${parentTask.instruction}`.toLowerCase();
     const looksLikeDocumentTask =
       /(?:\bprd\b|产品需求|需求文档|产品文档|调研报告|研究报告|分析报告|可行性报告|市场调研|竞品分析|方案文档|roadmap|里程碑|验收标准)/i.test(
@@ -327,9 +516,9 @@ export class CollaborationManager {
       );
 
     const preferredParticipants: RoleId[] = looksLikeDocumentTask && !looksLikeBuildTask
-      ? ["ceo", "product", "research", "algorithm", "cto", "qa"]
+      ? ["product", "research", "algorithm", "cto", "qa"]
       : looksLikeAlgorithmTask && !looksLikeBuildTask
-        ? ["ceo", "research", "algorithm", "cto", "product", "qa"]
+        ? ["research", "algorithm", "cto", "product", "qa"]
         : fallbackParticipants;
 
     const normalized = Array.from(new Set(preferredParticipants)) as RoleId[];
@@ -481,12 +670,26 @@ export class CollaborationManager {
     this.deps.store.patchTaskMetadata(parentTask.id, {
       collaborationId: collaboration.id,
       collaborationStatus: "active",
+      collaborationPhase: "classify",
       collaborationStartedAt: new Date().toISOString(),
       collaborationParticipants: participantDecision.participants,
       collaborationPlanner: participantDecision.planner,
       collaborationPlannerRationale: participantDecision.rationale ?? "",
       collaborationPlannerBackend: participantDecision.backendUsed ?? "",
-      collaborationPlannerModel: participantDecision.modelUsed ?? ""
+      collaborationPlannerModel: participantDecision.modelUsed ?? "",
+      orchestrationMode: "main_agent"
+    });
+    patchParentOrchestrationState(this.deps.store, parentTask, "execute", {
+      progress: {
+        stage: "execute",
+        status: "active",
+        inFlight: ["branch", "merge"],
+        blocked: [],
+        awaitingInput: [],
+        nextActions: ["collect branch outputs and merge through main agent"]
+      },
+      branchReason: participantDecision.planner === "leader_dynamic" ? "parallel_exploration" : "collaboration_requested",
+      updatedBy: parentTask.roleId
     });
     this.deps.store.createCollaborationTimelineEvent({
       collaborationId: collaboration.id,
@@ -506,9 +709,19 @@ export class CollaborationManager {
       }
     });
 
+    this.collaborationService.advancePhase(collaboration.id, "assignment");
+    this.syncParentTaskCollaborationState(parentTask.id, {
+      phase: "assignment",
+      status: "active"
+    });
+
     // 分配子任务给各角色
     await this.assignTasksToAgents(collaboration, parentTask);
     this.collaborationService.advancePhase(collaboration.id, "execution");
+    this.syncParentTaskCollaborationState(parentTask.id, {
+      phase: "execution",
+      status: "active"
+    });
 
     // 通知用户协作开始
     if (collaboration.chatId && this.deps.feishuClient && isLikelyFeishuChatId(collaboration.chatId)) {
@@ -611,6 +824,12 @@ export class CollaborationManager {
         await this.handleAggregationComplete(collaboration, task);
       } else {
         this.collaborationService.failCollaboration(collaboration.id);
+        this.syncParentTaskCollaborationState(collaboration.parentTaskId, {
+          phase: "aggregation",
+          mode: "blocked",
+          reason: "all_tasks_terminal_with_failures",
+          status: "failed"
+        });
         this.deps.store.createCollaborationTimelineEvent({
           collaborationId: collaboration.id,
           eventType: "collaboration_failed",
@@ -646,8 +865,15 @@ export class CollaborationManager {
       }
       const progress = this.getCollaborationProgress(collaboration);
       if (progress.totalCount > 0 && progress.terminalCount === progress.totalCount) {
-        if (this.shouldTriggerAggregation(collaboration)) {
-          await this.performFinalAggregation(collaboration.id);
+        const decision = this.resolveAggregationDecision(collaboration);
+        if (decision.shouldAggregate) {
+          this.syncParentTaskCollaborationState(collaboration.parentTaskId, {
+            phase: decision.mode === "await_user" ? "await_user" : "converge",
+            mode: decision.mode,
+            reason: decision.reason,
+            status: decision.mode === "await_user" ? "await_user" : "active"
+          });
+          await this.performFinalAggregation(collaboration.id, decision);
         }
       }
       return;
@@ -673,8 +899,15 @@ export class CollaborationManager {
     const progress = this.getCollaborationProgress(collaboration);
     if (progress.totalCount > 0 && progress.terminalCount === progress.totalCount) {
       // 检查是否应该触发汇总
-      if (this.shouldTriggerAggregation(collaboration)) {
-        await this.performFinalAggregation(collaboration.id);
+      const decision = this.resolveAggregationDecision(collaboration);
+      if (decision.shouldAggregate) {
+        this.syncParentTaskCollaborationState(collaboration.parentTaskId, {
+          phase: decision.mode === "await_user" ? "await_user" : "converge",
+          mode: decision.mode,
+          reason: decision.reason,
+          status: decision.mode === "await_user" ? "await_user" : "active"
+        });
+        await this.performFinalAggregation(collaboration.id, decision);
       }
     }
   }
@@ -684,6 +917,34 @@ export class CollaborationManager {
     collaboration: AgentCollaboration,
     task: TaskRecord
   ): Promise<void> {
+    const metadata = task.metadata as {
+      aggregationMode?: AggregationDecision["mode"];
+      aggregationTriggerReason?: AggregationDecision["reason"];
+    };
+    const aggregationMode = metadata.aggregationMode ?? "deliver";
+    const aggregationTriggerReason = metadata.aggregationTriggerReason ?? "all_tasks_completed";
+    const awaitUserPrompts = aggregationMode === "await_user" ? extractAwaitUserPrompts(task.result as TaskResult | undefined) : [];
+    const aggregationArtifacts = collectProjectMemoryArtifactsFromTask(
+      task,
+      this.deps.store.listToolRunsByTask(task.id)
+    ).slice(0, 12);
+    if (aggregationMode === "deliver" || aggregationMode === "partial") {
+      this.collaborationService.advancePhase(collaboration.id, "verify");
+      this.syncParentTaskCollaborationState(collaboration.parentTaskId, {
+        phase: "verify",
+        mode: aggregationMode,
+        reason: aggregationTriggerReason,
+        status: "active"
+      });
+    } else if (aggregationMode === "await_user") {
+      this.collaborationService.advancePhase(collaboration.id, "await_user");
+      this.syncParentTaskCollaborationState(collaboration.parentTaskId, {
+        phase: "await_user",
+        mode: aggregationMode,
+        reason: aggregationTriggerReason,
+        status: "await_user"
+      });
+    }
     this.deps.store.createCollaborationTimelineEvent({
       collaborationId: collaboration.id,
       eventType: "aggregation_completed",
@@ -694,10 +955,64 @@ export class CollaborationManager {
         summary: task.result?.summary ?? ""
       }
     });
-    this.collaborationService.completeCollaboration(collaboration.id);
     const parentTask = this.deps.store.getTask(collaboration.parentTaskId);
     if (parentTask) {
-      if (task.result) {
+      if (aggregationMode === "blocked") {
+        this.collaborationService.failCollaboration(collaboration.id);
+        this.deps.store.failTask(
+          parentTask.id,
+          task.result?.summary || task.errorText || "Collaboration blocked without a usable merged result"
+        );
+        this.syncParentTaskCollaborationState(parentTask.id, {
+          phase: "converge",
+          mode: aggregationMode,
+          reason: aggregationTriggerReason,
+          status: "failed"
+        });
+        patchParentOrchestrationState(this.deps.store, parentTask, "execute", {
+          progress: {
+            stage: "execute",
+            status: "blocked",
+            blocked: [task.result?.summary || task.errorText || "Collaboration blocked"],
+            inFlight: [],
+            awaitingInput: [],
+            nextActions: ["inspect blocked roles and restart main-agent orchestration"]
+          },
+          decision: {
+            summary: task.result?.summary || task.errorText || "Collaboration blocked",
+            entries: dedupeSorted([task.result?.summary || "", task.errorText || ""]).slice(0, 10)
+          },
+          artifactIndex: {
+            items: aggregationArtifacts.map((item) => ({
+              path: item,
+              title: item.split("/").pop() ?? item,
+              stage: "merge",
+              status: "failed"
+            }))
+          },
+          mergeReason: aggregationTriggerReason,
+          verificationStatus: "failed",
+          updatedBy: task.roleId
+        });
+        updateParentSessionProjectMemory(this.deps.store, this.deps.store.getTask(parentTask.id) ?? parentTask, {
+          currentStage: "collaboration_blocked",
+          latestSummary: task.result?.summary || task.errorText || "Collaboration blocked",
+          unresolvedQuestions: [],
+          nextActions: ["检查受阻角色输出并重新拆解任务"],
+          latestArtifacts: aggregationArtifacts,
+          orchestrationVerificationStatus: "failed"
+        });
+      } else if (task.result) {
+        if (aggregationMode === "await_user") {
+          this.deps.store.updateAgentCollaboration(collaboration.id, {
+            status: "active",
+            currentPhase: "await_user",
+            updatedAt: new Date().toISOString(),
+            completedAt: null
+          });
+        } else {
+          this.collaborationService.completeCollaboration(collaboration.id);
+        }
         const reflection: ReflectionNote = task.reflection ?? {
           score: 8,
           confidence: "medium",
@@ -706,11 +1021,79 @@ export class CollaborationManager {
           improvements: []
         };
         this.deps.store.completeTask(parentTask.id, task.result as TaskResult, reflection);
+        this.syncParentTaskCollaborationState(parentTask.id, {
+          phase: aggregationMode === "await_user" ? "await_user" : "completed",
+          mode: aggregationMode,
+          reason: aggregationTriggerReason,
+          status: aggregationMode === "await_user" ? "await_user" : aggregationMode === "partial" ? "partial" : "completed"
+        });
+        patchParentOrchestrationState(this.deps.store, parentTask, aggregationMode === "await_user" ? "execute" : "deliver", {
+          progress: {
+            stage: aggregationMode === "await_user" ? "execute" : "deliver",
+            status: aggregationMode === "await_user" ? "await_user" : aggregationMode === "partial" ? "partial" : "completed",
+            completed: aggregationMode === "await_user" ? ["branch", "merge"] : ["branch", "merge", "deliver"],
+            inFlight: [],
+            blocked: [],
+            awaitingInput: aggregationMode === "await_user" ? awaitUserPrompts : [],
+            nextActions:
+              aggregationMode === "await_user"
+                ? ["wait for user input and resume the same collaboration"]
+                : (task.result.followUps ?? []).slice(0, 6)
+          },
+          decision: {
+            summary: task.result.summary,
+            entries: dedupeSorted([task.result.summary, ...(task.result.followUps ?? [])]).slice(0, 20)
+          },
+          artifactIndex: {
+            items: aggregationArtifacts.map((item) => ({
+              path: item,
+              title: item.split("/").pop() ?? item,
+              stage: aggregationMode === "await_user" ? "merge" : "deliver",
+              status: aggregationMode === "await_user" ? "produced" : "verified"
+            }))
+          },
+          mergeReason: aggregationTriggerReason,
+          verificationStatus: aggregationMode === "await_user" ? "pending" : "verified",
+          updatedBy: task.roleId
+        });
+        updateParentSessionProjectMemory(this.deps.store, this.deps.store.getTask(parentTask.id) ?? parentTask, {
+          currentStage:
+            aggregationMode === "await_user"
+              ? "awaiting_input"
+              : aggregationMode === "partial"
+                ? "partially_delivered"
+                : "collaboration_delivered",
+          latestSummary: task.result.summary,
+          unresolvedQuestions: aggregationMode === "await_user" ? awaitUserPrompts : [],
+          nextActions:
+            aggregationMode === "await_user"
+              ? ["补充缺失信息后自动继续汇总"]
+              : (task.result.followUps ?? []).slice(0, 6),
+          latestArtifacts: aggregationArtifacts,
+          orchestrationVerificationStatus: aggregationMode === "await_user" ? "pending" : "verified"
+        });
       } else {
+        this.collaborationService.failCollaboration(collaboration.id);
         this.deps.store.failTask(parentTask.id, "Aggregation task completed without result");
+        this.syncParentTaskCollaborationState(parentTask.id, {
+          phase: "converge",
+          mode: "blocked",
+          reason: aggregationTriggerReason,
+          status: "failed"
+        });
+        updateParentSessionProjectMemory(this.deps.store, this.deps.store.getTask(parentTask.id) ?? parentTask, {
+          currentStage: "collaboration_blocked",
+          latestSummary: "Aggregation task completed without result",
+          unresolvedQuestions: [],
+          nextActions: ["检查汇总节点与子任务结果是否完整"],
+          latestArtifacts: aggregationArtifacts,
+          orchestrationVerificationStatus: "failed"
+        });
       }
       this.deps.store.patchTaskMetadata(parentTask.id, {
-        collaborationStatus: "completed",
+        collaborationStatus: aggregationMode === "await_user" ? "await_user" : aggregationMode === "partial" ? "partial" : "completed",
+        collaborationPhase: aggregationMode === "await_user" ? "await_user" : "completed",
+        collaborationPendingQuestions: aggregationMode === "await_user" ? awaitUserPrompts : [],
         collaborationCompletedAt: new Date().toISOString()
       });
     }
@@ -718,9 +1101,25 @@ export class CollaborationManager {
     // 推送最终结果到飞书
     if (collaboration.chatId && this.deps.feishuClient && isLikelyFeishuChatId(collaboration.chatId)) {
       const summary = compactProgressText(task.result?.summary ?? "", 160) || "已产出最终协作结果。";
-      const message = [`✅ 协作已完成（${collaboration.id.slice(0, 8)}）`, `结论：${summary}`, "完整交付可在控制台查看。"].join(
-        "\n"
-      );
+      const head =
+        aggregationMode === "await_user"
+          ? `📝 协作等待你补充信息（${collaboration.id.slice(0, 8)}）`
+          : aggregationMode === "partial"
+            ? `⚠️ 协作已部分收敛（${collaboration.id.slice(0, 8)}）`
+            : aggregationMode === "blocked"
+              ? `⛔ 协作已阻塞（${collaboration.id.slice(0, 8)}）`
+              : `✅ 协作已完成（${collaboration.id.slice(0, 8)}）`;
+      const tail =
+        aggregationMode === "await_user"
+          ? `请直接回复以下补充项，我会继续推进：${
+              awaitUserPrompts.length > 0 ? `\n- ${awaitUserPrompts.join("\n- ")}` : "\n- 请查看结果中的待补充项"
+            }`
+          : aggregationMode === "partial"
+            ? "当前已输出可用部分结果，剩余阻塞项已在结论中说明。"
+            : aggregationMode === "blocked"
+              ? "当前无法继续自动推进，阻塞原因已写入结论。"
+              : "完整交付可在控制台查看。";
+      const message = [head, `结论：${summary}`, tail].join("\n");
 
       try {
         await this.deps.feishuClient.sendTextToChat(collaboration.chatId, message);
@@ -808,17 +1207,8 @@ export class CollaborationManager {
     const metadata = task.metadata as {
       toolChangedFiles?: unknown;
     };
-    const metadataFiles = normalizeFileList(metadata.toolChangedFiles);
-    const resultFiles = dedupeSorted(
-      parseFileArtifactsFromText(task.result?.summary ?? "").concat(parseFileArtifactsFromText(task.result?.deliverable ?? ""))
-    );
     const toolRuns = this.deps.store.listToolRunsByTask(task.id);
-    const toolRunFiles = dedupeSorted(
-      toolRuns.flatMap((run) =>
-        parseFileArtifactsFromText(`${run.outputText ?? ""}\n${run.errorText ?? ""}`)
-      )
-    );
-    const files = dedupeSorted([...metadataFiles, ...resultFiles, ...toolRunFiles]).slice(0, 3);
+    const files = collectProjectMemoryArtifactsFromTask(task, toolRuns).slice(0, 3);
     const latestToolRun = toolRuns.slice().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
     const commandOutcome = latestToolRun
       ? latestToolRun.status === "completed"
@@ -870,27 +1260,83 @@ export class CollaborationManager {
   }
 
   // 检查是否应该触发汇总
-  private shouldTriggerAggregation(collaboration: AgentCollaboration): boolean {
+  private resolveAggregationDecision(
+    collaboration: AgentCollaboration,
+    manual = false
+  ): AggregationDecision {
     if (collaboration.currentPhase === "aggregation" || collaboration.currentPhase === "completed") {
-      return false;
+      return {
+        shouldAggregate: false,
+        mode: "partial",
+        reason: "not_ready"
+      };
     }
 
     const progress = this.getCollaborationProgress(collaboration);
+    if (manual) {
+      return {
+        shouldAggregate: true,
+        mode: progress.completedCount > 0 ? "partial" : "await_user",
+        reason: "manual_trigger"
+      };
+    }
 
     // 1. 所有执行阶段任务都完成了（且开启了自动汇总）
     if (progress.terminalCount === progress.totalCount && progress.totalCount > 0) {
       if (collaboration.config.autoAggregateOnComplete) {
-        return true;
+        if (progress.failedCount === 0) {
+          return {
+            shouldAggregate: true,
+            mode: "deliver",
+            reason: "all_tasks_completed"
+          };
+        }
+        return {
+          shouldAggregate: true,
+          mode: progress.completedCount > 0 ? "partial" : "blocked",
+          reason: "all_tasks_terminal_with_failures"
+        };
       }
     }
 
-    // 2. 超时（使用 aggregateTimeoutMs）
-    const elapsed = Date.now() - new Date(collaboration.createdAt).getTime();
-    if (elapsed > collaboration.config.aggregateTimeoutMs) {
-      return true;
+    const phaseChangedAt = new Date(collaboration.updatedAt).getTime();
+    const discussionElapsed = Date.now() - phaseChangedAt;
+    if (collaboration.currentPhase === "discussion" && discussionElapsed > collaboration.config.discussionTimeoutMs) {
+      return {
+        shouldAggregate: true,
+        mode: progress.completedCount > 0 ? "partial" : "await_user",
+        reason: "discussion_timeout"
+      };
     }
 
-    return false;
+    // 2. 整体超时（使用 aggregateTimeoutMs）
+    const totalElapsed = Date.now() - new Date(collaboration.createdAt).getTime();
+    if (totalElapsed > collaboration.config.aggregateTimeoutMs) {
+      return {
+        shouldAggregate: true,
+        mode: progress.completedCount > 0 ? "partial" : "await_user",
+        reason: "aggregate_timeout"
+      };
+    }
+
+    // 3. 参与角色数超过 maxRounds，视为复杂协作，所有角色有结论后强制收敛
+    if (
+      progress.terminalCount === progress.totalCount &&
+      progress.totalCount > 0 &&
+      progress.totalCount >= collaboration.config.maxRounds
+    ) {
+      return {
+        shouldAggregate: true,
+        mode: progress.failedCount > 0 ? "partial" : "deliver",
+        reason: "max_rounds_reached"
+      };
+    }
+
+    return {
+      shouldAggregate: false,
+      mode: "partial",
+      reason: "not_ready"
+    };
   }
 
   // 手动触发汇总
@@ -905,25 +1351,38 @@ export class CollaborationManager {
       return false;
     }
 
-    await this.performFinalAggregation(collaborationId);
+    await this.performFinalAggregation(collaborationId, this.resolveAggregationDecision(collaboration, true));
     return true;
   }
 
   // 执行最终汇总
-  async performFinalAggregation(collaborationId: string): Promise<void> {
+  async performFinalAggregation(collaborationId: string, decision?: AggregationDecision): Promise<void> {
     const collaboration = this.deps.store.getAgentCollaboration(collaborationId);
     if (!collaboration) return;
     if (collaboration.currentPhase === "aggregation" || collaboration.currentPhase === "completed") {
       return;
     }
+    const aggregateDecision = decision ?? this.resolveAggregationDecision(collaboration);
+    if (!aggregateDecision.shouldAggregate) {
+      return;
+    }
 
     this.collaborationService.advancePhase(collaborationId, "aggregation");
+    this.syncParentTaskCollaborationState(collaboration.parentTaskId, {
+      phase: "aggregation",
+      mode: aggregateDecision.mode,
+      reason: aggregateDecision.reason,
+      status: aggregateDecision.mode === "await_user" ? "await_user" : "active"
+    });
     this.deps.store.createCollaborationTimelineEvent({
       collaborationId,
       eventType: "aggregation_started",
       roleId: collaboration.facilitator,
-      message: "Start final aggregation",
-      metadata: {}
+      message: `Start final aggregation (${aggregateDecision.mode})`,
+      metadata: {
+        aggregationMode: aggregateDecision.mode,
+        triggerReason: aggregateDecision.reason
+      }
     });
 
     // 收集所有阶段结果
@@ -936,13 +1395,15 @@ export class CollaborationManager {
       source: "system",
       roleId: collaboration.facilitator,
       title: `最终汇总: ${collaboration.id.slice(0, 8)}`,
-      instruction: this.buildAggregationPrompt(collaboration, allOutputs),
+      instruction: this.buildAggregationPrompt(collaboration, allOutputs, aggregateDecision),
       priority: 99,
       chatId: collaboration.chatId,
       metadata: {
         parentTaskId: collaboration.parentTaskId,
         collaborationId,
-        isAggregation: true
+        isAggregation: true,
+        aggregationMode: aggregateDecision.mode,
+        aggregationTriggerReason: aggregateDecision.reason
       }
     });
     this.deps.store.createTaskRelation({
@@ -980,20 +1441,54 @@ export class CollaborationManager {
   // 构建汇总提示词
   private buildAggregationPrompt(
     collaboration: AgentCollaboration,
-    outputs: { roleId: RoleId; summary: string }[]
+    outputs: { roleId: RoleId; summary: string }[],
+    decision: AggregationDecision
   ): string {
+    const parentTask = this.deps.store.getTask(collaboration.parentTaskId);
+    const parentMetadata = (parentTask?.metadata ?? {}) as {
+      collaborationUserSupplements?: unknown;
+    };
+    const userSupplements = normalizeSupplementEntries(parentMetadata.collaborationUserSupplements).slice(-3);
+    const progress = this.getCollaborationProgress(collaboration);
+    const children = this.getExecutionChildren(collaboration);
+    const completedRoles = Array.from(new Set(children.filter((task) => task.status === "completed").map((task) => task.roleId)));
+    const failedRoles = Array.from(
+      new Set(children.filter((task) => task.status === "failed" || task.status === "cancelled").map((task) => task.roleId))
+    );
     return [
       "请汇总以下各角色的工作成果，生成最终报告：",
+      "",
+      "=== 协作收敛控制 ===",
+      `- aggregation_mode: ${decision.mode}`,
+      `- trigger_reason: ${decision.reason}`,
+      `- completed_roles: ${completedRoles.join(",") || "none"}`,
+      `- failed_roles: ${failedRoles.join(",") || "none"}`,
+      `- progress: ${progress.completedCount}/${progress.totalCount} completed, ${progress.failedCount} failed`,
+      "",
+      "=== 原始目标 ===",
+      parentTask?.instruction?.trim() || "none",
+      "",
+      "=== 用户补充信息 ===",
+      ...(userSupplements.length > 0
+        ? userSupplements.map((entry, index) => {
+            const prefix = `${index + 1}.`;
+            const who = entry.requesterName ? ` (${entry.requesterName})` : "";
+            const at = entry.at ? ` @ ${entry.at}` : "";
+            return `${prefix}${who}${at} ${entry.text}`;
+          })
+        : ["none"]),
       "",
       "=== 各角色输出 ===",
       ...outputs.map((o) => `\n【${ROLE_LABELS[o.roleId] ?? o.roleId}】\n${o.summary}`),
       "",
       "=== 汇总要求 ===",
-      "1. 整合各角色输出，形成完整方案",
-      "2. 列出关键决策点和风险项",
-      "3. 必须列出各角色实际产出（文件路径、执行命令、测试结果）；缺失项要明确标红",
-      "4. 给出后续行动建议",
-      "5. 如有冲突观点，说明权衡建议"
+      "1. 先判断本次协作结论属于哪一类：deliver / partial / await_user / blocked。",
+      "2. 整合各角色输出，形成完整方案或明确阻塞说明。",
+      "3. 必须列出关键决策点、风险项、未决问题。",
+      "4. 必须列出各角色实际产出（文件路径、执行命令、测试结果）；缺失项要明确写出。",
+      "5. 若当前不能继续自动推进，必须写出需要用户补充的最少信息（最多3条）。",
+      "6. 给出下一步动作，按 owner / role / action 三元组列出。",
+      "7. 如有冲突观点，说明权衡建议，不要只拼接原文。"
     ].join("\n");
   }
 
@@ -1007,7 +1502,7 @@ export class CollaborationManager {
     instruction: string;
     priority: number;
   }> {
-    const ordered = participants.filter((roleId) => roleId !== "ceo");
+    const ordered = participants;
     if (ordered.length === 0) {
       return [this.buildRoleSpec(parentTask, parentTask.roleId)];
     }

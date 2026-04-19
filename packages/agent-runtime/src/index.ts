@@ -21,6 +21,29 @@ import {
   type ToolContext,
   type ToolDefinition
 } from "./tool-executor.js";
+import {
+  buildRuntimeCapabilitySnapshot,
+  createDefaultRegistry,
+  createToolBackedRegistry,
+  ToolRegistry
+} from "./tool-registry.js";
+import {
+  createDefaultRulesEngine,
+  RulesEngine
+} from "./rules-engine.js";
+export { buildRuntimeCapabilitySnapshot, createDefaultRegistry, createToolBackedRegistry, ToolRegistry } from "./tool-registry.js";
+export { createDefaultRulesEngine, RulesEngine } from "./rules-engine.js";
+import {
+  TelemetryCollector,
+  globalTelemetry,
+  initGlobalTelemetry,
+  summarizeModelInput,
+  summarizeModelOutput,
+  summarizeToolArguments,
+  summarizeToolOutput
+} from "./telemetry.js";
+export { globalTelemetry, TelemetryCollector, initGlobalTelemetry } from "./telemetry.js";
+import { WorkspaceKnowledgeBase, type KnowledgeSnippet } from "@vinko/knowledge-base";
 
 const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const PROMPTS_ROOT = path.join(PROJECT_ROOT, "prompts", "roles");
@@ -37,20 +60,59 @@ export interface RuntimeExecutionInput {
   /** Optional tool context — enables function calling loop */
   toolContext?: ToolContext;
   /**
+   * Optional tool registry for discovering and executing tools.
+   * Falls back to built-in tools (web_search, run_code, write_file) if not provided.
+   */
+  toolRegistry?: ToolRegistry;
+  /**
+   * Optional rules engine for tool execution safety.
+   * Falls back to built-in safety rules if not provided.
+   */
+  rulesEngine?: RulesEngine;
+  /**
+   * Optional telemetry collector for runtime observability.
+   * If provided, every LLM turn and tool call is recorded to the trace.
+   */
+  telemetry?: TelemetryCollector;
+  /**
+   * Optional knowledge base for context injection.
+   * If provided, relevant documents are retrieved and injected into the system prompt.
+   */
+  knowledgeBase?: WorkspaceKnowledgeBase;
+  /**
    * Prior conversation turns from the same session, ordered oldest-first.
    * Injected as real user/assistant message pairs before the current task message,
    * giving the model genuine multi-turn coherence instead of JSON snippets.
    */
   conversationHistory?: Array<{ role: "user" | "assistant"; content: string }>;
+  /**
+   * If true, perform a lightweight planning step before execution.
+   * The planning step analyzes what the task needs and identifies missing information.
+   * If missing info is found, returns early with needsInput: true.
+   */
+  preExecutePlan?: boolean;
+  /**
+   * Workspace context from cross-session memory.
+   * Injected into system prompt for continuity across conversations.
+   */
+  workspaceContext?: {
+    preferredTechStack?: string[];
+    communicationStyle?: "concise" | "detailed" | "default";
+    activeProjects?: Array<{ name: string; stage: string; lastUpdate: string }>;
+    keyDecisions?: Array<{ decision: string; rationale: string; timestamp: string }>;
+  };
 }
 
 export interface RuntimeExecutionOutput {
   result: TaskResult;
   reflection: ReflectionNote;
-  backendUsed: "sglang" | "ollama" | "zhipu" | "fallback";
+  backendUsed: "sglang" | "ollama" | "zhipu" | "openai" | "fallback";
   modelUsed: string;
   /** Files produced by tool execution during this task */
   artifactFiles: string[];
+  /** Set when preExecutePlan found missing information */
+  needsInput?: boolean;
+  missingFields?: string[];
 }
 
 interface ModelMessage {
@@ -66,7 +128,7 @@ interface ModelMessage {
 
 interface ModelCompletion {
   text: string;
-  backendUsed: "sglang" | "ollama" | "zhipu" | "fallback";
+  backendUsed: "sglang" | "ollama" | "zhipu" | "openai" | "fallback";
   modelUsed: string;
 }
 
@@ -209,7 +271,7 @@ function parseAttachments(task: TaskRecord): TaskAttachment[] {
     .filter((entry): entry is TaskAttachment => Boolean(entry));
 }
 
-function buildUserMessageContent(task: TaskRecord, contextBlock: string): ModelMessageContent {
+async function buildUserMessageContent(task: TaskRecord, contextBlock: string): Promise<ModelMessageContent> {
   const textBlock = [
     `Task title: ${task.title}`,
     `Task instruction:\n${task.instruction}`,
@@ -242,10 +304,22 @@ function buildUserMessageContent(task: TaskRecord, contextBlock: string): ModelM
 
   for (const attachment of attachments) {
     if (attachment.kind === "image") {
+      let finalUrl = attachment.url;
+      if (finalUrl.startsWith("file://")) {
+        try {
+          const filePath = fileURLToPath(finalUrl);
+          const buffer = await readFile(filePath);
+          const ext = path.extname(filePath).toLowerCase().replace(".", "") || "png";
+          const mimeType = ext === "jpg" ? "jpeg" : ext;
+          finalUrl = `data:image/${mimeType};base64,${buffer.toString("base64")}`;
+        } catch (e) {
+          // ignore fallback
+        }
+      }
       content.push({
         type: "image_url",
         image_url: {
-          url: attachment.url,
+          url: finalUrl,
           ...(attachment.detail ? { detail: attachment.detail } : {})
         }
       });
@@ -491,6 +565,13 @@ function buildLayeredSystemPrompt(input: {
   memoryBackend: string;
   preferredLanguage: "zh-CN" | "en-US";
   availableTools?: string[];
+  workspaceContext?: {
+    preferredTechStack?: string[];
+    communicationStyle?: "concise" | "detailed" | "default";
+    activeProjects?: Array<{ name: string; stage: string; lastUpdate: string }>;
+    keyDecisions?: Array<{ decision: string; rationale: string; timestamp: string }>;
+  };
+  knowledgeBlock?: string;
 }): string {
   const toolSection =
     input.availableTools && input.availableTools.length > 0
@@ -503,11 +584,38 @@ function buildLayeredSystemPrompt(input: {
           "- Use `run_code` (python/bash) for ANY computation, file generation (PDF, Excel, CSV, images), data processing, or installing packages. Do NOT describe code — run it.",
           "- Use `web_search` whenever you need real-time information, current docs, prices, news, or anything beyond training data.",
           "- Use `write_file` to persist deliverable text artifacts. Default to Markdown (.md) for documents and reports; use JSON for data; use CSV for tabular data. Only use HTML/CSS/JS when the task explicitly requires a web page.",
+          "- If the user asks for a document, report, PRD, brief, or file deliverable, you MUST save it with `write_file` instead of returning prose only.",
           "- Chain tools across multiple rounds: search → run code → write file.",
           "- If a tool does not exist for a task, write Python code that implements it via `run_code`.",
           "- After all tool work is complete, emit the final JSON output contract."
         ].join("\n")
       : "";
+
+  const workspaceSection = input.workspaceContext
+    ? [
+        "",
+        "## Workspace Context (Cross-Session Memory)",
+        "The following context persists across conversations. Use it to maintain continuity.",
+        ...(input.workspaceContext.preferredTechStack && input.workspaceContext.preferredTechStack.length > 0
+          ? [`Preferred tech stack: ${input.workspaceContext.preferredTechStack.join(", ")}`]
+          : []),
+        ...(input.workspaceContext.communicationStyle && input.workspaceContext.communicationStyle !== "default"
+          ? [`Communication style: ${input.workspaceContext.communicationStyle === "concise" ? "Be concise and direct" : "Provide detailed explanations"}`]
+          : []),
+        ...(input.workspaceContext.activeProjects && input.workspaceContext.activeProjects.length > 0
+          ? [
+              "Active projects:",
+              ...input.workspaceContext.activeProjects.slice(0, 3).map((p) => `- ${p.name} (${p.stage})`)
+            ]
+          : []),
+        ...(input.workspaceContext.keyDecisions && input.workspaceContext.keyDecisions.length > 0
+          ? [
+              "Recent key decisions:",
+              ...input.workspaceContext.keyDecisions.slice(0, 3).map((d) => `- ${d.decision}: ${d.rationale}`)
+            ]
+          : [])
+      ].join("\n")
+    : "";
 
   return [
     `Prompt version: ${SYSTEM_PROMPT_VERSION}`,
@@ -521,12 +629,34 @@ function buildLayeredSystemPrompt(input: {
     "If preferred language is zh-CN, write summary, deliverable, followUps, assumptions, risks, improvements in Simplified Chinese.",
     "For chat channels, keep wording natural and concise; avoid robotic template phrases.",
     "",
+    "## Workspace Path Rules",
+    "You MUST strictly follow these directory conventions when creating files. ALWAYS group ALL files by the current project name inside the `./projects/` directory (e.g., `coffee-shop`, `hotel-system`):",
+    "1. **Projects/Code**: Any new software project, app, or system code you create MUST be placed in `./projects/<project-name>/code/`.",
+    "2. **Documents/Reports**: Any generated documents, PRDs, analysis reports, or proposals MUST be saved to `./projects/<project-name>/docs/` or `./projects/<project-name>/reports/`.",
+    "3. **Visual Assets**: Generated images, logos, or UI mockups MUST be saved to `./projects/<project-name>/assets/`.",
+    "4. **Templates**: Use `./templates/` for reusable document templates.",
+    "",
     "## Runtime Context",
     `Role: ${input.profileName}`,
     `Active skills: ${input.skillList}`,
     `Memory backend: ${input.memoryBackend}`,
     `Preferred language: ${input.preferredLanguage}`,
+    workspaceSection,
+    input.knowledgeBlock
+      ? `\n## 相关知识\n${input.knowledgeBlock}`
+      : "",
     toolSection,
+    "",
+    "## User Input Protocol",
+    "If you realize mid-task that critical information is missing and you cannot make a reasonable assumption:",
+    "1. Write the question in plain text before the marker.",
+    "2. End your deliverable with exactly: __NEEDS_INPUT__{\"question\": \"<your question here>\"}",
+    "Example: 请问您希望使用邮箱登录还是手机号登录？__NEEDS_INPUT__{\"question\": \"请问您希望使用邮箱登录还是手机号登录？\"}",
+    "Rules for using __NEEDS_INPUT__:",
+    "- Only use it when the missing info would completely change the output (e.g., auth method, target platform, audience).",
+    "- Do NOT use it for minor details you can assume reasonably.",
+    "- Do NOT use it for greetings, bug fixes, or clearly scoped tasks.",
+    "- Ask at most ONE question per pause. Make it specific and actionable.",
     "",
     "## Role Prompt",
     input.rolePrompt.trim(),
@@ -534,9 +664,10 @@ function buildLayeredSystemPrompt(input: {
     "## Output Contract",
     "Return strict JSON with keys: summary, deliverable, citations, followUps, reflection.",
     "reflection must contain: score, confidence, assumptions, risks, improvements.",
-    "Do not include prose outside JSON."
+    "Do not include prose outside JSON.",
+    "Exception: if you output __NEEDS_INPUT__, the entire response should be plain text (not JSON)."
   ]
-    .filter((line) => line !== undefined)
+    .filter((line) => line !== undefined && line !== "")
     .join("\n");
 }
 
@@ -623,6 +754,30 @@ function buildFallbackOutput(input: RuntimeExecutionInput): RuntimeExecutionOutp
 export class LocalModelClient {
   private readonly env = loadEnv();
 
+  async finalizeReasoning(
+    backend: "sglang" | "ollama" | "zhipu" | "openai",
+    messages: ModelMessage[],
+    reasoningText: string
+  ): Promise<string | undefined> {
+    const baseUrl =
+      backend === "zhipu"
+        ? this.env.zhipuBaseUrl.replace(/\/$/, "")
+        : backend === "openai"
+          ? this.env.openaiBaseUrl.replace(/\/$/, "")
+          : backend === "sglang"
+            ? this.env.sglangBaseUrl.replace(/\/$/, "")
+            : this.env.ollamaBaseUrl.replace(/\/$/, "");
+    const model =
+      backend === "zhipu"
+        ? this.env.zhipuModel
+        : backend === "openai"
+          ? this.env.openaiModel
+          : backend === "sglang"
+            ? this.env.sglangModel
+            : this.env.ollamaModel;
+    return this.finalizeReasoningToContent(baseUrl, model, messages, reasoningText);
+  }
+
   private isVllmQwen35A3B(baseUrl: string, model: string): boolean {
     return baseUrl.includes(":8000") && model.includes("Qwen3.5-35B-A3B");
   }
@@ -699,13 +854,17 @@ export class LocalModelClient {
     return finalizedText || undefined;
   }
 
-  private async callZhipu(messages: ModelMessage[]): Promise<ModelCompletion | undefined> {
-    const apiKey = this.env.zhipuApiKey;
+  private async callOpenAiCompatible(
+    backend: "zhipu" | "openai",
+    messages: ModelMessage[]
+  ): Promise<ModelCompletion | undefined> {
+    const apiKey = backend === "zhipu" ? this.env.zhipuApiKey : this.env.openaiApiKey;
     if (!apiKey) {
       return undefined;
     }
-    const baseUrl = this.env.zhipuBaseUrl.replace(/\/$/, "");
-    const model = this.env.zhipuModel;
+    const baseUrl =
+      backend === "zhipu" ? this.env.zhipuBaseUrl.replace(/\/$/, "") : this.env.openaiBaseUrl.replace(/\/$/, "");
+    const model = backend === "zhipu" ? this.env.zhipuModel : this.env.openaiModel;
 
     const requestBody: Record<string, unknown> = {
       model,
@@ -714,8 +873,8 @@ export class LocalModelClient {
       messages
     };
 
-    // GLM-5 supports thinking mode — enable it for richer reasoning
-    if (model === "glm-5" || model === "glm-5-turbo") {
+    // GLM-5 supports thinking mode — enable it for richer reasoning.
+    if (backend === "zhipu" && (model === "glm-5" || model === "glm-5-turbo")) {
       requestBody.thinking = { type: "enabled" };
     }
 
@@ -729,17 +888,17 @@ export class LocalModelClient {
 
     return {
       text,
-      backendUsed: "zhipu",
+      backendUsed: backend,
       modelUsed: model
     };
   }
 
   private async callBackend(
-    backend: "sglang" | "ollama" | "zhipu",
+    backend: "sglang" | "ollama" | "zhipu" | "openai",
     messages: ModelMessage[]
   ): Promise<ModelCompletion | undefined> {
-    if (backend === "zhipu") {
-      return this.callZhipu(messages);
+    if (backend === "zhipu" || backend === "openai") {
+      return this.callOpenAiCompatible(backend, messages);
     }
 
     const baseUrl =
@@ -783,29 +942,39 @@ export class LocalModelClient {
   async completeWithTools(
     messages: ModelMessage[],
     tools: ToolDefinition[]
-  ): Promise<{ message: ChatCompletionMessage; backendUsed: "sglang" | "ollama" | "zhipu" | "fallback"; modelUsed: string }> {
+  ): Promise<{ message: ChatCompletionMessage; backendUsed: "sglang" | "ollama" | "zhipu" | "openai" | "fallback"; modelUsed: string }> {
     const env = this.env;
-    // Only zhipu (GLM-5) and sglang (Qwen3.5) reliably support tool calling
-    const backends: Array<"zhipu" | "sglang" | "ollama"> =
-      env.primaryBackend === "zhipu"
-        ? ["zhipu", "sglang"]
-        : ["sglang", "zhipu"];
+    const backends: Array<"openai" | "zhipu" | "sglang" | "ollama"> =
+      env.primaryBackend === "openai"
+        ? ["openai", "zhipu", "sglang"]
+        : env.primaryBackend === "zhipu"
+          ? ["zhipu", "openai", "sglang"]
+          : ["sglang", "openai", "zhipu"];
 
     for (const backend of backends) {
       try {
         const baseUrl =
           backend === "zhipu"
             ? env.zhipuBaseUrl.replace(/\/$/, "")
+            : backend === "openai"
+              ? env.openaiBaseUrl.replace(/\/$/, "")
             : backend === "sglang"
               ? env.sglangBaseUrl.replace(/\/$/, "")
               : env.ollamaBaseUrl.replace(/\/$/, "");
         const model =
           backend === "zhipu"
             ? env.zhipuModel
+            : backend === "openai"
+              ? env.openaiModel
             : backend === "sglang"
               ? env.sglangModel
               : env.ollamaModel;
-        const apiKey = backend === "zhipu" ? (env.zhipuApiKey || undefined) : undefined;
+        const apiKey =
+          backend === "zhipu"
+            ? (env.zhipuApiKey || undefined)
+            : backend === "openai"
+              ? (env.openaiApiKey || undefined)
+              : undefined;
 
         const body: Record<string, unknown> = {
           model,
@@ -839,12 +1008,14 @@ export class LocalModelClient {
   }
 
   async complete(messages: ModelMessage[]): Promise<ModelCompletion> {
-    const backends: Array<"sglang" | "ollama" | "zhipu"> =
-      this.env.primaryBackend === "zhipu"
-        ? ["zhipu", "sglang", "ollama"]
-        : this.env.primaryBackend === "sglang"
-          ? ["sglang", "ollama"]
-          : ["ollama", "sglang"];
+    const backends: Array<"sglang" | "ollama" | "zhipu" | "openai"> =
+      this.env.primaryBackend === "openai"
+        ? ["openai", "zhipu", "sglang", "ollama"]
+        : this.env.primaryBackend === "zhipu"
+          ? ["zhipu", "openai", "sglang", "ollama"]
+          : this.env.primaryBackend === "sglang"
+            ? ["sglang", "openai", "ollama", "zhipu"]
+            : ["ollama", "openai", "sglang", "zhipu"];
 
     for (const backend of backends) {
       try {
@@ -865,10 +1036,51 @@ export class LocalModelClient {
   }
 }
 
+/**
+ * Heuristic: is the instruction complex enough to justify an extra planning LLM call?
+ * Returns false for short, specific, or clearly-scoped requests to avoid extra latency.
+ */
+function isComplexEnoughForPlanning(instruction: string): boolean {
+  const text = instruction.trim();
+
+  // Founder-style execution tasks that explicitly allow assumptions should continue directly.
+  if (/(?:合理默认假设继续推进|合理假设继续推进|不要因为.*暂停等待用户输入)/.test(text)) return false;
+
+  // Very short → no planning needed
+  if (text.length < 30) return false;
+
+  // Bug fixes, status queries, greetings → no planning
+  if (/(?:修复|fix|解决|resolve).*(?:bug|问题|错误|报错|issue)/i.test(text)) return false;
+  if (/(?:进度|状态|status|progress|怎么样了)/i.test(text)) return false;
+
+  // Resuming with user-provided clarification context → no re-planning
+  if (/补充信息（用户确认）/.test(text)) return false;
+
+  // Tasks with specific technology + action are scoped enough
+  const hasSpecificTech = /(?:React|Vue|Angular|Next\.js|Node|Python|FastAPI|Django|PostgreSQL|MySQL|Redis|Docker|K8s|TypeScript)/i.test(text);
+  const hasSpecificAction = /(?:写|创建|开发|实现|修改|重构|优化|部署|测试|write|create|implement|refactor|deploy)/i.test(text);
+  if (hasSpecificTech && hasSpecificAction && text.length < 120) return false;
+
+  // For everything else above 80 chars, run planning
+  return text.length > 80;
+}
+
 export class AgentRuntime {
   private readonly client = new LocalModelClient();
 
   async execute(input: RuntimeExecutionInput): Promise<RuntimeExecutionOutput> {
+    // ── Pre-execution planning (optional, skipped for simple tasks) ──────────
+    if (input.preExecutePlan && isComplexEnoughForPlanning(input.task.instruction)) {
+      const planResult = await this.runPreExecutePlan(input);
+      if (planResult.needsInput) {
+        const fallback = buildFallbackOutput(input);
+        fallback.needsInput = true;
+        fallback.missingFields = planResult.missingFields;
+        fallback.result.deliverable = `__NEEDS_INPUT__{"question": "${planResult.question}", "context": "${planResult.missingFields?.join(", ") ?? ""}"}`;
+        return fallback;
+      }
+    }
+
     const systemPrompt = await loadRolePrompt(input.task.roleId);
     const profile = getRoleProfile(input.task.roleId);
     const memoryBackend =
@@ -882,11 +1094,39 @@ export class AgentRuntime {
             .map((snippet) => `- ${snippet.path}\n${snippet.excerpt}`)
             .join("\n\n");
 
+    // ── Knowledge injection ────────────────────────────────────────────────
+    let knowledgeBlock = "";
+    if (input.knowledgeBase) {
+      try {
+        const snippets = await input.knowledgeBase.retrieve(input.task.instruction, 5);
+        if (snippets.length > 0) {
+          const lines = ["## 相关知识（来自知识库）"];
+          for (const snippet of snippets) {
+            lines.push(`\n### ${snippet.path} (相关度: ${(snippet.score * 100).toFixed(0)}%)`);
+            lines.push(snippet.excerpt.slice(0, 500));
+          }
+          knowledgeBlock = lines.join("\n");
+        }
+      } catch {
+        // Knowledge retrieval failure — don't block task execution
+      }
+    }
+
     // ── Tool calling loop ──────────────────────────────────────────────────
     const toolCtx = input.toolContext;
     const allArtifactPaths: string[] = [];
 
-    const toolDefs = toolCtx ? buildToolDefinitions(toolCtx) : [];
+    // Initialize registry and rules engine (use provided or create defaults)
+    const registry = input.toolRegistry ?? (toolCtx ? createToolBackedRegistry(toolCtx) : new ToolRegistry());
+    const rules = input.rulesEngine ?? createDefaultRulesEngine();
+    const telemetry = input.telemetry;
+    let traceId: string | undefined;
+
+    if (telemetry) {
+      traceId = telemetry.startTrace(input.task);
+    }
+
+    const toolDefs = registry.serializeForLLM();
     const availableTools =
       toolDefs.length > 0 ? toolDefs.map((t) => `${t.function.name}: ${t.function.description.split(".")[0]}`) : undefined;
 
@@ -899,7 +1139,9 @@ export class AgentRuntime {
           skillList,
           memoryBackend,
           preferredLanguage,
-          ...(availableTools ? { availableTools } : {})
+          ...(availableTools ? { availableTools } : {}),
+          ...(input.workspaceContext ? { workspaceContext: input.workspaceContext } : {}),
+          ...(knowledgeBlock ? { knowledgeBlock } : {})
         })
       },
       // Inject prior conversation turns as real message pairs for multi-turn coherence
@@ -909,7 +1151,7 @@ export class AgentRuntime {
       })),
       {
         role: "user",
-        content: buildUserMessageContent(input.task, contextBlock)
+        content: await buildUserMessageContent(input.task, contextBlock)
       }
     ];
 
@@ -920,6 +1162,11 @@ export class AgentRuntime {
       let modelUsed = "deterministic-fallback";
 
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+        // Record turn start for timing
+        if (telemetry && traceId) {
+          telemetry.recordTurnStart(traceId, round);
+        }
+
         const { message, backendUsed: bu, modelUsed: mu } = await this.client.completeWithTools(messages, tools);
         backendUsed = bu;
         modelUsed = mu;
@@ -935,15 +1182,8 @@ export class AgentRuntime {
           const contentText = parseModelContent(message.content);
           const reasoningText = parseModelContent(message.reasoning);
           let text = contentText;
-          if (!text && reasoningText) {
-            text = await this.finalizeReasoningToContent(
-              backendUsed === "sglang"
-                ? this.env.sglangBaseUrl.replace(/\/$/, "")
-                : this.env.ollamaBaseUrl.replace(/\/$/, ""),
-              backendUsed === "sglang" ? this.env.sglangModel : this.env.ollamaModel,
-              messages,
-              reasoningText
-            ) ?? reasoningText;
+          if (!text && reasoningText && backendUsed !== "fallback") {
+            text = (await this.client.finalizeReasoning(backendUsed, messages, reasoningText)) ?? reasoningText;
           }
           if (!text) break;
 
@@ -962,6 +1202,7 @@ export class AgentRuntime {
             const retryParsed = retryText ? safeParseTaskResponse(retryText) : undefined;
 
             if (retryParsed) {
+              if (telemetry && traceId) telemetry.completeTrace(traceId, retryParsed.result);
               return {
                 result: retryParsed.result,
                 reflection: retryParsed.reflection,
@@ -980,9 +1221,11 @@ export class AgentRuntime {
             fallback.reflection.score = 5;
             fallback.reflection.confidence = "medium";
             fallback.artifactFiles = collectArtifactFiles(toolCtx.workDir, input.task.id);
+            if (telemetry && traceId) telemetry.completeTrace(traceId, fallback.result);
             return fallback;
           }
 
+          if (telemetry && traceId) telemetry.completeTrace(traceId, parsed.result);
           return {
             result: parsed.result,
             reflection: parsed.reflection,
@@ -1001,26 +1244,83 @@ export class AgentRuntime {
         messages.push(assistantMsg);
 
         for (const tc of toolCalls) {
+          // ── Pre-execution rules ────────────────────────────────────────
+          const toolCall = {
+            id: tc.id,
+            name: tc.function.name,
+            arguments: (() => {
+              try { return JSON.parse(tc.function.arguments); } catch { return {}; }
+            })()
+          };
+          const workspaceRoot = path.resolve(toolCtx.workDir, "..", "..", "..");
+          const ruleCtx = { workDir: toolCtx.workDir, workspaceRoot };
+          const preDecision = rules.evaluate(toolCall, ruleCtx, "pre");
+
+          if (preDecision.action === "deny") {
+            // Tool blocked by rules engine — inject error result without executing
+            const toolMsg: ModelMessage = {
+              role: "tool",
+              tool_call_id: tc.id,
+              content: `BLOCKED: ${preDecision.reason}`
+            };
+            messages.push(toolMsg);
+
+            // Record blocked tool in telemetry
+            if (telemetry && traceId) {
+              telemetry.recordBlockedTool(traceId, round, tc.function.name, tc.id, preDecision.reason);
+            }
+            continue;
+          }
+
+          // ── Execute tool ───────────────────────────────────────────────
+          const execStart = Date.now();
           const result = await executeTool(toolCtx, tc.id, tc.function.name, tc.function.arguments);
+          const execDuration = Date.now() - execStart;
           allArtifactPaths.push(...result.artifactPaths);
+
+          // ── Post-execution rules ───────────────────────────────────────
+          let outputText = result.error ? `ERROR: ${result.error}` : result.output;
+          const postDecision = rules.evaluateOutput(toolCall, outputText, ruleCtx);
+          if (postDecision.action === "sanitize" && postDecision.sanitizedOutput !== undefined) {
+            outputText = postDecision.sanitizedOutput;
+          }
+
           const toolMsg: ModelMessage = {
             role: "tool",
             tool_call_id: tc.id,
-            content: result.error ? `ERROR: ${result.error}` : result.output
+            content: outputText
           };
           messages.push(toolMsg);
+        }
+
+        // Record the telemetry turn after tool executions
+        if (telemetry && traceId) {
+          telemetry.recordTurn(traceId, {
+            round,
+            modelInputSummary: summarizeModelInput(messages),
+            modelOutputSummary: summarizeModelOutput(message),
+            toolCalls: [],  // tool calls already recorded via recordBlockedTool
+            backendUsed,
+            modelUsed,
+            durationMs: 0  // calculated by telemetry from turn start
+          });
         }
       }
 
       // Fell through MAX_TOOL_ROUNDS or all backends failed — use fallback
       const fallback = buildFallbackOutput(input);
       fallback.artifactFiles = collectArtifactFiles(toolCtx.workDir, input.task.id);
+      if (telemetry && traceId) telemetry.completeTrace(traceId, fallback.result);
       return fallback;
     }
 
     // ── Plain completion (no tools / tools not configured) ─────────────────
     const completion = await this.client.complete(messages);
     if (completion.backendUsed === "fallback" || !completion.text) {
+      if (telemetry && traceId) {
+        const fb = buildFallbackOutput(input);
+        telemetry.completeTrace(traceId, fb.result);
+      }
       return buildFallbackOutput(input);
     }
 
@@ -1039,6 +1339,7 @@ export class AgentRuntime {
       const retryCompletion = await this.client.complete(retryMessages);
       const retryParsed = retryCompletion.text ? safeParseTaskResponse(retryCompletion.text) : undefined;
       if (retryParsed) {
+        if (telemetry && traceId) telemetry.completeTrace(traceId, retryParsed.result);
         return {
           result: retryParsed.result,
           reflection: retryParsed.reflection,
@@ -1055,9 +1356,11 @@ export class AgentRuntime {
       fallback.result.deliverable = completion.text;
       fallback.reflection.score = 4;
       fallback.reflection.confidence = "medium";
+      if (telemetry && traceId) telemetry.completeTrace(traceId, fallback.result);
       return fallback;
     }
 
+    if (telemetry && traceId) telemetry.completeTrace(traceId, parsed.result);
     return {
       result: parsed.result,
       reflection: parsed.reflection,
@@ -1065,5 +1368,70 @@ export class AgentRuntime {
       modelUsed: completion.modelUsed,
       artifactFiles: []
     };
+  }
+
+  /**
+   * Lightweight planning step: analyze what the task needs and identify missing information.
+   */
+  private async runPreExecutePlan(input: RuntimeExecutionInput): Promise<{
+    needsInput: boolean;
+    missingFields: string[];
+    question: string;
+  }> {
+    const systemPrompt = `You are a task planning assistant. Analyze the given task and determine what information is needed to complete it successfully.
+
+Output ONLY valid JSON (no code fences, no explanation):
+{
+  "plan": "brief 1-2 sentence plan of what needs to be done",
+  "needsInput": true/false,
+  "missingFields": ["field1", "field2"],
+  "question": "a clear question asking for the missing information"
+}
+
+Rules:
+- needsInput should be true ONLY if critical information is missing that would block task completion
+- missingFields should list specific information gaps (e.g., "tech_stack", "auth_method", "target_users")
+- question should be a single, clear, actionable question
+- If the task explicitly says you may use reasonable defaults / assumptions and continue delivery, set needsInput = false
+- For bug fixes, status queries, greetings, or clearly specified tasks: needsInput = false`;
+
+    const messages: ModelMessage[] = [
+      {
+        role: "system",
+        content: systemPrompt
+      },
+      {
+        role: "user",
+        content: `Analyze this task and identify missing information:\n\n${input.task.instruction}`
+      }
+    ];
+
+    try {
+      const completion = await this.client.complete(messages);
+      if (!completion.text || completion.backendUsed === "fallback") {
+        return { needsInput: false, missingFields: [], question: "" };
+      }
+
+      // Try to parse JSON from the response
+      const cleaned = completion.text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+      const parsed = JSON.parse(cleaned) as {
+        needsInput?: boolean;
+        missingFields?: string[];
+        question?: string;
+      };
+
+      if (parsed.needsInput && Array.isArray(parsed.missingFields) && parsed.missingFields.length > 0) {
+        return {
+          needsInput: true,
+          missingFields: parsed.missingFields,
+          question: parsed.question || "请提供更多信息以帮助完成任务"
+        };
+      }
+
+      return { needsInput: false, missingFields: [], question: "" };
+    } catch {
+      // On any error, assume no missing info and proceed with normal execution
+      return { needsInput: false, missingFields: [], question: "" };
+    }
   }
 }

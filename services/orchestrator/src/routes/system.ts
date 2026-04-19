@@ -1,7 +1,7 @@
 import express from "express";
 import type { RoleId, VinkoStore, DashboardSnapshot } from "@vinko/shared";
 import { listRoles, listSkills, renderPrometheusMetrics } from "@vinko/shared";
-import { createToolBackedRegistry, createDefaultRulesEngine, globalTelemetry } from "@vinko/agent-runtime";
+import { buildRuntimeCapabilitySnapshot, createToolBackedRegistry, createDefaultRulesEngine, globalTelemetry } from "@vinko/agent-runtime";
 
 export interface SystemRoutesDeps {
   store: VinkoStore;
@@ -75,11 +75,16 @@ export function registerSystemRoutes(app: express.Express, deps: SystemRoutesDep
   });
 
   app.get("/api/system/runtime-harness", (_request, response) => {
+    const runtimeSecrets =
+      typeof store.getRuntimeSecrets === "function" ? store.getRuntimeSecrets() : {};
+    const runtimeSettings =
+      typeof store.getRuntimeSettings === "function" ? store.getRuntimeSettings() : {};
     const registry = createToolBackedRegistry({
       workDir: "/tmp/vinkoclaw-runtime-harness",
-      secrets: {},
-      searchProvider: ""
+      secrets: runtimeSecrets,
+      searchProvider: runtimeSettings.SEARCH_PROVIDER ?? ""
     });
+    const capabilitySnapshot = buildRuntimeCapabilitySnapshot(registry);
     const rulesEngine = createDefaultRulesEngine();
     const catalog = listSkills();
     const roles = listRoles().map((role) => {
@@ -104,14 +109,15 @@ export function registerSystemRoutes(app: express.Express, deps: SystemRoutesDep
     });
     response.json({
       toolRegistry: {
-        mode: "default",
-        total: registry.list().length,
-        tools: registry.list().map((tool) => ({
+        mode: capabilitySnapshot.registryMode,
+        total: capabilitySnapshot.totalRegistered,
+        enabled: capabilitySnapshot.totalEnabled,
+        tools: capabilitySnapshot.tools.map((tool) => ({
           id: tool.id,
           name: tool.name,
           category: tool.category,
           riskLevel: tool.riskLevel,
-          enabledByDefault: tool.enabledByDefault !== false,
+          enabledByDefault: tool.enabled,
           tags: tool.tags
         }))
       },

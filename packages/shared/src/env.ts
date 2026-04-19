@@ -37,12 +37,17 @@ export interface RuntimeEnv {
   publicUrl: string;
   dataDir: string;
   workspaceRoot: string;
-  primaryBackend: "sglang" | "ollama" | "zhipu";
+  authUsername: string;
+  authPassword: string;
+  authCredentials: string;
+  primaryBackend: "sglang" | "ollama" | "zhipu" | "openai";
   primaryModel: string;
   sglangBaseUrl: string;
   sglangModel: string;
   ollamaBaseUrl: string;
   ollamaModel: string;
+  openaiBaseUrl: string;
+  openaiModel: string;
   zhipuBaseUrl: string;
   zhipuModel: string;
   feishuAppId: string;
@@ -79,6 +84,8 @@ export interface RuntimeEnv {
   searchProvider: string;
   tavilyApiKey: string;
   serpApiKey: string;
+  aiStudioApiKey: string;
+  aiStudioBaseUrl: string;
 }
 
 function parseBoolean(value: string | undefined, fallback: boolean): boolean {
@@ -111,6 +118,26 @@ function parseNumber(value: string | undefined, fallback: number, minimum: numbe
   return Math.max(minimum, Math.round(parsed));
 }
 
+function chooseDefaultPrimaryBackend(merged: Record<string, string | undefined>): RuntimeEnv["primaryBackend"] {
+  const explicit = merged.PRIMARY_BACKEND?.trim().toLowerCase();
+  if (explicit === "sglang" || explicit === "ollama" || explicit === "zhipu" || explicit === "openai") {
+    return explicit;
+  }
+  if (merged.SGLANG_BASE_URL?.trim()) {
+    return "sglang";
+  }
+  if (merged.OPENAI_API_KEY?.trim()) {
+    return "openai";
+  }
+  if (merged.ZHIPUAI_API_KEY?.trim()) {
+    return "zhipu";
+  }
+  if (merged.OLLAMA_BASE_URL?.trim()) {
+    return "ollama";
+  }
+  return "sglang";
+}
+
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): RuntimeEnv {
   const merged = {
     ...parseEnvFile(path.join(PROJECT_ROOT, "config", ".env")),
@@ -127,16 +154,22 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): RuntimeEnv {
     publicUrl: merged.VINKOCLAW_PUBLIC_URL ?? "http://127.0.0.1:8098",
     dataDir,
     workspaceRoot: merged.VINKOCLAW_WORKSPACE_ROOT ?? path.dirname(PROJECT_ROOT),
-    primaryBackend: (merged.PRIMARY_BACKEND as "sglang" | "ollama" | "zhipu" | undefined) ?? "sglang",
-    primaryModel: merged.PRIMARY_MODEL ?? "qwen3.5-coder-14b",
+    authUsername: merged.AUTH_USERNAME ?? "",
+    authPassword: merged.AUTH_PASSWORD ?? "",
+    authCredentials: merged.AUTH_CREDENTIALS ?? "",
+    primaryBackend: chooseDefaultPrimaryBackend(merged),
+    primaryModel: merged.PRIMARY_MODEL ?? "Qwen3.5-35B-A3B",
     sglangBaseUrl: merged.SGLANG_BASE_URL ?? "http://127.0.0.1:8000/v1",
-    sglangModel: merged.SGLANG_MODEL ?? "qwen3.5-coder-14b",
+    sglangModel: merged.SGLANG_MODEL ?? merged.PRIMARY_MODEL ?? "Qwen3.5-35B-A3B",
     ollamaBaseUrl: merged.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434/v1",
     ollamaModel: merged.OLLAMA_MODEL ?? "qwen3.5-instruct-14b",
+    openaiBaseUrl: merged.OPENAI_BASE_URL ?? "https://api.openai.com/v1",
+    openaiModel: merged.OPENAI_MODEL ?? "gpt-4.1",
     zhipuBaseUrl: merged.ZHIPU_BASE_URL ?? "https://open.bigmodel.cn/api/paas/v4",
     zhipuModel: merged.ZHIPU_MODEL ?? "glm-5",
     feishuAppId: merged.FEISHU_APP_ID ?? "",
     feishuAppSecret: merged.FEISHU_APP_SECRET ?? "",
+    openaiApiKey: merged.OPENAI_API_KEY ?? "",
     feishuDomain: merged.FEISHU_DOMAIN ?? "feishu",
     feishuConnectionMode:
       merged.FEISHU_CONNECTION_MODE?.trim().toLowerCase() === "webhook" ? "webhook" : "websocket",
@@ -165,11 +198,12 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): RuntimeEnv {
     opencodeBaseUrl: merged.VINKOCLAW_OPENCODE_BASE_URL ?? "https://open.bigmodel.cn/api/paas/v4",
     opencodeApiKey: merged.OPENCODE_API_KEY ?? merged.OPENCODE_ZEN_API_KEY ?? "",
     zhipuApiKey: merged.ZHIPUAI_API_KEY ?? "",
-    openaiApiKey: merged.OPENAI_API_KEY ?? "",
     anthropicApiKey: merged.ANTHROPIC_API_KEY ?? "",
     searchProvider: merged.SEARCH_PROVIDER ?? "",
     tavilyApiKey: merged.TAVILY_API_KEY ?? "",
-    serpApiKey: merged.SERPAPI_API_KEY ?? ""
+    serpApiKey: merged.SERPAPI_API_KEY ?? "",
+    aiStudioApiKey: merged.AI_STUDIO_API_KEY ?? "",
+    aiStudioBaseUrl: merged.AI_STUDIO_BASE_URL ?? "https://aistudio.baidu.com/llm/lmapi/v3"
   };
 }
 

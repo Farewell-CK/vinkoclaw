@@ -2,7 +2,17 @@ import { spawn } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { AgentRuntime, type RuntimeExecutionInput, type TaskContextSnippet, globalTelemetry, initGlobalTelemetry, TelemetryCollector } from "@vinko/agent-runtime";
+import {
+  AgentRuntime,
+  buildRuntimeCapabilitySnapshot,
+  createDefaultRulesEngine,
+  createToolBackedRegistry,
+  type RuntimeExecutionInput,
+  type TaskContextSnippet,
+  globalTelemetry,
+  initGlobalTelemetry,
+  TelemetryCollector
+} from "@vinko/agent-runtime";
 import { buildWorkDir } from "@vinko/agent-runtime/tool-executor";
 import { FeishuClient, buildTaskCompletedCard, buildTaskFailedCard, buildTaskPausedCard, buildLightReviewQueuedCard, buildLightIterationQueuedCard, buildEscalationCard } from "@vinko/feishu-gateway";
 import { WorkspaceKnowledgeBase } from "@vinko/knowledge-base";
@@ -18,6 +28,8 @@ import {
   getSkillDefinition,
   hasMeaningfulToolProgress,
   parseSearchMaxResults,
+  extractArtifactFilesFromText as extractProjectMemoryArtifactFilesFromText,
+  collectProjectMemoryArtifactsFromTask,
   createOrchestrationState,
   mergeOrchestrationState,
   normalizeOrchestrationState,
@@ -33,6 +45,7 @@ import {
   ROLE_IDS,
   selectAvailableProviders,
   shouldUseCodeExecutorTask,
+  syncSessionProjectMemoryFromTask,
   AgentCollaborationService,
   VinkoStore,
   type GoalRunRecord,
@@ -2286,6 +2299,9 @@ async function processNormalTask(
     secrets: runtimeSecrets,
     searchProvider
   };
+  const toolRegistry = createToolBackedRegistry(toolContext);
+  const rulesEngine = createDefaultRulesEngine();
+  const runtimeCapabilitySnapshot = buildRuntimeCapabilitySnapshot(toolRegistry);
 
   const runtimeExecuteInput: RuntimeExecutionInput = {
     task: runtimeTask,
@@ -2293,6 +2309,8 @@ async function processNormalTask(
     skills,
     snippets: [...runtimeSnippets, ...sessionSnippets, ...webSearchSnippets, ...snippets],
     toolContext,
+    toolRegistry,
+    rulesEngine,
     conversationHistory,
     preExecutePlan: !task.pendingInput && !shouldFounderWorkflowBypassNeedsInput(task),
     telemetry: initGlobalTelemetry(telemetryDb),
@@ -2406,9 +2424,9 @@ async function processNormalTask(
       toolChangedFiles: output.artifactFiles,
       runtimeBackendUsed: output.backendUsed,
       runtimeModelUsed: output.modelUsed,
-      runtimeToolLoopEnabled: true,
-      runtimeToolRegistry: "default",
-      runtimeRulesEngine: "default",
+      runtimeToolLoopEnabled: runtimeCapabilitySnapshot.totalEnabled > 0,
+      runtimeToolRegistry: `${runtimeCapabilitySnapshot.registryMode}:${runtimeCapabilitySnapshot.totalEnabled}/${runtimeCapabilitySnapshot.totalRegistered}`,
+      runtimeRulesEngine: `default:${rulesEngine.listRules().length}`,
       deliverableMode,
       deliverableContractViolated: false
     });
@@ -2416,9 +2434,9 @@ async function processNormalTask(
     store.patchTaskMetadata(effectiveTask.id, {
       runtimeBackendUsed: output.backendUsed,
       runtimeModelUsed: output.modelUsed,
-      runtimeToolLoopEnabled: true,
-      runtimeToolRegistry: "default",
-      runtimeRulesEngine: "default",
+      runtimeToolLoopEnabled: runtimeCapabilitySnapshot.totalEnabled > 0,
+      runtimeToolRegistry: `${runtimeCapabilitySnapshot.registryMode}:${runtimeCapabilitySnapshot.totalEnabled}/${runtimeCapabilitySnapshot.totalRegistered}`,
+      runtimeRulesEngine: `default:${rulesEngine.listRules().length}`,
       deliverableMode,
       deliverableContractViolated: false
     });
@@ -2803,49 +2821,6 @@ function contextBoolean(context: Record<string, unknown>, key: string): boolean 
   return undefined;
 }
 
-function normalizeArtifactPath(input: string): string | undefined {
-  let candidate = input.trim();
-  if (!candidate) {
-    return undefined;
-  }
-  candidate = candidate.replace(/^[`"'()[\]{}<]+|[`"',;()[\]{}>]+$/g, "").trim();
-  if (!candidate) {
-    return undefined;
-  }
-  if (/^(?:https?:\/\/|data:|mailto:|tel:)/i.test(candidate)) {
-    return undefined;
-  }
-  candidate = candidate.replaceAll("\\", "/");
-  if (candidate.startsWith("-")) {
-    return undefined;
-  }
-  if (path.isAbsolute(candidate)) {
-    const normalizedAbsolute = path.normalize(candidate);
-    const normalizedRoot = path.normalize(env.workspaceRoot);
-    if (!normalizedAbsolute.startsWith(normalizedRoot)) {
-      return undefined;
-    }
-    candidate = path.relative(env.workspaceRoot, normalizedAbsolute);
-  }
-  candidate = candidate.replace(/^\.\//, "").trim();
-  if (!candidate || candidate.startsWith("../")) {
-    return undefined;
-  }
-  const ext = path.extname(candidate).toLowerCase();
-  if (!ARTIFACT_FILE_EXTENSIONS.has(ext)) {
-    return undefined;
-  }
-  const normalized = path.normalize(candidate).replaceAll(path.sep, "/");
-  if (!normalized || normalized.startsWith("../")) {
-    return undefined;
-  }
-  const [topLevelDir] = normalized.split("/", 1);
-  if (topLevelDir && ARTIFACT_SCAN_IGNORED_DIRS.has(topLevelDir)) {
-    return undefined;
-  }
-  return normalized;
-}
-
 function dedupeSortedStrings(values: string[]): string[] {
   return Array.from(
     new Set(
@@ -2874,29 +2849,7 @@ function normalizeGoalRunHandoffNextActions(values: string[]): string[] {
 }
 
 export function extractArtifactFilesFromText(text: string): string[] {
-  if (!text.trim()) {
-    return [];
-  }
-  const found: string[] = [];
-  const changedFilesPattern = /CHANGED_FILES\s*:\s*([^\n]+)/gi;
-  for (const match of text.matchAll(changedFilesPattern)) {
-    const group = match[1] ?? "";
-    const pieces = group.split(/[,\s]+/);
-    for (const piece of pieces) {
-      const normalized = normalizeArtifactPath(piece);
-      if (normalized) {
-        found.push(normalized);
-      }
-    }
-  }
-  const genericPathPattern = /(?:^|[\s`"'(])((?:\.{0,2}\/)?(?:[\w.-]+\/)*[\w.-]+\.[a-zA-Z0-9]{1,8})(?=$|[\s`"'),:;])/g;
-  for (const match of text.matchAll(genericPathPattern)) {
-    const normalized = normalizeArtifactPath(match[1] ?? "");
-    if (normalized) {
-      found.push(normalized);
-    }
-  }
-  return dedupeSortedStrings(found);
+  return extractProjectMemoryArtifactFilesFromText(text, { workspaceRoot: env.workspaceRoot });
 }
 
 function normalizeRoleId(value: string | undefined): RoleId | undefined {
@@ -2930,44 +2883,9 @@ function inferRequiredRolesFromObjective(objective: string): RoleId[] {
 }
 
 function collectTaskArtifactFiles(task: TaskRecord): string[] {
-  const metadata = task.metadata as {
-    toolChangedFiles?: unknown;
-  };
-  const metadataFilesRaw = metadata.toolChangedFiles;
-  const metadataFiles = Array.isArray(metadataFilesRaw)
-    ? metadataFilesRaw
-        .filter((item): item is string => typeof item === "string")
-        .flatMap((item) => extractArtifactFilesFromText(item))
-    : typeof metadataFilesRaw === "string"
-      ? extractArtifactFilesFromText(metadataFilesRaw)
-      : [];
-  const resultFiles = extractArtifactFilesFromText(
-    [task.result?.summary ?? "", task.result?.deliverable ?? ""].filter(Boolean).join("\n")
-  );
-  const toolRunFiles = store
-    .listToolRunsByTask(task.id)
-    .flatMap((toolRun) => extractArtifactFilesFromText([toolRun.outputText ?? "", toolRun.errorText ?? ""].join("\n")));
-  return dedupeSortedStrings([...metadataFiles, ...resultFiles, ...toolRunFiles]);
-}
-
-function toProjectMemorySummary(text: string): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) {
-    return "";
-  }
-  return normalized.length <= 240 ? normalized : `${normalized.slice(0, 239)}…`;
-}
-
-function extractProjectMemoryDecisions(task: TaskRecord): string[] {
-  const result = task.result;
-  if (!result) {
-    return [];
-  }
-  const candidates = [
-    result.summary,
-    ...result.followUps.map((item) => `后续动作：${item}`)
-  ];
-  return dedupeSortedStrings(candidates.map((item) => toProjectMemorySummary(item)).filter(Boolean)).slice(0, 6);
+  return collectProjectMemoryArtifactsFromTask(task, store.listToolRunsByTask(task.id), {
+    workspaceRoot: env.workspaceRoot
+  });
 }
 
 function updateSessionProjectMemoryFromTask(task: TaskRecord, patch?: {
@@ -2975,46 +2893,14 @@ function updateSessionProjectMemoryFromTask(task: TaskRecord, patch?: {
   unresolvedQuestions?: string[] | undefined;
   nextActions?: string[] | undefined;
   latestSummary?: string | undefined;
+  latestArtifacts?: string[] | undefined;
+  orchestrationMode?: "main_agent" | undefined;
+  orchestrationOwnerRoleId?: RoleId | undefined;
+  orchestrationVerificationStatus?: "pending" | "verified" | "failed" | undefined;
 }): void {
-  if (!task.sessionId) {
-    return;
-  }
-  const artifacts = collectTaskArtifactFiles(task).slice(0, 12);
-  const result = task.result;
-  const stage =
-    patch?.currentStage ??
-    (task.status === "completed" ? "delivered" : task.status === "failed" || task.status === "cancelled" ? "blocked" : "executing");
-  const latestSummary =
-    patch?.latestSummary ??
-    (task.status === "completed"
-      ? toProjectMemorySummary(result?.summary ?? result?.deliverable ?? "")
-      : toProjectMemorySummary(task.errorText ?? ""));
-  const nextActions =
-    patch?.nextActions ??
-    (task.status === "completed" ? (result?.followUps ?? []).slice(0, 6) : []);
-  const unresolvedQuestions =
-    patch?.unresolvedQuestions ??
-    (task.status === "failed" || task.status === "cancelled" ? [task.errorText ?? "任务受阻"] : []);
-
-  store.updateSessionProjectMemory(
-    task.sessionId,
-    {
-      currentGoal: task.title,
-      currentStage: stage,
-      latestSummary,
-      keyDecisions: extractProjectMemoryDecisions(task),
-      unresolvedQuestions,
-      nextActions,
-      latestArtifacts: artifacts,
-      lastTaskId: task.id,
-      updatedBy: task.roleId
-    },
-    {
-      lastTaskId: task.id,
-      lastTaskStatus: task.status,
-      lastTaskRoleId: task.roleId
-    }
-  );
+  syncSessionProjectMemoryFromTask(store, task, patch, {
+    workspaceRoot: env.workspaceRoot
+  });
 }
 
 export function resolveSkillIntegrationCompletion(task: TaskRecord): {

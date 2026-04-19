@@ -21,6 +21,7 @@ export type SkillScope = (typeof SKILL_SCOPES)[number];
 export const TASK_STATUSES = [
   "queued",
   "running",
+  "paused_input",
   "waiting_approval",
   "completed",
   "failed",
@@ -49,6 +50,114 @@ export type TaskSource = "control-center" | "feishu" | "email" | "system";
 export type SessionSource = TaskSource;
 
 export type MemoryBackend = "none" | "sqlite" | "vector-db";
+export const DELIVERABLE_MODES = ["answer_only", "artifact_preferred", "artifact_required"] as const;
+export type DeliverableMode = (typeof DELIVERABLE_MODES)[number];
+
+export interface ProjectMemoryRecord {
+  version: 1;
+  currentGoal: string;
+  currentStage: string;
+  latestUserRequest: string;
+  latestSummary: string;
+  keyDecisions: string[];
+  unresolvedQuestions: string[];
+  nextActions: string[];
+  latestArtifacts: string[];
+  updatedAt: string;
+  updatedBy: string;
+  lastTaskId?: string | undefined;
+  orchestrationMode?: "main_agent" | undefined;
+  orchestrationOwnerRoleId?: RoleId | undefined;
+  orchestrationVerificationStatus?: "pending" | "verified" | "failed" | undefined;
+}
+
+
+export interface ProjectMemoryUpdate {
+  currentGoal?: string | undefined;
+  currentStage?: string | undefined;
+  latestUserRequest?: string | undefined;
+  latestSummary?: string | undefined;
+  keyDecisions?: string[] | undefined;
+  unresolvedQuestions?: string[] | undefined;
+  nextActions?: string[] | undefined;
+  latestArtifacts?: string[] | undefined;
+  updatedAt?: string | undefined;
+  updatedBy?: string | undefined;
+  lastTaskId?: string | undefined;
+  orchestrationMode?: "main_agent" | undefined;
+  orchestrationOwnerRoleId?: RoleId | undefined;
+  orchestrationVerificationStatus?: "pending" | "verified" | "failed" | undefined;
+}
+
+export interface ProjectBoardSummary {
+  activeProjects: number;
+  blockedTasks: number;
+  awaitingInputTasks: number;
+  recentArtifacts: number;
+  readyRoles: number;
+  verificationDebtRoles: number;
+  failedSkills: number;
+}
+
+export interface ProjectBoardPrimaryView {
+  sessionId: string;
+  sessionTitle: string;
+  source: SessionSource;
+  updatedAt: string;
+  currentGoal: string;
+  currentStage: string;
+  latestUserRequest: string;
+  latestSummary: string;
+  keyDecisions: string[];
+  unresolvedQuestions: string[];
+  nextActions: string[];
+  latestArtifacts: string[];
+  lastTaskId?: string | undefined;
+  orchestrationMode?: "main_agent" | undefined;
+  orchestrationOwnerRoleId?: RoleId | undefined;
+  orchestrationVerificationStatus?: "pending" | "verified" | "failed" | undefined;
+}
+
+export interface ProjectBoardRoleReadiness {
+  roleId: RoleId;
+  roleName: string;
+  responsibility: string;
+  totalSkills: number;
+  verifiedSkills: number;
+  unverifiedSkills: number;
+  failedSkills: number;
+  ready: boolean;
+  highlightedSkills: string[];
+}
+
+export interface ProjectBoardWorkstream {
+  sessionId: string;
+  sessionTitle: string;
+  source: SessionSource;
+  updatedAt: string;
+  currentGoal: string;
+  currentStage: string;
+  latestSummary: string;
+  unresolvedQuestions: string[];
+  nextActions: string[];
+  latestArtifacts: string[];
+  orchestrationMode?: "main_agent" | undefined;
+  orchestrationOwnerRoleId?: RoleId | undefined;
+  orchestrationVerificationStatus?: "pending" | "verified" | "failed" | undefined;
+}
+
+
+export interface ProjectBoardSnapshot {
+  generatedAt: string;
+  summary: ProjectBoardSummary;
+  primary: ProjectBoardPrimaryView | null;
+  blockers: string[];
+  pendingDecisions: string[];
+  nextActions: string[];
+  latestArtifacts: string[];
+  teamReadiness: ProjectBoardRoleReadiness[];
+  workstreams: ProjectBoardWorkstream[];
+}
 
 export interface ReflectionNote {
   score: number;
@@ -82,6 +191,19 @@ export interface TaskMetadata {
   [key: string]: unknown;
 }
 
+export interface StageHandoffArtifact {
+  stage: GoalRunStage;
+  taskId?: string | undefined;
+  taskTraceId?: string | undefined;
+  summary: string;
+  artifacts: string[];
+  decisions: string[];
+  unresolvedQuestions: string[];
+  nextActions: string[];
+  approvalNeeds: string[];
+  createdAt: string;
+}
+
 export interface TaskRecord {
   id: string;
   sessionId?: string | undefined;
@@ -101,6 +223,12 @@ export interface TaskRecord {
   result?: TaskResult | undefined;
   reflection?: ReflectionNote | undefined;
   errorText?: string | undefined;
+  /** Set when the task is paused awaiting user input. The worker detected that it needs more info. */
+  pendingInput?: {
+    question: string;
+    pausedAt: string;
+    context?: string | undefined;
+  } | undefined;
 }
 
 export interface CreateTaskInput {
@@ -267,14 +395,58 @@ export interface SkillDefinition {
   aliases: string[];
 }
 
+export interface SkillMarketplaceEntry {
+  id: string;
+  skillId: string;
+  name: string;
+  description: string;
+  summary: string;
+  allowedRoles: RoleId[];
+  aliases: string[];
+  tags: string[];
+  source: "catalog" | "remote";
+  sourceLabel?: string | undefined;
+  sourceUrl?: string | undefined;
+  version?: string | undefined;
+  runtimeAvailable: boolean;
+  installState: "local_installable" | "discover_only";
+  installable: boolean;
+}
+
+export interface MarketplaceRoleBindingState {
+  installed: boolean;
+  verificationStatus?: SkillBindingRecord["verificationStatus"] | "";
+  installedAt?: string | undefined;
+  verifiedAt?: string | undefined;
+}
+
+export interface MarketplaceRecommendation {
+  score: number;
+  state:
+    | "ready_verified"
+    | "ready_unverified"
+    | "ready_failed"
+    | "install_recommended"
+    | "integration_required";
+  label: string;
+}
+
 export interface SkillBindingRecord {
   id: string;
   scope: SkillScope;
   scopeId: string;
   skillId: string;
   status: "enabled" | "disabled";
+  verificationStatus?: "unverified" | "verified" | "failed" | undefined;
   config: Record<string, unknown>;
   installedBy?: string | undefined;
+  installedAt?: string | undefined;
+  verifiedAt?: string | undefined;
+  lastVerifiedTaskId?: string | undefined;
+  source?: string | undefined;
+  sourceLabel?: string | undefined;
+  sourceUrl?: string | undefined;
+  version?: string | undefined;
   createdAt: string;
   updatedAt: string;
 }
@@ -362,8 +534,8 @@ export interface RuntimeConfig {
     roleBackends: Partial<Record<RoleId, MemoryBackend>>;
   };
   routing: {
-    primaryBackend: "sglang" | "ollama" | "zhipu";
-    fallbackBackend: "ollama" | "sglang" | "zhipu";
+    primaryBackend: "sglang" | "ollama" | "zhipu" | "openai";
+    fallbackBackend: "ollama" | "sglang" | "zhipu" | "openai";
   };
   channels: {
     feishuEnabled: boolean;
@@ -416,6 +588,8 @@ export interface RoutingTaskTemplate {
   roleId: RoleId;
   titleTemplate: string;
   instructionTemplate: string;
+  deliverableMode?: DeliverableMode | undefined;
+  deliverableSections?: string[] | undefined;
   priority?: number | undefined;
 }
 
@@ -568,6 +742,36 @@ export interface GoalRunTimelineEventRecord {
   message: string;
   payload: Record<string, unknown>;
   createdAt: string;
+}
+
+export interface GoalRunTraceRecord {
+  id: string;
+  goalRunId: string;
+  stage: GoalRunStage;
+  status: "started" | "completed" | "failed" | "awaiting_input" | "awaiting_authorization" | "resumed";
+  taskId?: string | undefined;
+  taskTraceId?: string | undefined;
+  inputSummary: string;
+  outputSummary: string;
+  artifactFiles: string[];
+  completedRoles: RoleId[];
+  failedRoles: RoleId[];
+  approvalGateHits: number;
+  failureCategory?: string | undefined;
+  handoffArtifactId?: string | undefined;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface GoalRunHarnessGradeRecord {
+  suite: string;
+  grade: "pass" | "warn" | "fail" | "unknown";
+  failedInvariant?: string | undefined;
+  traceSummary?: string | undefined;
+  handoffCoverage?: number | undefined;
+  approvalCoverage?: number | undefined;
+  resumeCoverage?: number | undefined;
+  generatedAt: string;
 }
 
 export interface GoalRunInputRecord {
@@ -782,10 +986,14 @@ export type AgentMessageType =
   | "final_report";
 
 export type CollaborationPhase =
+  | "classify"
   | "assignment"
   | "execution"
   | "discussion"
+  | "converge"
   | "aggregation"
+  | "verify"
+  | "await_user"
   | "completed";
 
 export interface AgentMessage {
@@ -839,6 +1047,23 @@ export interface CollaborationConfig {
   pushIntermediateResults: boolean;
   autoAggregateOnComplete: boolean;
   aggregateTimeoutMs: number;
+}
+
+export type CollaborationLevel = "none" | "light" | "standard" | "full";
+
+export interface CollaborationPlan {
+  level: CollaborationLevel;
+  complexity: "trivial" | "simple" | "moderate" | "complex";
+  risk: "low" | "medium" | "high";
+  suggestedReviewers: RoleId[];
+  rationale: string;
+}
+
+export interface QualityAssessment {
+  score: number;
+  passesThreshold: boolean;
+  issues: string[];
+  recommendation: "approve" | "revise" | "escalate";
 }
 
 export interface CreateAgentCollaborationInput {
