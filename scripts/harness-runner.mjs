@@ -25,6 +25,11 @@ const SUITES = {
     command: ["npm", "run", "self-check:founder-ops"],
     budgetMs: 5 * 60_000
   },
+  "founder-ops-recurring": {
+    label: "Founder Ops Recurring",
+    command: ["npm", "run", "self-check:founder-ops-recurring"],
+    budgetMs: 5 * 60_000
+  },
   "founder-research": {
     label: "Founder Research Report",
     command: ["npm", "run", "self-check:founder-research"],

@@ -1347,18 +1347,44 @@ function normalizeRoutingTemplateBody(
 
 function selectRoutingTemplate(text: string, templates: RoutingTemplate[]): RoutingTemplate | undefined {
   const normalizedText = text.toLowerCase();
-  return templates
+  const ranked = templates
     .filter((template) => template.enabled)
-    .find((template) => {
+    .map((template) => {
       const keywords = normalizeKeywords(template.triggerKeywords);
       if (keywords.length === 0) {
-        return false;
+        return undefined;
       }
-
-      return template.matchMode === "all"
-        ? keywords.every((keyword) => normalizedText.includes(keyword))
-        : keywords.some((keyword) => normalizedText.includes(keyword));
+      const matchedKeywords = keywords.filter((keyword) => normalizedText.includes(keyword));
+      const matched =
+        template.matchMode === "all"
+          ? matchedKeywords.length === keywords.length
+          : matchedKeywords.length > 0;
+      if (!matched) {
+        return undefined;
+      }
+      return {
+        template,
+        matchedCount: matchedKeywords.length,
+        longestKeywordLength: matchedKeywords.reduce((max, keyword) => Math.max(max, keyword.length), 0),
+        totalKeywordLength: matchedKeywords.reduce((sum, keyword) => sum + keyword.length, 0)
+      };
+    })
+    .filter((entry): entry is {
+      template: RoutingTemplate;
+      matchedCount: number;
+      longestKeywordLength: number;
+      totalKeywordLength: number;
+    } => Boolean(entry))
+    .sort((left, right) => {
+      if (right.matchedCount !== left.matchedCount) {
+        return right.matchedCount - left.matchedCount;
+      }
+      if (right.longestKeywordLength !== left.longestKeywordLength) {
+        return right.longestKeywordLength - left.longestKeywordLength;
+      }
+      return right.totalKeywordLength - left.totalKeywordLength;
     });
+  return ranked[0]?.template;
 }
 
 function normalizeAttachments(value: unknown): TaskAttachment[] {

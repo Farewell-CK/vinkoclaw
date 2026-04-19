@@ -397,6 +397,7 @@ describe("VinkoStore operator actions", () => {
     expect(defaults.some((template) => template.id === "tpl-founder-research-report")).toBe(true);
     expect(defaults.some((template) => template.id === "tpl-founder-weekly-recap")).toBe(true);
     expect(defaults.some((template) => template.id === "tpl-founder-ops-followup")).toBe(true);
+    expect(defaults.some((template) => template.id === "tpl-founder-ops-recurring")).toBe(true);
     expect(defaults.some((template) => template.id === "tpl-founder-implementation-task")).toBe(true);
     expect(defaults.some((template) => template.id === "tpl-skill-runtime-integration")).toBe(true);
     expect(defaults.some((template) => template.id === "tpl-skill-smoke-verify")).toBe(true);
@@ -425,6 +426,14 @@ describe("VinkoStore operator actions", () => {
       "核心流程",
       "需求范围",
       "验收标准",
+      "风险",
+      "下一步"
+    ]);
+    expect(defaults.find((template) => template.id === "tpl-founder-ops-recurring")?.tasks[0]?.deliverableSections).toEqual([
+      "周期与触发规则",
+      "本轮待办",
+      "责任归属",
+      "完成信号",
       "风险",
       "下一步"
     ]);

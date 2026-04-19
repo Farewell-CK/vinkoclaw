@@ -61,6 +61,7 @@ const RESEARCH_KEYWORDS = [
   "how to"
 ] as const;
 const CTO_KEYWORDS = ["架构", "roadmap", "cto", "技术"] as const;
+const OPERATIONS_RECURRING_KEYWORDS = ["周期性", "每周", "每天", "每月", "定期", "例行", "周期提醒", "daily", "weekly", "recurring"] as const;
 const OPERATIONS_KEYWORDS = [
   "运营",
   "邮件",
@@ -117,6 +118,13 @@ export function selectRoleFromText(text: string): RoleId {
 
   if (includesAny(normalized, BACKEND_KEYWORDS)) {
     return "backend";
+  }
+
+  if (
+    includesAny(normalized, OPERATIONS_RECURRING_KEYWORDS) &&
+    includesAny(normalized, ["运营", "用户", "客户", "反馈", "线索", "转化", "增长", "ops", "follow-up", "follow up"])
+  ) {
+    return "operations";
   }
 
   if (includesAny(normalized, PRODUCT_KEYWORDS)) {

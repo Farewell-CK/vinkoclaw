@@ -455,6 +455,27 @@ function defaultRoutingTemplates(): RoutingTemplate[] {
       updatedAt: timestamp
     },
     {
+      id: "tpl-founder-ops-recurring",
+      name: "Founder Ops Recurring",
+      description: "将创始人的周期性提醒、例行跟进和重复运营动作整理成周期执行清单。",
+      triggerKeywords: ["周期性", "每周", "每天", "每天提醒", "每周提醒", "周期提醒", "定期跟进", "daily reminder", "weekly follow up", "recurring"],
+      matchMode: "any",
+      enabled: true,
+      tasks: [
+        {
+          roleId: "operations",
+          titleTemplate: "周期运营清单: {{input_short}}",
+          instructionTemplate:
+            "请将以下创始人请求整理为周期执行的运营清单，明确周期/触发规则、本轮待办、责任归属、完成信号、风险和下一步。原始输入：{{input}}",
+          deliverableMode: "artifact_required",
+          deliverableSections: ["周期与触发规则", "本轮待办", "责任归属", "完成信号", "风险", "下一步"],
+          priority: 87
+        }
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    },
+    {
       id: "tpl-founder-ops-followup",
       name: "Founder Ops Follow-up",
       description: "将创始人的待办、提醒、跟进与后续动作整理成可执行运营清单。",

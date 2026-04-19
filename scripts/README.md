@@ -10,6 +10,7 @@ Development, bootstrap, and deployment scripts live here.
 - `product-selfcheck.mjs`: end-to-end product behavior check (smalltalk fast-path, routing, continue semantics, cancel APIs, stale task/goal-run/approval cleanup).
 - `founder-delivery-selfcheck.mjs`: end-to-end founder delivery workflow check (`PRD -> implementation -> QA -> recap`).
 - `self-check-founder-ops.mjs`: founder ops follow-up workflow check (`ops checklist -> reminders -> ownership`).
+- `self-check-founder-ops-recurring.mjs`: recurring founder ops workflow check (`cadence -> trigger -> checklist -> ownership`).
 - `self-check-founder-research.mjs`: founder research-report workflow check (`structured report -> artifact-required task`).
 - `self-check-founder-recap.mjs`: founder weekly recap workflow check (`completed work -> blockers -> next plan`).
 - `self-check-founder-implementation.mjs`: founder implementation workflow check (`frontend build task + QA verify task`).
@@ -21,6 +22,7 @@ Development, bootstrap, and deployment scripts live here.
   - `npm run harness:product`: writes `.run/harness/product/latest.json`.
   - `npm run harness:founder-delivery`: writes `.run/harness/founder-delivery/latest.json`.
   - `npm run harness:founder-ops`: writes `.run/harness/founder-ops/latest.json`.
+  - `npm run harness:founder-ops-recurring`: writes `.run/harness/founder-ops-recurring/latest.json`.
   - `npm run harness:founder-research`: writes `.run/harness/founder-research/latest.json`.
   - `npm run harness:founder-recap`: writes `.run/harness/founder-recap/latest.json`.
   - `npm run harness:founder-implementation`: writes `.run/harness/founder-implementation/latest.json`.

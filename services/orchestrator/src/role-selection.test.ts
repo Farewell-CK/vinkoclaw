@@ -12,6 +12,11 @@ describe("role-selection", () => {
     expect(selectRoleFromText("输出官网需求文档与里程碑")).toBe("product");
   });
 
+  it("routes recurring ops asks to operations", () => {
+    expect(selectRoleFromText("请整理一份周期性运营执行清单，每周一整理用户反馈")).toBe("operations");
+    expect(selectRoleFromText("weekly recurring growth ops checklist for customer follow-up")).toBe("operations");
+  });
+
   it("respects explicit role directives first", () => {
     expect(selectRoleFromText("请 frontend 同学处理这个需求")).toBe("frontend");
     expect(selectRoleFromText("让产品同学先做拆解")).toBe("product");
