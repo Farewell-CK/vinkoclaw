@@ -49,6 +49,7 @@ function collectLatestReports() {
     "founder-ops-recurring",
     "founder-research",
     "founder-recap",
+    "founder-recap-recurring",
     "founder-implementation",
     "artifact-export",
     "persona",

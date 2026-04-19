@@ -476,6 +476,27 @@ function defaultRoutingTemplates(): RoutingTemplate[] {
       updatedAt: timestamp
     },
     {
+      id: "tpl-founder-recap-recurring",
+      name: "Founder Recap Recurring",
+      description: "将创始人的周期复盘请求整理成固定节奏的复盘执行清单。",
+      triggerKeywords: ["周期复盘", "每周固定复盘", "复盘提醒", "weekly recap reminder", "weekly recurring recap", "weekly review reminder"],
+      matchMode: "any",
+      enabled: true,
+      tasks: [
+        {
+          roleId: "operations",
+          titleTemplate: "周期复盘清单: {{input_short}}",
+          instructionTemplate:
+            "请将以下创始人请求整理为周期执行的复盘清单，明确周期/触发规则、本轮输入项、输出结构、责任归属、完成信号和下一步。原始输入：{{input}}",
+          deliverableMode: "artifact_required",
+          deliverableSections: ["周期与触发规则", "本轮输入项", "输出结构", "责任归属", "完成信号", "下一步"],
+          priority: 87
+        }
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    },
+    {
       id: "tpl-founder-ops-followup",
       name: "Founder Ops Follow-up",
       description: "将创始人的待办、提醒、跟进与后续动作整理成可执行运营清单。",

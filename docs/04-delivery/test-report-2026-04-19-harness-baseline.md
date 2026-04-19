@@ -1,10 +1,10 @@
 # Test Report 2026-04-19
 
-Generated at: 2026-04-19T11:17:08.270Z
+Generated at: 2026-04-19T11:40:43.301Z
 
 ## Summary
 
-- Pass: 11
+- Pass: 12
 - Warn: 0
 - Fail: 0
 
@@ -18,8 +18,9 @@ Generated at: 2026-04-19T11:17:08.270Z
 | founder-ops-recurring | Founder Ops Recurring | pass | pass | 14788 | 2026-04-19T11:10:32.667Z |
 | founder-research | Founder Research Report | pass | pass | 2667 | 2026-04-17T09:50:53.548Z |
 | founder-recap | Founder Weekly Recap | pass | pass | 2215 | 2026-04-17T10:02:03.386Z |
+| founder-recap-recurring | Founder Recap Recurring | pass | pass | 2152 | 2026-04-19T11:40:31.702Z |
 | founder-implementation | Founder Implementation Task | pass | pass | 14994 | 2026-04-17T10:06:02.637Z |
-| artifact-export | Artifact Export Self Check | pass | pass | 118894 | 2026-04-19T11:16:40.586Z |
+| artifact-export | Artifact Export Self Check | pass | pass | 117352 | 2026-04-19T11:30:13.210Z |
 | persona | Persona Test | pass | pass | 25375 | 2026-04-17T09:36:01.201Z |
 | collaboration | Collaboration Self Check | pass | pass | 13858 | 2026-04-17T08:17:09.723Z |
 | skill-lifecycle | Skill Lifecycle Self Check | pass | pass | 1928 | 2026-04-17T08:17:20.258Z |
@@ -62,6 +63,12 @@ Generated at: 2026-04-19T11:17:08.270Z
 - Grade: pass
 - Detail: template=tpl-founder-weekly-recap, task=c8a85cf9-d4e5-46e7-8417-b627b70599b1, status=queued
 
+### founder-recap-recurring
+
+- Status: pass
+- Grade: pass
+- Detail: template=tpl-founder-recap-recurring, task=a648dcec-9bb5-48e3-a13f-46cd150a0946, status=queued
+
 ### founder-implementation
 
 - Status: pass
@@ -72,7 +79,7 @@ Generated at: 2026-04-19T11:17:08.270Z
 
 - Status: pass
 - Grade: pass
-- Detail: .vinkoclaw/tasks/1f902b91-91a0-4e6a-867f-267c485fe91d/ai-agent-markdown-research.html, .vinkoclaw/tasks/1f902b91-91a0-4e6a-867f-267c485fe91d/ai-agent-markdown-research.md, projects/ai-agent-comparison/docs/ai-agent-tools-comparison-report.md | csv=false
+- Detail: .vinkoclaw/tasks/43aacee3-cccf-45c5-bdec-ea5a9e489d00/ai-agent-markdown-research.doc, .vinkoclaw/tasks/43aacee3-cccf-45c5-bdec-ea5a9e489d00/ai-agent-markdown-research.html, .vinkoclaw/tasks/43aacee3-cccf-45c5-bdec-ea5a9e489d00/ai-agent-markdown-research.md, projects/ai-agent-comparison/docs/ai-agent-tools-comparison.md | csv=false
 
 ### persona
 

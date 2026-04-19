@@ -13,6 +13,7 @@ Development, bootstrap, and deployment scripts live here.
 - `self-check-founder-ops-recurring.mjs`: recurring founder ops workflow check (`cadence -> trigger -> checklist -> ownership`).
 - `self-check-founder-research.mjs`: founder research-report workflow check (`structured report -> artifact-required task`).
 - `self-check-founder-recap.mjs`: founder weekly recap workflow check (`completed work -> blockers -> next plan`).
+- `self-check-founder-recap-recurring.mjs`: recurring founder recap workflow check (`cadence -> recap inputs -> recap structure -> ownership`).
 - `self-check-founder-implementation.mjs`: founder implementation workflow check (`frontend build task + QA verify task`).
 - `self-check-artifact-export.mjs`: artifact export check (`markdown artifact -> html/csv companion files`).
 - `self-check-collaboration.mjs`: collaboration-focused self-check for execute-stage real collaboration creation.
@@ -25,6 +26,7 @@ Development, bootstrap, and deployment scripts live here.
   - `npm run harness:founder-ops-recurring`: writes `.run/harness/founder-ops-recurring/latest.json`.
   - `npm run harness:founder-research`: writes `.run/harness/founder-research/latest.json`.
   - `npm run harness:founder-recap`: writes `.run/harness/founder-recap/latest.json`.
+  - `npm run harness:founder-recap-recurring`: writes `.run/harness/founder-recap-recurring/latest.json`.
   - `npm run harness:founder-implementation`: writes `.run/harness/founder-implementation/latest.json`.
   - `npm run harness:artifact-export`: writes `.run/harness/artifact-export/latest.json`.
   - `npm run harness:collaboration`: writes `.run/harness/collaboration/latest.json`.

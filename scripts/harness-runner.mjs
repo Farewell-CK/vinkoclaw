@@ -40,6 +40,11 @@ const SUITES = {
     command: ["npm", "run", "self-check:founder-recap"],
     budgetMs: 5 * 60_000
   },
+  "founder-recap-recurring": {
+    label: "Founder Recap Recurring",
+    command: ["npm", "run", "self-check:founder-recap-recurring"],
+    budgetMs: 5 * 60_000
+  },
   "founder-implementation": {
     label: "Founder Implementation Task",
     command: ["npm", "run", "self-check:founder-implementation"],
