@@ -196,6 +196,10 @@ export function buildCompanionArtifacts(input: {
     {
       relativePath: `${basePath}.html`,
       content: renderMarkdownToHtml(input.content, input.title)
+    },
+    {
+      relativePath: `${basePath}.doc`,
+      content: renderMarkdownToHtml(input.content, input.title)
     }
   ];
 

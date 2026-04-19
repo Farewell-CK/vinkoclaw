@@ -11,6 +11,7 @@ describe("buildCompanionArtifacts", () => {
     });
 
     expect(artifacts.map((item) => item.relativePath)).toContain(".vinkoclaw/tasks/123/report.html");
+    expect(artifacts.map((item) => item.relativePath)).toContain(".vinkoclaw/tasks/123/report.doc");
     expect(artifacts[0]?.content).toContain("<h1>标题</h1>");
     expect(artifacts[0]?.content).toContain("<li>第一项</li>");
   });
