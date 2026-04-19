@@ -52,6 +52,7 @@ function collectLatestReports() {
     "founder-recap",
     "founder-recap-recurring",
     "founder-implementation",
+    "founder-bugfix",
     "artifact-export",
     "persona",
     "collaboration",

@@ -401,6 +401,7 @@ describe("VinkoStore operator actions", () => {
     expect(defaults.some((template) => template.id === "tpl-founder-ops-recurring")).toBe(true);
     expect(defaults.some((template) => template.id === "tpl-founder-recap-recurring")).toBe(true);
     expect(defaults.some((template) => template.id === "tpl-founder-implementation-task")).toBe(true);
+    expect(defaults.some((template) => template.id === "tpl-founder-bugfix-followup")).toBe(true);
     expect(defaults.some((template) => template.id === "tpl-skill-runtime-integration")).toBe(true);
     expect(defaults.some((template) => template.id === "tpl-skill-smoke-verify")).toBe(true);
     expect(defaults.find((template) => template.id === "tpl-founder-prd")?.tasks[0]?.deliverableMode).toBe(
@@ -454,6 +455,13 @@ describe("VinkoStore operator actions", () => {
       "输出结构",
       "完成信号",
       "建议动作"
+    ]);
+    expect(defaults.find((template) => template.id === "tpl-founder-bugfix-followup")?.tasks[0]?.deliverableSections).toEqual([
+      "问题现象",
+      "修复方案",
+      "代码变更",
+      "验证结果",
+      "剩余风险"
     ]);
 
     const created = store.createRoutingTemplate({

@@ -55,6 +55,11 @@ const SUITES = {
     command: ["npm", "run", "self-check:founder-implementation"],
     budgetMs: 5 * 60_000
   },
+  "founder-bugfix": {
+    label: "Founder Bugfix Follow-up",
+    command: ["npm", "run", "self-check:founder-bugfix"],
+    budgetMs: 5 * 60_000
+  },
   "artifact-export": {
     label: "Artifact Export Self Check",
     command: ["npm", "run", "self-check:artifact-export"],

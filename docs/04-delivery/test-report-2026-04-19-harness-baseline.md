@@ -1,10 +1,10 @@
 # Test Report 2026-04-19
 
-Generated at: 2026-04-19T11:45:41.381Z
+Generated at: 2026-04-19T11:53:33.806Z
 
 ## Summary
 
-- Pass: 13
+- Pass: 14
 - Warn: 0
 - Fail: 0
 
@@ -21,6 +21,7 @@ Generated at: 2026-04-19T11:45:41.381Z
 | founder-recap | Founder Weekly Recap | pass | pass | 2215 | 2026-04-17T10:02:03.386Z |
 | founder-recap-recurring | Founder Recap Recurring | pass | pass | 2152 | 2026-04-19T11:40:31.702Z |
 | founder-implementation | Founder Implementation Task | pass | pass | 14994 | 2026-04-17T10:06:02.637Z |
+| founder-bugfix | Founder Bugfix Follow-up | pass | pass | 2683 | 2026-04-19T11:53:20.615Z |
 | artifact-export | Artifact Export Self Check | pass | pass | 117352 | 2026-04-19T11:30:13.210Z |
 | persona | Persona Test | pass | pass | 25375 | 2026-04-17T09:36:01.201Z |
 | collaboration | Collaboration Self Check | pass | pass | 13858 | 2026-04-17T08:17:09.723Z |
@@ -81,6 +82,12 @@ Generated at: 2026-04-19T11:45:41.381Z
 - Status: pass
 - Grade: pass
 - Detail: task=48e02924-3618-450e-aaf5-e4024a92437f, role=frontend, status=queued, lightCollaboration=true
+
+### founder-bugfix
+
+- Status: pass
+- Grade: pass
+- Detail: template=tpl-founder-bugfix-followup, task=a17b207f-a037-4933-928c-6003fab6952c, status=queued
 
 ### artifact-export
 

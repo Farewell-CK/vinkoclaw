@@ -569,6 +569,27 @@ function defaultRoutingTemplates(): RoutingTemplate[] {
       updatedAt: timestamp
     },
     {
+      id: "tpl-founder-bugfix-followup",
+      name: "Founder Bugfix Follow-up",
+      description: "将创始人的修复、热修和验证需求整理成研发修复闭环任务。",
+      triggerKeywords: ["修复", "bugfix", "hotfix", "回归修复", "修 bug", "fix bug", "排查并修复"],
+      matchMode: "any",
+      enabled: true,
+      tasks: [
+        {
+          roleId: "engineering",
+          titleTemplate: "修复任务: {{input_short}}",
+          instructionTemplate:
+            "请将以下创始人请求整理为修复闭环任务，包含问题现象、修复方案、代码变更、验证结果和剩余风险。原始输入：{{input}}",
+          deliverableMode: "artifact_required",
+          deliverableSections: ["问题现象", "修复方案", "代码变更", "验证结果", "剩余风险"],
+          priority: 90
+        }
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    },
+    {
       id: "tpl-skill-runtime-integration",
       name: "Skill Runtime Integration",
       description: "将 marketplace 中发现但尚未接入本地 runtime 的 skill 转成标准工程接入任务。",
