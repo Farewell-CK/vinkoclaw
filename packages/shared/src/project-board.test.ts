@@ -209,8 +209,11 @@ describe("project-board", () => {
     expect(snapshot.summary.archivedProjects).toBe(1);
     expect(snapshot.projects).toHaveLength(1);
     expect(snapshot.projects[0]?.name).toBe("OPC 增长引擎");
-    expect(snapshot.projects[0]?.history).toHaveLength(3);
+    expect(snapshot.projects[0]?.history).toHaveLength(5);
     expect(snapshot.projects[0]?.history[0]?.updatedAt).toBe("2026-04-19T05:00:00.000Z");
+    expect(snapshot.projects[0]?.history.map((entry) => entry.kind)).toEqual(
+      expect.arrayContaining(["workspace", "session", "crm_lead", "crm_cadence"])
+    );
     expect(snapshot.projects[0]?.latestArtifacts).toEqual(
       expect.arrayContaining(["reports/growth-research.md", "apps/landing/index.html"])
     );

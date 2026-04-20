@@ -158,7 +158,7 @@ export interface ProjectBoardWorkstream {
 }
 
 export interface ProjectBoardProjectHistoryEntry {
-  kind: "session" | "workspace";
+  kind: "session" | "workspace" | "crm_lead" | "crm_cadence";
   sessionId?: string | undefined;
   sessionTitle: string;
   source: SessionSource;

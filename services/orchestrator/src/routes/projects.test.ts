@@ -1,7 +1,14 @@
 import express from "express";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SessionRecord, SkillBindingRecord, TaskRecord, VinkoStore } from "@vinko/shared";
+import type {
+  CrmCadenceRecord,
+  CrmLeadRecord,
+  SessionRecord,
+  SkillBindingRecord,
+  TaskRecord,
+  VinkoStore
+} from "@vinko/shared";
 import type { TaskRoutesDeps } from "./tasks.js";
 import { registerTaskRoutes } from "./tasks.js";
 
@@ -93,6 +100,40 @@ function buildSkillBinding(patch: Partial<SkillBindingRecord> = {}): SkillBindin
   };
 }
 
+function buildLead(patch: Partial<CrmLeadRecord> = {}): CrmLeadRecord {
+  return {
+    id: "lead_1",
+    name: "Annie Case",
+    source: "manual",
+    stage: "qualified",
+    status: "active",
+    tags: [],
+    latestSummary: "等待安排产品演示",
+    metadata: {},
+    linkedProjectId: "project:增长项目",
+    createdAt: "2026-04-20T00:30:00.000Z",
+    updatedAt: "2026-04-20T00:50:00.000Z",
+    ...patch
+  };
+}
+
+function buildCadence(patch: Partial<CrmCadenceRecord> = {}): CrmCadenceRecord {
+  return {
+    id: "cadence_1",
+    leadId: "lead_1",
+    label: "weekly follow-up",
+    channel: "email",
+    intervalDays: 7,
+    objective: "安排演示",
+    nextRunAt: "2026-04-20T01:00:00.000Z",
+    status: "active",
+    metadata: {},
+    createdAt: "2026-04-20T00:35:00.000Z",
+    updatedAt: "2026-04-20T01:05:00.000Z",
+    ...patch
+  };
+}
+
 describe("project routes", () => {
   it("lists active and archived projects", async () => {
     const sessions = [
@@ -156,6 +197,8 @@ describe("project routes", () => {
         },
         updatedAt: "2026-04-20T01:20:00.000Z"
       })),
+      listCrmLeads: vi.fn(() => [buildLead()]),
+      listCrmCadences: vi.fn(() => [buildCadence()]),
       listToolRunsByTask: vi.fn(() => []),
       listTaskChildren: vi.fn(() => [])
     } as unknown as VinkoStore;
@@ -211,6 +254,8 @@ describe("project routes", () => {
         },
         updatedAt: "2026-04-20T01:10:00.000Z"
       })),
+      listCrmLeads: vi.fn(() => [buildLead()]),
+      listCrmCadences: vi.fn(() => [buildCadence()]),
       listToolRunsByTask: vi.fn(() => []),
       listTaskChildren: vi.fn(() => [])
     } as unknown as VinkoStore;
@@ -231,7 +276,10 @@ describe("project routes", () => {
       expect(historyResponse.status).toBe(200);
       const historyPayload = (await historyResponse.json()) as { history: Array<Record<string, unknown>> };
       expect(historyPayload.history.length).toBeGreaterThan(0);
-      expect(historyPayload.history[0]?.stage).toBe("implementation");
+      expect(historyPayload.history.map((entry) => entry.kind)).toEqual(
+        expect.arrayContaining(["workspace", "session", "crm_lead", "crm_cadence"])
+      );
+      expect(historyPayload.history.map((entry) => entry.stage)).toContain("cadence:active");
     });
   });
 });

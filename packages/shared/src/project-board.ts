@@ -194,6 +194,41 @@ function buildWorkspaceHistoryEntry(project: { name: string; stage: string; last
   };
 }
 
+function buildCrmLeadHistoryEntry(lead: CrmLeadRecord): ProjectBoardProjectHistoryEntry {
+  return {
+    kind: "crm_lead",
+    sessionTitle: lead.company?.trim() ? `${lead.name} @ ${lead.company}` : lead.name,
+    source: "system",
+    updatedAt: lead.updatedAt || lead.createdAt,
+    stage: `lead:${lead.stage}`,
+    summary: lead.latestSummary?.trim() || lead.nextAction?.trim() || lead.source,
+    artifacts: []
+  };
+}
+
+function buildCrmCadenceHistoryEntry(input: {
+  cadence: CrmCadenceRecord;
+  lead?: CrmLeadRecord | undefined;
+}): ProjectBoardProjectHistoryEntry {
+  const leadLabel = input.lead?.company?.trim()
+    ? `${input.lead.name} @ ${input.lead.company}`
+    : input.lead?.name || input.cadence.leadId;
+  const cadenceSummaryParts = [
+    input.cadence.label.trim(),
+    input.cadence.objective.trim(),
+    input.cadence.channel
+  ].filter(Boolean);
+  return {
+    kind: "crm_cadence",
+    sessionTitle: leadLabel,
+    source: "system",
+    updatedAt: input.cadence.updatedAt || input.cadence.createdAt,
+    stage: `cadence:${input.cadence.status}`,
+    summary: cadenceSummaryParts.join(" · "),
+    artifacts: []
+  };
+}
+
 function buildProjectCollection(input: {
   sessions: SessionRecord[];
   orchestrationBySession: Map<
@@ -276,6 +311,45 @@ function buildProjectCollection(input: {
         workstreams: [],
         updatedAt: project.lastUpdate
       });
+    }
+  }
+
+  for (const lead of input.crmLeads ?? []) {
+    for (const [projectId, value] of grouped.entries()) {
+      if (
+        !matchesProjectLink({
+          linkedProjectId: lead.linkedProjectId,
+          projectId,
+          projectName: value.name
+        })
+      ) {
+        continue;
+      }
+      const historyEntry = buildCrmLeadHistoryEntry(lead);
+      value.history.push(historyEntry);
+      if (parseTimestamp(historyEntry.updatedAt) > parseTimestamp(value.updatedAt)) {
+        value.updatedAt = historyEntry.updatedAt;
+      }
+    }
+  }
+
+  for (const cadence of input.crmCadences ?? []) {
+    const linkedLead = (input.crmLeads ?? []).find((lead) => lead.id === cadence.leadId);
+    for (const [projectId, value] of grouped.entries()) {
+      if (
+        !matchesProjectLink({
+          linkedProjectId: linkedLead?.linkedProjectId,
+          projectId,
+          projectName: value.name
+        })
+      ) {
+        continue;
+      }
+      const historyEntry = buildCrmCadenceHistoryEntry({ cadence, lead: linkedLead });
+      value.history.push(historyEntry);
+      if (parseTimestamp(historyEntry.updatedAt) > parseTimestamp(value.updatedAt)) {
+        value.updatedAt = historyEntry.updatedAt;
+      }
     }
   }
 

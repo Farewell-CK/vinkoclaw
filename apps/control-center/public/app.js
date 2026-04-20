@@ -567,6 +567,19 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;");
 }
 
+function getProjectHistoryKindLabel(kind) {
+  if (kind === "crm_lead") {
+    return currentLang === "zh" ? "线索" : "Lead";
+  }
+  if (kind === "crm_cadence") {
+    return currentLang === "zh" ? "跟进节奏" : "Cadence";
+  }
+  if (kind === "workspace") {
+    return currentLang === "zh" ? "项目状态" : "Workspace";
+  }
+  return currentLang === "zh" ? "会话" : "Session";
+}
+
 function formatStructuredValue(value) {
   if (typeof value === "string") {
     return value;
@@ -2473,7 +2486,7 @@ function renderProjectMemoryBoard(board) {
                     .slice(0, 4)
                     .map(
                       (entry) =>
-                        `<li><strong>${escapeHtml(entry.stage || "-")}</strong> · ${escapeHtml(entry.summary || entry.sessionTitle || "-")} <span class="muted">(${formatDateTime(entry.updatedAt)})</span></li>`
+                        `<li><strong>${escapeHtml(getProjectHistoryKindLabel(entry.kind))}</strong> · ${escapeHtml(entry.stage || "-")} · ${escapeHtml(entry.summary || entry.sessionTitle || "-")} <span class="muted">(${formatDateTime(entry.updatedAt)})</span></li>`
                     )
                     .join("")}</ul>`
                 : `<p class="muted">${currentLang === "zh" ? "暂无项目历史" : "No project history yet"}</p>`
