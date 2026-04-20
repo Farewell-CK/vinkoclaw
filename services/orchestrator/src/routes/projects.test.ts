@@ -7,6 +7,7 @@ import type {
   GoalRunRecord,
   SessionRecord,
   SkillBindingRecord,
+  StageHandoffArtifact,
   TaskRecord,
   VinkoStore
 } from "@vinko/shared";
@@ -198,6 +199,42 @@ function buildGoalRun(patch: Partial<GoalRunRecord> = {}): GoalRunRecord {
   };
 }
 
+function buildGoalRunHandoff(patch: Partial<{ id: string; goalRunId: string; artifact: StageHandoffArtifact }> = {}) {
+  return {
+    id: "handoff_1",
+    goalRunId: "goal_1",
+    artifact: {
+      stage: "deploy",
+      summary: "交接部署产物",
+      artifacts: ["dist/site.zip"],
+      decisions: [],
+      unresolvedQuestions: [],
+      nextActions: ["执行部署"],
+      approvalNeeds: [],
+      createdAt: "2026-04-20T01:16:00.000Z"
+    },
+    ...patch
+  };
+}
+
+function buildGoalRunTrace(patch: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "trace_1",
+    goalRunId: "goal_1",
+    stage: "deploy",
+    status: "completed",
+    inputSummary: "准备部署",
+    outputSummary: "部署脚本执行完成",
+    artifactFiles: ["dist/site.zip"],
+    completedRoles: ["operations"],
+    failedRoles: [],
+    approvalGateHits: 0,
+    metadata: {},
+    createdAt: "2026-04-20T01:17:00.000Z",
+    ...patch
+  };
+}
+
 describe("project routes", () => {
   it("lists active and archived projects", async () => {
     const sessions = [
@@ -264,6 +301,8 @@ describe("project routes", () => {
       listCrmLeads: vi.fn(() => [buildLead()]),
       listCrmCadences: vi.fn(() => [buildCadence()]),
       listGoalRuns: vi.fn(() => [buildGoalRun()]),
+      listGoalRunHandoffArtifacts: vi.fn(() => [buildGoalRunHandoff()]),
+      listGoalRunTraces: vi.fn(() => [buildGoalRunTrace()]),
       listToolRunsByTask: vi.fn(() => []),
       listTaskChildren: vi.fn(() => [])
     } as unknown as VinkoStore;
@@ -322,6 +361,8 @@ describe("project routes", () => {
       listCrmLeads: vi.fn(() => [buildLead()]),
       listCrmCadences: vi.fn(() => [buildCadence()]),
       listGoalRuns: vi.fn(() => [buildGoalRun()]),
+      listGoalRunHandoffArtifacts: vi.fn(() => [buildGoalRunHandoff()]),
+      listGoalRunTraces: vi.fn(() => [buildGoalRunTrace()]),
       listToolRunsByTask: vi.fn(() => []),
       listTaskChildren: vi.fn(() => [])
     } as unknown as VinkoStore;
@@ -343,10 +384,13 @@ describe("project routes", () => {
       const historyPayload = (await historyResponse.json()) as { history: Array<Record<string, unknown>> };
       expect(historyPayload.history.length).toBeGreaterThan(0);
       expect(historyPayload.history.map((entry) => entry.kind)).toEqual(
-        expect.arrayContaining(["workspace", "session", "crm_lead", "crm_cadence", "goal_run"])
+        expect.arrayContaining(["workspace", "session", "crm_lead", "crm_cadence", "goal_run", "goal_run_handoff", "goal_run_trace"])
       );
       expect(historyPayload.history.map((entry) => entry.stage)).toContain("cadence:active");
       expect(historyPayload.history.map((entry) => entry.stage)).toContain("goal_run:deploy:running");
+      expect(historyPayload.history.map((entry) => entry.stage)).toEqual(
+        expect.arrayContaining(["goal_run_handoff:deploy", "goal_run_trace:deploy:completed"])
+      );
     });
   });
 });

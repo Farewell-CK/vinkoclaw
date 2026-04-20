@@ -6,6 +6,7 @@ import type {
   CrmCadenceRecord,
   CrmLeadRecord,
   GoalRunRecord,
+  GoalRunTraceRecord,
   ProjectBoardProject,
   ProjectBoardProjectHistoryEntry,
   ProjectBoardPrimaryView,
@@ -14,6 +15,7 @@ import type {
   ProjectBoardWorkstream,
   SessionRecord,
   SkillBindingRecord,
+  StageHandoffArtifact,
   TaskRecord
 } from "./types.js";
 
@@ -334,6 +336,40 @@ function buildGoalRunHistoryEntry(input: {
   };
 }
 
+function buildGoalRunHandoffHistoryEntry(input: {
+  goalRunId: string;
+  artifact: StageHandoffArtifact;
+  sessionTitle: string;
+  sessionSource: SessionRecord["source"];
+  updatedAt: string;
+}): ProjectBoardProjectHistoryEntry {
+  return {
+    kind: "goal_run_handoff",
+    sessionTitle: input.sessionTitle,
+    source: input.sessionSource,
+    updatedAt: input.updatedAt,
+    stage: `goal_run_handoff:${input.artifact.stage}`,
+    summary: input.artifact.summary.trim() || input.artifact.stage,
+    artifacts: input.artifact.artifacts.slice(0, 6)
+  };
+}
+
+function buildGoalRunTraceHistoryEntry(input: {
+  trace: GoalRunTraceRecord;
+  sessionTitle: string;
+  sessionSource: SessionRecord["source"];
+}): ProjectBoardProjectHistoryEntry {
+  return {
+    kind: "goal_run_trace",
+    sessionTitle: input.sessionTitle,
+    source: input.sessionSource,
+    updatedAt: input.trace.createdAt,
+    stage: `goal_run_trace:${input.trace.stage}:${input.trace.status}`,
+    summary: input.trace.outputSummary.trim() || input.trace.inputSummary.trim() || input.trace.stage,
+    artifacts: input.trace.artifactFiles.slice(0, 6)
+  };
+}
+
 function buildProjectCollection(input: {
   sessions: SessionRecord[];
   orchestrationBySession: Map<
@@ -349,6 +385,8 @@ function buildProjectCollection(input: {
   crmLeads?: CrmLeadRecord[] | undefined;
   crmCadences?: CrmCadenceRecord[] | undefined;
   goalRuns?: GoalRunRecord[] | undefined;
+  goalRunHandoffs?: Array<{ id: string; goalRunId: string; artifact: StageHandoffArtifact }> | undefined;
+  goalRunTraces?: GoalRunTraceRecord[] | undefined;
 }): ProjectBoardProject[] {
   const grouped = new Map<
     string,
@@ -507,6 +545,39 @@ function buildProjectCollection(input: {
     if (parseTimestamp(historyEntry.updatedAt) > parseTimestamp(existing.updatedAt)) {
       existing.updatedAt = historyEntry.updatedAt;
     }
+
+    const handoffEntries = (input.goalRunHandoffs ?? [])
+      .filter((entry) => entry.goalRunId === run.id)
+      .map((entry) =>
+        buildGoalRunHandoffHistoryEntry({
+          goalRunId: run.id,
+          artifact: entry.artifact,
+          sessionTitle: session.title,
+          sessionSource: session.source,
+          updatedAt: entry.artifact.createdAt || run.updatedAt
+        })
+      );
+    existing.history.push(...handoffEntries);
+
+    const traceEntries = (input.goalRunTraces ?? [])
+      .filter((trace) => trace.goalRunId === run.id)
+      .map((trace) =>
+        buildGoalRunTraceHistoryEntry({
+          trace,
+          sessionTitle: session.title,
+          sessionSource: session.source
+        })
+      );
+    existing.history.push(...traceEntries);
+
+    const latestRunUpdate = Math.max(
+      parseTimestamp(historyEntry.updatedAt),
+      ...handoffEntries.map((entry) => parseTimestamp(entry.updatedAt)),
+      ...traceEntries.map((entry) => parseTimestamp(entry.updatedAt))
+    );
+    if (latestRunUpdate > parseTimestamp(existing.updatedAt)) {
+      existing.updatedAt = new Date(latestRunUpdate).toISOString();
+    }
   }
 
   return Array.from(grouped.entries())
@@ -639,6 +710,8 @@ export function buildProjectBoardSnapshot(input: {
   crmLeads?: CrmLeadRecord[] | undefined;
   crmCadences?: CrmCadenceRecord[] | undefined;
   goalRuns?: GoalRunRecord[] | undefined;
+  goalRunHandoffs?: Array<{ id: string; goalRunId: string; artifact: StageHandoffArtifact }> | undefined;
+  goalRunTraces?: GoalRunTraceRecord[] | undefined;
 }): ProjectBoardSnapshot {
   const orchestrationBySession = new Map<
     string,
@@ -675,7 +748,9 @@ export function buildProjectBoardSnapshot(input: {
     workspaceMemory: input.workspaceMemory,
     crmLeads: input.crmLeads,
     crmCadences: input.crmCadences,
-    goalRuns: input.goalRuns
+    goalRuns: input.goalRuns,
+    goalRunHandoffs: input.goalRunHandoffs,
+    goalRunTraces: input.goalRunTraces
   });
   const archivedProjects = buildProjectCollection({
     sessions: input.sessions,
@@ -684,7 +759,9 @@ export function buildProjectBoardSnapshot(input: {
     archived: true,
     crmLeads: input.crmLeads,
     crmCadences: input.crmCadences,
-    goalRuns: input.goalRuns
+    goalRuns: input.goalRuns,
+    goalRunHandoffs: input.goalRunHandoffs,
+    goalRunTraces: input.goalRunTraces
   });
   const workstreams = sessionsWithState
     .slice(0, 6)

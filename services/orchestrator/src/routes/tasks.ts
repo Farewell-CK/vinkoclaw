@@ -64,6 +64,42 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
     splitTaskIntoChildren
   } = deps;
 
+  function buildProjectBoardInput() {
+    const sessions = store.listSessions(100);
+    const tasks = store.listTasks(500);
+    const goalRuns = store.listGoalRuns?.({ limit: 500 }) ?? [];
+    return {
+      sessions,
+      tasks,
+      roleBindingsByRole: {
+        ceo: store.resolveSkillsForRole("ceo"),
+        cto: store.resolveSkillsForRole("cto"),
+        product: store.resolveSkillsForRole("product"),
+        uiux: store.resolveSkillsForRole("uiux"),
+        frontend: store.resolveSkillsForRole("frontend"),
+        backend: store.resolveSkillsForRole("backend"),
+        algorithm: store.resolveSkillsForRole("algorithm"),
+        qa: store.resolveSkillsForRole("qa"),
+        developer: store.resolveSkillsForRole("developer"),
+        engineering: store.resolveSkillsForRole("engineering"),
+        research: store.resolveSkillsForRole("research"),
+        operations: store.resolveSkillsForRole("operations")
+      },
+      workspaceMemory: store.getWorkspaceMemory?.(),
+      crmLeads: store.listCrmLeads?.({ limit: 500 }) ?? [],
+      crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? [],
+      goalRuns,
+      goalRunHandoffs: goalRuns.flatMap((run) =>
+        (store.listGoalRunHandoffArtifacts?.(run.id, 20) ?? []).map((entry) => ({
+          id: entry.id,
+          goalRunId: run.id,
+          artifact: entry.artifact
+        }))
+      ),
+      goalRunTraces: goalRuns.flatMap((run) => store.listGoalRunTraces?.(run.id, 20) ?? [])
+    };
+  }
+
   app.get("/api/tasks", (_request, response) => {
     response.json(store.listTasks(100).map((task) => enrichTaskRecord(store, task)));
   });
@@ -98,58 +134,11 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
   });
 
   app.get("/api/project-board", (_request, response) => {
-    const sessions = store.listSessions(100);
-    const tasks = store.listTasks(500);
-    const roleBindingsByRole = {
-      ceo: store.resolveSkillsForRole("ceo"),
-      cto: store.resolveSkillsForRole("cto"),
-      product: store.resolveSkillsForRole("product"),
-      uiux: store.resolveSkillsForRole("uiux"),
-      frontend: store.resolveSkillsForRole("frontend"),
-      backend: store.resolveSkillsForRole("backend"),
-      algorithm: store.resolveSkillsForRole("algorithm"),
-      qa: store.resolveSkillsForRole("qa"),
-      developer: store.resolveSkillsForRole("developer"),
-      engineering: store.resolveSkillsForRole("engineering"),
-      research: store.resolveSkillsForRole("research"),
-      operations: store.resolveSkillsForRole("operations")
-    };
-    response.json(
-      buildProjectBoardSnapshot({
-        sessions,
-        tasks,
-        roleBindingsByRole,
-      workspaceMemory: store.getWorkspaceMemory?.(),
-      crmLeads: store.listCrmLeads?.({ limit: 500 }) ?? [],
-      crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? [],
-      goalRuns: store.listGoalRuns?.({ limit: 500 }) ?? []
-    })
-    );
+    response.json(buildProjectBoardSnapshot(buildProjectBoardInput()));
   });
 
   app.get("/api/projects", (_request, response) => {
-    const snapshot = buildProjectBoardSnapshot({
-      sessions: store.listSessions(100),
-      tasks: store.listTasks(500),
-      roleBindingsByRole: {
-        ceo: store.resolveSkillsForRole("ceo"),
-        cto: store.resolveSkillsForRole("cto"),
-        product: store.resolveSkillsForRole("product"),
-        uiux: store.resolveSkillsForRole("uiux"),
-        frontend: store.resolveSkillsForRole("frontend"),
-        backend: store.resolveSkillsForRole("backend"),
-        algorithm: store.resolveSkillsForRole("algorithm"),
-        qa: store.resolveSkillsForRole("qa"),
-        developer: store.resolveSkillsForRole("developer"),
-        engineering: store.resolveSkillsForRole("engineering"),
-        research: store.resolveSkillsForRole("research"),
-        operations: store.resolveSkillsForRole("operations")
-      },
-      workspaceMemory: store.getWorkspaceMemory?.(),
-      crmLeads: store.listCrmLeads?.({ limit: 500 }) ?? [],
-      crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? [],
-      goalRuns: store.listGoalRuns?.({ limit: 500 }) ?? []
-    });
+    const snapshot = buildProjectBoardSnapshot(buildProjectBoardInput());
     response.json({
       generatedAt: snapshot.generatedAt,
       summary: snapshot.summary,
@@ -158,28 +147,7 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
   });
 
   app.get("/api/projects/:projectId", (request, response) => {
-    const snapshot = buildProjectBoardSnapshot({
-      sessions: store.listSessions(100),
-      tasks: store.listTasks(500),
-      roleBindingsByRole: {
-        ceo: store.resolveSkillsForRole("ceo"),
-        cto: store.resolveSkillsForRole("cto"),
-        product: store.resolveSkillsForRole("product"),
-        uiux: store.resolveSkillsForRole("uiux"),
-        frontend: store.resolveSkillsForRole("frontend"),
-        backend: store.resolveSkillsForRole("backend"),
-        algorithm: store.resolveSkillsForRole("algorithm"),
-        qa: store.resolveSkillsForRole("qa"),
-        developer: store.resolveSkillsForRole("developer"),
-        engineering: store.resolveSkillsForRole("engineering"),
-        research: store.resolveSkillsForRole("research"),
-        operations: store.resolveSkillsForRole("operations")
-      },
-      workspaceMemory: store.getWorkspaceMemory?.(),
-      crmLeads: store.listCrmLeads?.({ limit: 500 }) ?? [],
-      crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? [],
-      goalRuns: store.listGoalRuns?.({ limit: 500 }) ?? []
-    });
+    const snapshot = buildProjectBoardSnapshot(buildProjectBoardInput());
     const project = findProjectBoardProject(snapshot, request.params.projectId);
     if (!project) {
       response.status(404).json({ error: "project_not_found" });
@@ -192,28 +160,7 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
   });
 
   app.get("/api/projects/:projectId/history", (request, response) => {
-    const snapshot = buildProjectBoardSnapshot({
-      sessions: store.listSessions(100),
-      tasks: store.listTasks(500),
-      roleBindingsByRole: {
-        ceo: store.resolveSkillsForRole("ceo"),
-        cto: store.resolveSkillsForRole("cto"),
-        product: store.resolveSkillsForRole("product"),
-        uiux: store.resolveSkillsForRole("uiux"),
-        frontend: store.resolveSkillsForRole("frontend"),
-        backend: store.resolveSkillsForRole("backend"),
-        algorithm: store.resolveSkillsForRole("algorithm"),
-        qa: store.resolveSkillsForRole("qa"),
-        developer: store.resolveSkillsForRole("developer"),
-        engineering: store.resolveSkillsForRole("engineering"),
-        research: store.resolveSkillsForRole("research"),
-        operations: store.resolveSkillsForRole("operations")
-      },
-      workspaceMemory: store.getWorkspaceMemory?.(),
-      crmLeads: store.listCrmLeads?.({ limit: 500 }) ?? [],
-      crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? [],
-      goalRuns: store.listGoalRuns?.({ limit: 500 }) ?? []
-    });
+    const snapshot = buildProjectBoardSnapshot(buildProjectBoardInput());
     const project = findProjectBoardProject(snapshot, request.params.projectId);
     if (!project) {
       response.status(404).json({ error: "project_not_found" });

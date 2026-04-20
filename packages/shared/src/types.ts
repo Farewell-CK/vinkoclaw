@@ -164,6 +164,8 @@ export interface ProjectBoardProjectHistoryEntry {
     | "crm_lead"
     | "crm_cadence"
     | "goal_run"
+    | "goal_run_handoff"
+    | "goal_run_trace"
     | "orchestration_decision"
     | "orchestration_verification"
     | "orchestration_artifact";

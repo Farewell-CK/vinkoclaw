@@ -344,11 +344,48 @@ describe("project-board", () => {
           createdAt: "2026-04-20T03:30:00.000Z",
           updatedAt: "2026-04-20T04:05:00.000Z"
         }
+      ],
+      goalRunHandoffs: [
+        {
+          id: "handoff_1",
+          goalRunId: "goal_1",
+          artifact: {
+            stage: "deploy",
+            summary: "交接部署产物",
+            artifacts: ["dist/site.zip"],
+            decisions: [],
+            unresolvedQuestions: [],
+            nextActions: ["执行部署"],
+            approvalNeeds: [],
+            createdAt: "2026-04-20T04:06:00.000Z"
+          }
+        }
+      ],
+      goalRunTraces: [
+        {
+          id: "trace_1",
+          goalRunId: "goal_1",
+          stage: "deploy",
+          status: "completed",
+          inputSummary: "准备部署",
+          outputSummary: "部署脚本执行完成",
+          artifactFiles: ["dist/site.zip"],
+          completedRoles: ["operations"],
+          failedRoles: [],
+          approvalGateHits: 0,
+          metadata: {},
+          createdAt: "2026-04-20T04:07:00.000Z"
+        }
       ]
     });
 
     const project = snapshot.projects[0];
-    expect(project?.history.map((entry) => entry.kind)).toEqual(expect.arrayContaining(["session", "goal_run"]));
+    expect(project?.history.map((entry) => entry.kind)).toEqual(
+      expect.arrayContaining(["session", "goal_run", "goal_run_handoff", "goal_run_trace"])
+    );
     expect(project?.history.map((entry) => entry.stage)).toContain("goal_run:deploy:running");
+    expect(project?.history.map((entry) => entry.stage)).toEqual(
+      expect.arrayContaining(["goal_run_handoff:deploy", "goal_run_trace:deploy:completed"])
+    );
   });
 });

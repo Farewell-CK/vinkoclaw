@@ -577,6 +577,12 @@ function getProjectHistoryKindLabel(kind) {
   if (kind === "goal_run") {
     return currentLang === "zh" ? "目标流程" : "Goal run";
   }
+  if (kind === "goal_run_handoff") {
+    return currentLang === "zh" ? "流程交接" : "Goal-run handoff";
+  }
+  if (kind === "goal_run_trace") {
+    return currentLang === "zh" ? "流程轨迹" : "Goal-run trace";
+  }
   if (kind === "workspace") {
     return currentLang === "zh" ? "项目状态" : "Workspace";
   }
