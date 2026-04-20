@@ -54,6 +54,8 @@ export const CRM_LEAD_STATUSES = ["active", "archived"] as const;
 export type CrmLeadStatus = (typeof CRM_LEAD_STATUSES)[number];
 export const CRM_CADENCE_STATUSES = ["active", "paused", "completed", "archived"] as const;
 export type CrmCadenceStatus = (typeof CRM_CADENCE_STATUSES)[number];
+export const CRM_CONTACT_OUTCOMES = ["sent", "replied", "meeting_booked", "won", "lost", "note"] as const;
+export type CrmContactOutcome = (typeof CRM_CONTACT_OUTCOMES)[number];
 
 export type MemoryBackend = "none" | "sqlite" | "vector-db";
 export const DELIVERABLE_MODES = ["answer_only", "artifact_preferred", "artifact_required"] as const;
@@ -305,6 +307,28 @@ export interface CrmCadenceRecord {
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface CrmContactRecord {
+  id: string;
+  leadId: string;
+  cadenceId?: string | undefined;
+  channel: "feishu" | "email" | "manual";
+  outcome: CrmContactOutcome;
+  summary: string;
+  nextAction?: string | undefined;
+  happenedAt: string;
+  createdAt: string;
+}
+
+export interface CreateCrmContactInput {
+  leadId: string;
+  cadenceId?: string | undefined;
+  channel?: "feishu" | "email" | "manual" | undefined;
+  outcome?: CrmContactOutcome | undefined;
+  summary: string;
+  nextAction?: string | undefined;
+  happenedAt?: string | undefined;
 }
 
 export interface CreateCrmCadenceInput {

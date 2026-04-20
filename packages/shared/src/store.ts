@@ -16,8 +16,9 @@ import type {
   AuthSessionRecord,
   CreateApprovalInput,
   CreateAuthSessionInput,
-  CreateCrmLeadInput,
   CreateCrmCadenceInput,
+  CreateCrmContactInput,
+  CreateCrmLeadInput,
   CreateAgentInstanceInput,
   CreateCredentialInput,
   CreateGoalRunInput,
@@ -58,11 +59,12 @@ import type {
   TaskResult,
   ToolRunRecord,
   CredentialRecord,
+  CrmCadenceRecord,
+  CrmCadenceStatus,
+  CrmContactRecord,
   CrmLeadRecord,
   CrmLeadStage,
   CrmLeadStatus,
-  CrmCadenceRecord,
-  CrmCadenceStatus,
   UpdateRoutingTemplateInput,
   UpdateCrmLeadInput,
   UpdateCrmCadenceInput,
@@ -1003,6 +1005,20 @@ function toCrmCadenceRecord(row: JsonRow): CrmCadenceRecord {
   };
 }
 
+function toCrmContactRecord(row: JsonRow): CrmContactRecord {
+  return {
+    id: String(row.id),
+    leadId: String(row.lead_id ?? ""),
+    cadenceId: maybeString(row.cadence_id),
+    channel: (maybeString(row.channel) as CrmContactRecord["channel"] | undefined) ?? "manual",
+    outcome: (maybeString(row.outcome) as CrmContactRecord["outcome"] | undefined) ?? "note",
+    summary: String(row.summary ?? ""),
+    nextAction: maybeString(row.next_action),
+    happenedAt: String(row.happened_at ?? row.created_at ?? now()),
+    createdAt: String(row.created_at ?? now())
+  };
+}
+
 function toAgentCollaboration(row: JsonRow): AgentCollaboration {
   const result: AgentCollaboration = {
     id: String(row.id),
@@ -1578,6 +1594,23 @@ export class VinkoStore {
       CREATE INDEX IF NOT EXISTS idx_crm_cadences_lead_id ON crm_cadences(lead_id);
       CREATE INDEX IF NOT EXISTS idx_crm_cadences_status ON crm_cadences(status);
       CREATE INDEX IF NOT EXISTS idx_crm_cadences_next_run_at ON crm_cadences(next_run_at);
+
+      CREATE TABLE IF NOT EXISTS crm_contacts (
+        id TEXT PRIMARY KEY,
+        lead_id TEXT NOT NULL,
+        cadence_id TEXT,
+        channel TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        next_action TEXT,
+        happened_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (lead_id) REFERENCES crm_leads(id),
+        FOREIGN KEY (cadence_id) REFERENCES crm_cadences(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_crm_contacts_lead_id ON crm_contacts(lead_id);
+      CREATE INDEX IF NOT EXISTS idx_crm_contacts_happened_at ON crm_contacts(happened_at DESC);
 
       CREATE TABLE IF NOT EXISTS agent_collaborations (
         id TEXT PRIMARY KEY,
@@ -5688,6 +5721,63 @@ export class VinkoStore {
     return this.updateCrmCadence(id, {
       status: "archived"
     });
+  }
+
+  createCrmContact(input: CreateCrmContactInput): CrmContactRecord {
+    const id = randomUUID();
+    const timestamp = now();
+    const happenedAt = input.happenedAt ?? timestamp;
+    this.db
+      .prepare(`
+        INSERT INTO crm_contacts (
+          id, lead_id, cadence_id, channel, outcome, summary, next_action, happened_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        id,
+        input.leadId,
+        input.cadenceId ?? null,
+        input.channel ?? "manual",
+        input.outcome ?? "note",
+        input.summary.trim(),
+        input.nextAction?.trim() ?? null,
+        happenedAt,
+        timestamp
+      );
+    const lead = this.getCrmLead(input.leadId);
+    if (lead) {
+      this.updateCrmLead(input.leadId, {
+        latestSummary: input.summary.trim(),
+        nextAction: input.nextAction?.trim() || lead.nextAction,
+        lastContactAt: happenedAt
+      });
+    }
+    return this.getCrmContact(id)!;
+  }
+
+  getCrmContact(id: string): CrmContactRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM crm_contacts WHERE id = ?").get(id) as JsonRow | undefined;
+    return row ? toCrmContactRecord(row) : undefined;
+  }
+
+  listCrmContacts(input?: { leadId?: string | undefined; limit?: number | undefined }): CrmContactRecord[] {
+    const where: string[] = [];
+    const values: Array<string | number> = [];
+    if (input?.leadId) {
+      where.push("lead_id = ?");
+      values.push(input.leadId);
+    }
+    const limit = Math.max(1, Math.min(500, Math.round(input?.limit ?? 100)));
+    values.push(limit);
+    const query = `
+      SELECT *
+      FROM crm_contacts
+      ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
+      ORDER BY happened_at DESC, created_at DESC
+      LIMIT ?
+    `;
+    const rows = this.db.prepare(query).all(...values) as JsonRow[];
+    return rows.map(toCrmContactRecord);
   }
 
   // ============ Agent Collaboration Methods ============

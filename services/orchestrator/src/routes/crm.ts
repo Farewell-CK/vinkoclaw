@@ -1,6 +1,7 @@
 import express from "express";
 import type {
   CreateCrmCadenceInput,
+  CreateCrmContactInput,
   CreateCrmLeadInput,
   CrmCadenceStatus,
   CrmLeadStage,
@@ -220,7 +221,10 @@ export function registerCrmRoutes(app: express.Express, deps: CrmRoutesDeps): vo
       response.status(404).json({ error: "lead_not_found" });
       return;
     }
-    response.json({ lead });
+    response.json({
+      lead,
+      contacts: store.listCrmContacts?.({ leadId: lead.id, limit: 100 }) ?? []
+    });
   });
 
   app.patch("/api/crm/leads/:leadId", (request, response) => {
@@ -252,6 +256,48 @@ export function registerCrmRoutes(app: express.Express, deps: CrmRoutesDeps): vo
       return;
     }
     response.json({ lead });
+  });
+
+  app.get("/api/crm/leads/:leadId/contacts", (request, response) => {
+    const lead = store.getCrmLead(request.params.leadId);
+    if (!lead) {
+      response.status(404).json({ error: "lead_not_found" });
+      return;
+    }
+    response.json({
+      lead,
+      contacts: store.listCrmContacts?.({ leadId: lead.id, limit: 100 }) ?? []
+    });
+  });
+
+  app.post("/api/crm/leads/:leadId/contacts", (request, response) => {
+    const lead = store.getCrmLead(request.params.leadId);
+    if (!lead) {
+      response.status(404).json({ error: "lead_not_found" });
+      return;
+    }
+    const body = request.body as Partial<CreateCrmContactInput>;
+    if (typeof body?.summary !== "string" || !body.summary.trim()) {
+      response.status(400).json({ error: "contact_summary_required" });
+      return;
+    }
+    const contact = store.createCrmContact?.({
+      leadId: lead.id,
+      cadenceId: typeof body.cadenceId === "string" ? body.cadenceId.trim() : undefined,
+      channel: body.channel,
+      outcome: body.outcome,
+      summary: body.summary.trim(),
+      nextAction: typeof body.nextAction === "string" ? body.nextAction.trim() : undefined,
+      happenedAt: typeof body.happenedAt === "string" ? body.happenedAt.trim() : undefined
+    });
+    if (!contact) {
+      response.status(500).json({ error: "contact_create_failed" });
+      return;
+    }
+    response.status(201).json({
+      contact,
+      lead: store.getCrmLead(lead.id)
+    });
   });
 
   app.get("/api/crm/cadences", (request, response) => {

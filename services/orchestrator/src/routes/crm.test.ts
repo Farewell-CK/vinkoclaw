@@ -1,7 +1,7 @@
 import express from "express";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CrmCadenceRecord, CrmLeadRecord, VinkoStore } from "@vinko/shared";
+import type { CrmCadenceRecord, CrmContactRecord, CrmLeadRecord, VinkoStore } from "@vinko/shared";
 import { registerCrmRoutes } from "./crm.js";
 
 function buildLead(patch: Partial<CrmLeadRecord> = {}): CrmLeadRecord {
@@ -40,6 +40,20 @@ function buildCadence(patch: Partial<CrmCadenceRecord> = {}): CrmCadenceRecord {
     metadata: {},
     createdAt: "2026-04-20T00:00:00.000Z",
     updatedAt: "2026-04-20T00:00:00.000Z",
+    ...patch
+  };
+}
+
+function buildContact(patch: Partial<CrmContactRecord> = {}): CrmContactRecord {
+  return {
+    id: "contact_1",
+    leadId: "lead_1",
+    channel: "email",
+    outcome: "replied",
+    summary: "对方回复愿意进一步沟通",
+    nextAction: "安排演示",
+    happenedAt: "2026-04-20T10:00:00.000Z",
+    createdAt: "2026-04-20T10:00:00.000Z",
     ...patch
   };
 }
@@ -121,6 +135,45 @@ describe("crm routes", () => {
       expect(archiveResponse.status).toBe(200);
       const payload = (await archiveResponse.json()) as { lead: Record<string, unknown> };
       expect(payload.lead.status).toBe("archived");
+    });
+  });
+
+  it("writes contact results back to leads", async () => {
+    const lead = buildLead({ latestSummary: "初次接触", nextAction: "发送资料" });
+    const updatedLead = buildLead({
+      latestSummary: "对方回复愿意进一步沟通",
+      nextAction: "安排演示",
+      lastContactAt: "2026-04-20T10:00:00.000Z"
+    });
+    const contact = buildContact();
+    const store = {
+      getCrmLead: vi.fn(() => lead),
+      listCrmContacts: vi.fn(() => [contact]),
+      createCrmContact: vi.fn(() => contact),
+      updateCrmLead: vi.fn(() => updatedLead)
+    } as unknown as VinkoStore;
+    const app = createApp(store);
+
+    await withServer(app, async (baseUrl) => {
+      const detailResponse = await fetch(`${baseUrl}/api/crm/leads/${lead.id}`);
+      expect(detailResponse.status).toBe(200);
+      const detailPayload = (await detailResponse.json()) as { contacts: Array<Record<string, unknown>> };
+      expect(detailPayload.contacts).toHaveLength(1);
+
+      const createResponse = await fetch(`${baseUrl}/api/crm/leads/${lead.id}/contacts`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          channel: "email",
+          outcome: "replied",
+          summary: "对方回复愿意进一步沟通",
+          nextAction: "安排演示",
+          happenedAt: "2026-04-20T10:00:00.000Z"
+        })
+      });
+      expect(createResponse.status).toBe(201);
+      const payload = (await createResponse.json()) as { contact: Record<string, unknown> };
+      expect(payload.contact.outcome).toBe("replied");
     });
   });
 
