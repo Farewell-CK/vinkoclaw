@@ -48,6 +48,10 @@ export type OperatorActionKind = (typeof OPERATOR_ACTION_KINDS)[number];
 
 export type TaskSource = "control-center" | "feishu" | "email" | "system";
 export type SessionSource = TaskSource;
+export const CRM_LEAD_STAGES = ["new", "contacted", "qualified", "proposal", "won", "lost"] as const;
+export type CrmLeadStage = (typeof CRM_LEAD_STAGES)[number];
+export const CRM_LEAD_STATUSES = ["active", "archived"] as const;
+export type CrmLeadStatus = (typeof CRM_LEAD_STATUSES)[number];
 
 export type MemoryBackend = "none" | "sqlite" | "vector-db";
 export const DELIVERABLE_MODES = ["answer_only", "artifact_preferred", "artifact_required"] as const;
@@ -211,6 +215,61 @@ export interface TaskAttachment {
   url: string;
   detail?: "auto" | "low" | "high";
   name?: string;
+}
+
+export interface CrmLeadRecord {
+  id: string;
+  name: string;
+  company?: string | undefined;
+  title?: string | undefined;
+  email?: string | undefined;
+  source: string;
+  stage: CrmLeadStage;
+  status: CrmLeadStatus;
+  tags: string[];
+  latestSummary: string;
+  nextAction?: string | undefined;
+  ownerRoleId?: RoleId | undefined;
+  linkedProjectId?: string | undefined;
+  lastContactAt?: string | undefined;
+  archivedAt?: string | undefined;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateCrmLeadInput {
+  name: string;
+  company?: string | undefined;
+  title?: string | undefined;
+  email?: string | undefined;
+  source: string;
+  stage?: CrmLeadStage | undefined;
+  tags?: string[] | undefined;
+  latestSummary?: string | undefined;
+  nextAction?: string | undefined;
+  ownerRoleId?: RoleId | undefined;
+  linkedProjectId?: string | undefined;
+  lastContactAt?: string | undefined;
+  metadata?: Record<string, unknown> | undefined;
+}
+
+export interface UpdateCrmLeadInput {
+  name?: string | undefined;
+  company?: string | undefined;
+  title?: string | undefined;
+  email?: string | undefined;
+  source?: string | undefined;
+  stage?: CrmLeadStage | undefined;
+  status?: CrmLeadStatus | undefined;
+  tags?: string[] | undefined;
+  latestSummary?: string | undefined;
+  nextAction?: string | undefined;
+  ownerRoleId?: RoleId | undefined;
+  linkedProjectId?: string | undefined;
+  lastContactAt?: string | undefined;
+  archivedAt?: string | undefined;
+  metadata?: Record<string, unknown> | undefined;
 }
 
 export interface TaskMetadata {

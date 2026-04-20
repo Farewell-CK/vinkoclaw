@@ -74,6 +74,7 @@ import { registerAuthRoutes } from "./routes/auth.js";
 import { registerSystemRoutes } from "./routes/system.js";
 import { registerConfigRoutes } from "./routes/config.js";
 import { registerPluginRoutes } from "./routes/plugins.js";
+import { registerCrmRoutes } from "./routes/crm.js";
 import { registerRoutingTemplateRoutes } from "./routes/routing-templates.js";
 import { registerSkillsMarketplaceRoutes } from "./routes/skills-marketplace.js";
 import { summarizeLatencyMetrics } from "./routes/response-utils.js";
@@ -4587,6 +4588,10 @@ registerSelfCheckRoutes(app, {
   latestFile: productSelfcheckLatestFile,
   historyFile: productSelfcheckHistoryFile,
   harnessRootDir: harnessReportDir,
+registerCrmRoutes(app, {
+  store
+});
+
   watcherPidFile: productSelfcheckWatcherPidFile
 });
 

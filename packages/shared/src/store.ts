@@ -16,6 +16,7 @@ import type {
   AuthSessionRecord,
   CreateApprovalInput,
   CreateAuthSessionInput,
+  CreateCrmLeadInput,
   CreateAgentInstanceInput,
   CreateCredentialInput,
   CreateGoalRunInput,
@@ -56,7 +57,11 @@ import type {
   TaskResult,
   ToolRunRecord,
   CredentialRecord,
+  CrmLeadRecord,
+  CrmLeadStage,
+  CrmLeadStatus,
   UpdateRoutingTemplateInput,
+  UpdateCrmLeadInput,
   UpdateAgentInstanceInput,
   UpdateUserInput,
   UserRecord,
@@ -917,6 +922,53 @@ function toAuthSessionRecord(row: JsonRow): AuthSessionRecord {
   };
 }
 
+function normalizeCrmLeadStage(value: unknown): CrmLeadStage {
+  switch (value) {
+    case "new":
+    case "contacted":
+    case "qualified":
+    case "proposal":
+    case "won":
+    case "lost":
+      return value;
+    default:
+      return "new";
+  }
+}
+
+function normalizeCrmLeadStatus(value: unknown): CrmLeadStatus {
+  switch (value) {
+    case "active":
+    case "archived":
+      return value;
+    default:
+      return "active";
+  }
+}
+
+function toCrmLeadRecord(row: JsonRow): CrmLeadRecord {
+  return {
+    id: String(row.id),
+    name: String(row.name ?? ""),
+    company: maybeString(row.company),
+    title: maybeString(row.title),
+    email: maybeString(row.email),
+    source: String(row.source ?? "manual"),
+    stage: normalizeCrmLeadStage(row.stage),
+    status: normalizeCrmLeadStatus(row.status),
+    tags: jsonParse<string[]>(row.tags_json, []),
+    latestSummary: String(row.latest_summary ?? ""),
+    nextAction: maybeString(row.next_action),
+    ownerRoleId: maybeString(row.owner_role_id) as RoleId | undefined,
+    linkedProjectId: maybeString(row.linked_project_id),
+    lastContactAt: maybeString(row.last_contact_at),
+    archivedAt: maybeString(row.archived_at),
+    metadata: jsonParse<Record<string, unknown>>(row.metadata_json, {}),
+    createdAt: String(row.created_at ?? now()),
+    updatedAt: String(row.updated_at ?? now())
+  };
+}
+
 function toAgentCollaboration(row: JsonRow): AgentCollaboration {
   const result: AgentCollaboration = {
     id: String(row.id),
@@ -1447,6 +1499,31 @@ export class VinkoStore {
       CREATE INDEX IF NOT EXISTS idx_auth_sessions_token ON auth_sessions(token);
       CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id);
       CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at);
+
+      CREATE TABLE IF NOT EXISTS crm_leads (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        company TEXT,
+        title TEXT,
+        email TEXT,
+        source TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        status TEXT NOT NULL,
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        latest_summary TEXT NOT NULL DEFAULT '',
+        next_action TEXT,
+        owner_role_id TEXT,
+        linked_project_id TEXT,
+        last_contact_at TEXT,
+        archived_at TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_crm_leads_status ON crm_leads(status);
+      CREATE INDEX IF NOT EXISTS idx_crm_leads_stage ON crm_leads(stage);
+      CREATE INDEX IF NOT EXISTS idx_crm_leads_project ON crm_leads(linked_project_id);
 
       CREATE TABLE IF NOT EXISTS agent_collaborations (
         id TEXT PRIMARY KEY,
@@ -5279,6 +5356,161 @@ export class VinkoStore {
       loginAttempts24h: Number(loginAttempts24h.count),
       failedLogins24h: Number(failedLogins24h.count)
     };
+  }
+
+  // CRM Leads
+
+  createCrmLead(input: CreateCrmLeadInput): CrmLeadRecord {
+    const id = randomUUID();
+    const timestamp = now();
+    this.db
+      .prepare(`
+        INSERT INTO crm_leads (
+          id, name, company, title, email, source, stage, status, tags_json, latest_summary,
+          next_action, owner_role_id, linked_project_id, last_contact_at, archived_at, metadata_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+      `)
+      .run(
+        id,
+        input.name.trim(),
+        input.company ?? null,
+        input.title ?? null,
+        input.email ?? null,
+        input.source.trim() || "manual",
+        input.stage ?? "new",
+        jsonStringify(input.tags ?? []),
+        input.latestSummary ?? "",
+        input.nextAction ?? null,
+        input.ownerRoleId ?? null,
+        input.linkedProjectId ?? null,
+        input.lastContactAt ?? null,
+        jsonStringify(input.metadata ?? {}),
+        timestamp,
+        timestamp
+      );
+    return this.getCrmLead(id)!;
+  }
+
+  getCrmLead(id: string): CrmLeadRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM crm_leads WHERE id = ?").get(id) as JsonRow | undefined;
+    return row ? toCrmLeadRecord(row) : undefined;
+  }
+
+  listCrmLeads(input?: {
+    status?: CrmLeadStatus | undefined;
+    stage?: CrmLeadStage | undefined;
+    linkedProjectId?: string | undefined;
+    limit?: number | undefined;
+  }): CrmLeadRecord[] {
+    const where: string[] = [];
+    const values: Array<string | number> = [];
+    if (input?.status) {
+      where.push("status = ?");
+      values.push(input.status);
+    }
+    if (input?.stage) {
+      where.push("stage = ?");
+      values.push(input.stage);
+    }
+    if (input?.linkedProjectId) {
+      where.push("linked_project_id = ?");
+      values.push(input.linkedProjectId);
+    }
+    const limit = Math.max(1, Math.min(500, Math.round(input?.limit ?? 100)));
+    values.push(limit);
+    const query = `
+      SELECT *
+      FROM crm_leads
+      ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `;
+    const rows = this.db.prepare(query).all(...values) as JsonRow[];
+    return rows.map(toCrmLeadRecord);
+  }
+
+  updateCrmLead(id: string, patch: UpdateCrmLeadInput): CrmLeadRecord | undefined {
+    const existing = this.getCrmLead(id);
+    if (!existing) {
+      return undefined;
+    }
+    const updates: string[] = [];
+    const values: Array<string | null> = [];
+    if (patch.name !== undefined) {
+      updates.push("name = ?");
+      values.push(patch.name.trim());
+    }
+    if (patch.company !== undefined) {
+      updates.push("company = ?");
+      values.push(patch.company ?? null);
+    }
+    if (patch.title !== undefined) {
+      updates.push("title = ?");
+      values.push(patch.title ?? null);
+    }
+    if (patch.email !== undefined) {
+      updates.push("email = ?");
+      values.push(patch.email ?? null);
+    }
+    if (patch.source !== undefined) {
+      updates.push("source = ?");
+      values.push(patch.source);
+    }
+    if (patch.stage !== undefined) {
+      updates.push("stage = ?");
+      values.push(patch.stage);
+    }
+    if (patch.status !== undefined) {
+      updates.push("status = ?");
+      values.push(patch.status);
+    }
+    if (patch.tags !== undefined) {
+      updates.push("tags_json = ?");
+      values.push(jsonStringify(patch.tags));
+    }
+    if (patch.latestSummary !== undefined) {
+      updates.push("latest_summary = ?");
+      values.push(patch.latestSummary);
+    }
+    if (patch.nextAction !== undefined) {
+      updates.push("next_action = ?");
+      values.push(patch.nextAction ?? null);
+    }
+    if (patch.ownerRoleId !== undefined) {
+      updates.push("owner_role_id = ?");
+      values.push(patch.ownerRoleId ?? null);
+    }
+    if (patch.linkedProjectId !== undefined) {
+      updates.push("linked_project_id = ?");
+      values.push(patch.linkedProjectId ?? null);
+    }
+    if (patch.lastContactAt !== undefined) {
+      updates.push("last_contact_at = ?");
+      values.push(patch.lastContactAt ?? null);
+    }
+    if (patch.archivedAt !== undefined) {
+      updates.push("archived_at = ?");
+      values.push(patch.archivedAt ?? null);
+    }
+    if (patch.metadata !== undefined) {
+      updates.push("metadata_json = ?");
+      values.push(jsonStringify(patch.metadata));
+    }
+    if (updates.length === 0) {
+      return existing;
+    }
+    updates.push("updated_at = ?");
+    values.push(now());
+    values.push(id);
+    this.db.prepare(`UPDATE crm_leads SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+    return this.getCrmLead(id);
+  }
+
+  archiveCrmLead(id: string): CrmLeadRecord | undefined {
+    return this.updateCrmLead(id, {
+      status: "archived",
+      archivedAt: now()
+    });
   }
 
   // ============ Agent Collaboration Methods ============
