@@ -4,7 +4,7 @@ import {
   orchestratorInboundMessageSchema,
   orchestratorTaskSplitSchema
 } from "@vinko/protocol";
-import { buildProjectBoardSnapshot, buildWorkflowStatusSummary } from "@vinko/shared";
+import { buildProjectBoardSnapshot, buildWorkflowStatusSummary, findProjectBoardProject, listProjectBoardProjects } from "@vinko/shared";
 import type { RoleId, TaskAttachment, TaskMetadata, TaskRecord, VinkoStore } from "@vinko/shared";
 import { enrichTaskRecord } from "./response-utils.js";
 
@@ -122,6 +122,96 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
         workspaceMemory: store.getWorkspaceMemory?.()
       })
     );
+  });
+
+  app.get("/api/projects", (_request, response) => {
+    const snapshot = buildProjectBoardSnapshot({
+      sessions: store.listSessions(100),
+      tasks: store.listTasks(500),
+      roleBindingsByRole: {
+        ceo: store.resolveSkillsForRole("ceo"),
+        cto: store.resolveSkillsForRole("cto"),
+        product: store.resolveSkillsForRole("product"),
+        uiux: store.resolveSkillsForRole("uiux"),
+        frontend: store.resolveSkillsForRole("frontend"),
+        backend: store.resolveSkillsForRole("backend"),
+        algorithm: store.resolveSkillsForRole("algorithm"),
+        qa: store.resolveSkillsForRole("qa"),
+        developer: store.resolveSkillsForRole("developer"),
+        engineering: store.resolveSkillsForRole("engineering"),
+        research: store.resolveSkillsForRole("research"),
+        operations: store.resolveSkillsForRole("operations")
+      },
+      workspaceMemory: store.getWorkspaceMemory?.()
+    });
+    response.json({
+      generatedAt: snapshot.generatedAt,
+      summary: snapshot.summary,
+      projects: listProjectBoardProjects(snapshot, { includeArchived: true })
+    });
+  });
+
+  app.get("/api/projects/:projectId", (request, response) => {
+    const snapshot = buildProjectBoardSnapshot({
+      sessions: store.listSessions(100),
+      tasks: store.listTasks(500),
+      roleBindingsByRole: {
+        ceo: store.resolveSkillsForRole("ceo"),
+        cto: store.resolveSkillsForRole("cto"),
+        product: store.resolveSkillsForRole("product"),
+        uiux: store.resolveSkillsForRole("uiux"),
+        frontend: store.resolveSkillsForRole("frontend"),
+        backend: store.resolveSkillsForRole("backend"),
+        algorithm: store.resolveSkillsForRole("algorithm"),
+        qa: store.resolveSkillsForRole("qa"),
+        developer: store.resolveSkillsForRole("developer"),
+        engineering: store.resolveSkillsForRole("engineering"),
+        research: store.resolveSkillsForRole("research"),
+        operations: store.resolveSkillsForRole("operations")
+      },
+      workspaceMemory: store.getWorkspaceMemory?.()
+    });
+    const project = findProjectBoardProject(snapshot, request.params.projectId);
+    if (!project) {
+      response.status(404).json({ error: "project_not_found" });
+      return;
+    }
+    response.json({
+      generatedAt: snapshot.generatedAt,
+      project
+    });
+  });
+
+  app.get("/api/projects/:projectId/history", (request, response) => {
+    const snapshot = buildProjectBoardSnapshot({
+      sessions: store.listSessions(100),
+      tasks: store.listTasks(500),
+      roleBindingsByRole: {
+        ceo: store.resolveSkillsForRole("ceo"),
+        cto: store.resolveSkillsForRole("cto"),
+        product: store.resolveSkillsForRole("product"),
+        uiux: store.resolveSkillsForRole("uiux"),
+        frontend: store.resolveSkillsForRole("frontend"),
+        backend: store.resolveSkillsForRole("backend"),
+        algorithm: store.resolveSkillsForRole("algorithm"),
+        qa: store.resolveSkillsForRole("qa"),
+        developer: store.resolveSkillsForRole("developer"),
+        engineering: store.resolveSkillsForRole("engineering"),
+        research: store.resolveSkillsForRole("research"),
+        operations: store.resolveSkillsForRole("operations")
+      },
+      workspaceMemory: store.getWorkspaceMemory?.()
+    });
+    const project = findProjectBoardProject(snapshot, request.params.projectId);
+    if (!project) {
+      response.status(404).json({ error: "project_not_found" });
+      return;
+    }
+    response.json({
+      projectId: project.id,
+      name: project.name,
+      history: project.history
+    });
   });
 
   app.get("/api/tasks/:taskId", (request, response) => {

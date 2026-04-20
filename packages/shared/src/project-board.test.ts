@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildProjectBoardSnapshot } from "./project-board.js";
+import { buildProjectBoardSnapshot, findProjectBoardProject, listProjectBoardProjects } from "./project-board.js";
 import type { SessionRecord, TaskRecord } from "./types.js";
 
 function buildSession(patch: Partial<SessionRecord> = {}): SessionRecord {
@@ -179,5 +179,7 @@ describe("project-board", () => {
       expect.arrayContaining(["reports/growth-research.md", "apps/landing/index.html"])
     );
     expect(snapshot.archivedProjects[0]?.name).toBe("旧项目归档");
+    expect(listProjectBoardProjects(snapshot, { includeArchived: true })).toHaveLength(2);
+    expect(findProjectBoardProject(snapshot, snapshot.projects[0]!.id)?.name).toBe("OPC 增长引擎");
   });
 });

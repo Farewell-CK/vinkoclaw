@@ -459,3 +459,23 @@ export function buildProjectBoardSnapshot(input: {
     archivedProjects
   };
 }
+
+export function listProjectBoardProjects(
+  snapshot: ProjectBoardSnapshot,
+  options?: { includeArchived?: boolean | undefined }
+): ProjectBoardProject[] {
+  const active = Array.isArray(snapshot.projects) ? snapshot.projects : [];
+  const archived = Array.isArray(snapshot.archivedProjects) ? snapshot.archivedProjects : [];
+  return options?.includeArchived ? [...active, ...archived] : active;
+}
+
+export function findProjectBoardProject(
+  snapshot: ProjectBoardSnapshot,
+  projectId: string
+): ProjectBoardProject | undefined {
+  const normalizedId = projectId.trim();
+  if (!normalizedId) {
+    return undefined;
+  }
+  return listProjectBoardProjects(snapshot, { includeArchived: true }).find((project) => project.id === normalizedId);
+}
