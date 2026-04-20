@@ -40,6 +40,68 @@ function buildCadenceFollowUpTask(input: {
   return { title, instruction };
 }
 
+function triggerCadenceFollowUp(
+  store: VinkoStore,
+  cadenceId: string
+):
+  | {
+      task: ReturnType<VinkoStore["createTask"]>;
+      session: ReturnType<VinkoStore["ensureSession"]>;
+      cadence: NonNullable<ReturnType<VinkoStore["getCrmCadence"]>>;
+    }
+  | { error: "cadence_not_found" | "lead_not_found" } {
+  const cadence = store.getCrmCadence(cadenceId);
+  if (!cadence) {
+    return { error: "cadence_not_found" };
+  }
+  const lead = store.getCrmLead(cadence.leadId);
+  if (!lead) {
+    return { error: "lead_not_found" };
+  }
+
+  const session = store.ensureSession({
+    source: "system",
+    sourceKey: `crm:lead:${lead.id}`,
+    title: `CRM / ${lead.name}`,
+    metadata: {
+      crmLeadId: lead.id,
+      crmCadenceId: cadence.id,
+      linkedProjectId: lead.linkedProjectId
+    }
+  });
+  const followUp = buildCadenceFollowUpTask({ lead, cadence });
+  const task = store.createTask({
+    sessionId: session.id,
+    source: "system",
+    roleId: cadence.ownerRoleId ?? "operations",
+    title: followUp.title,
+    instruction: followUp.instruction,
+    requestedBy: "crm-cadence",
+    priority: 72,
+    metadata: {
+      crmLeadId: lead.id,
+      crmCadenceId: cadence.id,
+      linkedProjectId: lead.linkedProjectId,
+      workflowLabel: "crm_follow_up",
+      deliverableMode: "artifact_required",
+      cadenceTriggeredAt: new Date().toISOString()
+    }
+  });
+  const lastRunAt = new Date().toISOString();
+  const nextRunAt = new Date(Date.now() + cadence.intervalDays * 24 * 60 * 60 * 1000).toISOString();
+  const updatedCadence = store.updateCrmCadence(cadence.id, {
+    lastRunAt,
+    nextRunAt,
+    status: cadence.status === "paused" || cadence.status === "archived" ? cadence.status : "active"
+  });
+
+  return {
+    task,
+    session,
+    cadence: updatedCadence ?? cadence
+  };
+}
+
 export function registerCrmRoutes(app: express.Express, deps: CrmRoutesDeps): void {
   const { store } = deps;
 
@@ -247,57 +309,52 @@ export function registerCrmRoutes(app: express.Express, deps: CrmRoutesDeps): vo
   });
 
   app.post("/api/crm/cadences/:cadenceId/trigger-followup", (request, response) => {
-    const cadence = store.getCrmCadence(request.params.cadenceId);
-    if (!cadence) {
-      response.status(404).json({ error: "cadence_not_found" });
+    const result = triggerCadenceFollowUp(store, request.params.cadenceId);
+    if ("error" in result) {
+      response.status(404).json({ error: result.error });
       return;
     }
-    const lead = store.getCrmLead(cadence.leadId);
-    if (!lead) {
-      response.status(404).json({ error: "lead_not_found" });
-      return;
+    response.status(201).json(result);
+  });
+
+  app.post("/api/crm/cadences/run-due", (_request, response) => {
+    const dueCadences = store.listCrmCadences({
+      status: "active",
+      dueBefore: new Date().toISOString(),
+      limit: 200
+    });
+    const triggered: Array<{
+      cadenceId: string;
+      taskId: string;
+      sessionId: string;
+    }> = [];
+    const skipped: Array<{
+      cadenceId: string;
+      error: string;
+    }> = [];
+
+    for (const cadence of dueCadences) {
+      const result = triggerCadenceFollowUp(store, cadence.id);
+      if ("error" in result) {
+        skipped.push({ cadenceId: cadence.id, error: result.error });
+        continue;
+      }
+      triggered.push({
+        cadenceId: cadence.id,
+        taskId: result.task.id,
+        sessionId: result.session.id
+      });
     }
 
-    const session = store.ensureSession({
-      source: "system",
-      sourceKey: `crm:lead:${lead.id}`,
-      title: `CRM / ${lead.name}`,
-      metadata: {
-        crmLeadId: lead.id,
-        crmCadenceId: cadence.id,
-        linkedProjectId: lead.linkedProjectId
-      }
-    });
-    const followUp = buildCadenceFollowUpTask({ lead, cadence });
-    const task = store.createTask({
-      sessionId: session.id,
-      source: "system",
-      roleId: cadence.ownerRoleId ?? "operations",
-      title: followUp.title,
-      instruction: followUp.instruction,
-      requestedBy: "crm-cadence",
-      priority: 72,
-      metadata: {
-        crmLeadId: lead.id,
-        crmCadenceId: cadence.id,
-        linkedProjectId: lead.linkedProjectId,
-        workflowLabel: "crm_follow_up",
-        deliverableMode: "artifact_required",
-        cadenceTriggeredAt: new Date().toISOString()
-      }
-    });
-    const lastRunAt = new Date().toISOString();
-    const nextRunAt = new Date(Date.now() + cadence.intervalDays * 24 * 60 * 60 * 1000).toISOString();
-    const updatedCadence = store.updateCrmCadence(cadence.id, {
-      lastRunAt,
-      nextRunAt,
-      status: cadence.status === "paused" || cadence.status === "archived" ? cadence.status : "active"
-    });
-
-    response.status(201).json({
-      task,
-      session,
-      cadence: updatedCadence ?? cadence
+    response.json({
+      generatedAt: new Date().toISOString(),
+      summary: {
+        dueCadences: dueCadences.length,
+        triggered: triggered.length,
+        skipped: skipped.length
+      },
+      triggered,
+      skipped
     });
   });
 }

@@ -280,4 +280,91 @@ describe("crm routes", () => {
       expect(payload.task.title).toBe("CRM Follow-up: Annie Case / weekly follow-up");
     });
   });
+
+  it("runs all due cadences in bulk", async () => {
+    const lead = buildLead();
+    const cadences = [
+      buildCadence({ id: "cadence_1" }),
+      buildCadence({ id: "cadence_2", leadId: "lead_1", label: "second follow-up" })
+    ];
+    const sessions = [
+      {
+        id: "session_1",
+        source: "system",
+        sourceKey: "crm:lead:lead_1",
+        title: "CRM / Annie Case",
+        status: "active",
+        metadata: {},
+        createdAt: "2026-04-20T00:00:00.000Z",
+        updatedAt: "2026-04-20T00:00:00.000Z",
+        lastMessageAt: "2026-04-20T00:00:00.000Z"
+      },
+      {
+        id: "session_2",
+        source: "system",
+        sourceKey: "crm:lead:lead_1",
+        title: "CRM / Annie Case",
+        status: "active",
+        metadata: {},
+        createdAt: "2026-04-20T00:00:00.000Z",
+        updatedAt: "2026-04-20T00:00:00.000Z",
+        lastMessageAt: "2026-04-20T00:00:00.000Z"
+      }
+    ];
+    const tasks = [
+      {
+        id: "task_1",
+        sessionId: "session_1",
+        source: "system",
+        roleId: "operations",
+        title: "CRM Follow-up: Annie Case / weekly follow-up",
+        instruction: "跟进内容",
+        status: "queued",
+        priority: 72,
+        metadata: {},
+        createdAt: "2026-04-20T00:00:00.000Z",
+        updatedAt: "2026-04-20T00:00:00.000Z"
+      },
+      {
+        id: "task_2",
+        sessionId: "session_2",
+        source: "system",
+        roleId: "operations",
+        title: "CRM Follow-up: Annie Case / second follow-up",
+        instruction: "跟进内容",
+        status: "queued",
+        priority: 72,
+        metadata: {},
+        createdAt: "2026-04-20T00:00:00.000Z",
+        updatedAt: "2026-04-20T00:00:00.000Z"
+      }
+    ];
+    let sessionIndex = 0;
+    let taskIndex = 0;
+    const store = {
+      listCrmCadences: vi.fn(() => cadences),
+      getCrmCadence: vi.fn((id: string) => cadences.find((item) => item.id === id)),
+      getCrmLead: vi.fn(() => lead),
+      ensureSession: vi.fn(() => sessions[sessionIndex++]),
+      createTask: vi.fn(() => tasks[taskIndex++]),
+      updateCrmCadence: vi.fn((id: string) => cadences.find((item) => item.id === id))
+    } as unknown as VinkoStore;
+    const app = createApp(store);
+
+    await withServer(app, async (baseUrl) => {
+      const runResponse = await fetch(`${baseUrl}/api/crm/cadences/run-due`, {
+        method: "POST"
+      });
+      expect(runResponse.status).toBe(200);
+      const payload = (await runResponse.json()) as {
+        summary: Record<string, number>;
+        triggered: Array<Record<string, unknown>>;
+      };
+      expect(payload.summary.dueCadences).toBe(2);
+      expect(payload.summary.triggered).toBe(2);
+      expect(payload.triggered).toHaveLength(2);
+      expect(payload.triggered[0]?.taskId).toBe("task_1");
+      expect(payload.triggered[1]?.taskId).toBe("task_2");
+    });
+  });
 });
