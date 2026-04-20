@@ -20,6 +20,8 @@ const taskResult = document.querySelector("#task-result");
 const taskDetailContainer = document.querySelector("#task-detail");
 const projectMemoryBoardContainer = document.querySelector("#project-memory-board");
 const harnessBoardContainer = document.querySelector("#harness-board");
+const crmBoardContainer = document.querySelector("#crm-board");
+const crmRunDueResult = document.querySelector("#crm-run-due-result");
 const skillsMarketRoleSelect = document.querySelector("#skills-market-role");
 const skillsMarketResult = document.querySelector("#skills-market-result");
 const skillsMarketListContainer = document.querySelector("#skills-market-list");
@@ -87,6 +89,9 @@ const I18N = {
     "panel.workflows.desc": "给创始人常用工作流的快捷触发入口。",
     "panel.harness.title": "Product Harness",
     "panel.harness.desc": "最近回归套件、通过状态和输出尾部。",
+    "panel.crm.title": "CRM 跟进节奏",
+    "panel.crm.desc": "查看线索跟进健康度、到期 cadence，并一键触发本轮跟进。",
+    "panel.crm.runDue": "运行到期跟进",
     "panel.goalRuns.title": "Goal Runs",
     "panel.goalRuns.desc": "分阶段推进的运行流，包含 harness 评分、handoff、恢复态与审批。",
     "panel.routing.title": "路由模板",
@@ -267,6 +272,9 @@ const I18N = {
     "panel.workflows.desc": "Shortcut prompts for founder delivery, PRD, research, and recap flows.",
     "panel.harness.title": "Product Harness",
     "panel.harness.desc": "Latest regression suites, pass/fail status, and output tails.",
+    "panel.crm.title": "CRM Cadences",
+    "panel.crm.desc": "Lead follow-up health, overdue cadences, and one-click follow-up execution.",
+    "panel.crm.runDue": "Run Due Follow-ups",
     "panel.goalRuns.title": "Goal Runs",
     "panel.goalRuns.desc": "Stage-driven runs with harness evidence, handoffs, resume state, and approvals.",
     "panel.routing.title": "Routing Templates",
@@ -2765,8 +2773,111 @@ function renderHarnessBoard(payload, gradesPayload, runtimeHarnessPayload) {
     .join("")}`;
 }
 
+function renderCrmBoard(board) {
+  if (!crmBoardContainer) {
+    return;
+  }
+  const summary = board?.summary || null;
+  const overdueCadences = Array.isArray(board?.overdueCadences) ? board.overdueCadences : [];
+  const activeLeads = Array.isArray(board?.activeLeads) ? board.activeLeads : [];
+  if (!summary && overdueCadences.length === 0 && activeLeads.length === 0) {
+    crmBoardContainer.innerHTML = `
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "暂无 CRM 数据" : "No CRM data yet"}</strong>
+          <span>0</span>
+        </div>
+        <p class="muted">${
+          currentLang === "zh"
+            ? "创建线索和 cadence 后，这里会显示跟进健康度与到期任务。"
+            : "Create leads and cadences to see follow-up health and due tasks here."
+        }</p>
+      </article>
+    `;
+    return;
+  }
+
+  const overviewCard = `
+    <article class="list-card compact">
+      <div class="list-head">
+        <strong>${currentLang === "zh" ? "CRM 概览" : "CRM overview"}</strong>
+        <span>${escapeHtml(String(summary?.activeCadences ?? 0))}</span>
+      </div>
+      <p class="muted">${
+        currentLang === "zh"
+          ? `活跃线索 ${Number(summary?.activeLeads ?? 0)} · 活跃 cadence ${Number(summary?.activeCadences ?? 0)}`
+          : `active leads ${Number(summary?.activeLeads ?? 0)} · active cadences ${Number(summary?.activeCadences ?? 0)}`
+      }</p>
+      <p class="muted">${
+        currentLang === "zh"
+          ? `到期 cadence ${Number(summary?.overdueCadences ?? 0)} · 关联项目 ${Number(summary?.projectLinkedLeads ?? 0)}`
+          : `overdue cadences ${Number(summary?.overdueCadences ?? 0)} · linked projects ${Number(
+              summary?.projectLinkedLeads ?? 0
+            )}`
+      }</p>
+    </article>
+  `;
+
+  const overdueCards = overdueCadences.slice(0, 8).map((cadence) => {
+    const objective = typeof cadence?.objective === "string" ? cadence.objective : "";
+    const label = typeof cadence?.label === "string" ? cadence.label : "cadence";
+    const leadId = typeof cadence?.leadId === "string" ? cadence.leadId : "lead";
+    const nextRunAt = typeof cadence?.nextRunAt === "string" ? cadence.nextRunAt : "";
+    return `
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${escapeHtml(label)}</strong>
+          <span>${escapeHtml(nextRunAt || (currentLang === "zh" ? "已到期" : "due"))}</span>
+        </div>
+        <p class="muted">${escapeHtml(leadId)} · ${escapeHtml(String(cadence?.channel ?? "manual"))}</p>
+        <p>${escapeHtml(objective || (currentLang === "zh" ? "无目标描述" : "No objective"))}</p>
+      </article>
+    `;
+  });
+
+  const leadCards = activeLeads.slice(0, 8).map((lead) => {
+    const name = typeof lead?.name === "string" ? lead.name : "lead";
+    const stage = typeof lead?.stage === "string" ? lead.stage : "new";
+    const summaryText = typeof lead?.latestSummary === "string" ? lead.latestSummary : "";
+    return `
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${escapeHtml(name)}</strong>
+          <span>${escapeHtml(stage)}</span>
+        </div>
+        <p class="muted">${escapeHtml(String(lead?.source ?? "manual"))}${
+          lead?.linkedProjectId ? ` · ${escapeHtml(String(lead.linkedProjectId))}` : ""
+        }</p>
+        <p>${escapeHtml(summaryText || (currentLang === "zh" ? "暂无摘要" : "No summary"))}</p>
+      </article>
+    `;
+  });
+
+  crmBoardContainer.innerHTML = `
+    ${overviewCard}
+    ${
+      overdueCards.length > 0
+        ? overdueCards.join("")
+        : `<article class="list-card compact"><div class="list-head"><strong>${
+            currentLang === "zh" ? "到期跟进" : "Due follow-ups"
+          }</strong><span>0</span></div><p class="muted">${
+            currentLang === "zh" ? "当前没有到期 cadence。" : "No overdue cadences right now."
+          }</p></article>`
+    }
+    ${
+      leadCards.length > 0
+        ? leadCards.join("")
+        : `<article class="list-card compact"><div class="list-head"><strong>${
+            currentLang === "zh" ? "活跃线索" : "Active leads"
+          }</strong><span>0</span></div><p class="muted">${
+            currentLang === "zh" ? "当前没有活跃线索。" : "No active leads right now."
+          }</p></article>`
+    }
+  `;
+}
+
 async function refresh() {
-  const [dashboard, rolesPayload, channelsPayload, providersPayload, projectBoardPayload, goalRunsPayload, harnessPayload, telemetryPayload, runtimeHarnessPayload, harnessGradesPayload] = await Promise.all([
+  const [dashboard, rolesPayload, channelsPayload, providersPayload, projectBoardPayload, goalRunsPayload, harnessPayload, telemetryPayload, runtimeHarnessPayload, harnessGradesPayload, crmBoardPayload] = await Promise.all([
     request("/api/dashboard"),
     request("/api/roles"),
     request("/api/channels/status").catch(() => null),
@@ -2776,7 +2887,8 @@ async function refresh() {
     request("/api/system/harness").catch(() => null),
     request("/api/system/telemetry").catch(() => null),
     request("/api/system/runtime-harness").catch(() => null),
-    request("/api/system/harness/grades").catch(() => null)
+    request("/api/system/harness/grades").catch(() => null),
+    request("/api/crm/dashboard").catch(() => null)
   ]);
 
   renderRoles(rolesPayload);
@@ -2794,6 +2906,7 @@ async function refresh() {
   renderGoalRuns(window._lastGoalRuns);
   lastRuntimeHarnessPayload = runtimeHarnessPayload;
   renderHarnessBoard(harnessPayload, harnessGradesPayload, runtimeHarnessPayload);
+  renderCrmBoard(crmBoardPayload);
   renderSkillsMarketResults(lastSkillsMarketResults);
   renderTelemetryBoard(telemetryPayload, runtimeHarnessPayload);
   if (selectedGoalRunId) {
@@ -2881,6 +2994,27 @@ workflowShortcutContainer?.addEventListener("click", (event) => {
     return;
   }
   applyWorkflowPreset(target.getAttribute("data-workflow-preset") || "");
+});
+
+document.querySelector("#crm-run-due-btn")?.addEventListener("click", async () => {
+  try {
+    const result = await request("/api/crm/cadences/run-due", {
+      method: "POST"
+    });
+    if (crmRunDueResult) {
+      crmRunDueResult.textContent =
+        currentLang === "zh"
+          ? `已处理到期 cadence：${Number(result?.summary?.triggered ?? 0)} 条，跳过 ${Number(result?.summary?.skipped ?? 0)} 条。`
+          : `Processed due cadences: ${Number(result?.summary?.triggered ?? 0)} triggered, ${Number(
+              result?.summary?.skipped ?? 0
+            )} skipped.`;
+    }
+    await refresh();
+  } catch (error) {
+    if (crmRunDueResult) {
+      crmRunDueResult.textContent = error instanceof Error ? error.message : String(error);
+    }
+  }
 });
 
 document.querySelector("#skills-market-form")?.addEventListener("submit", async (event) => {
