@@ -2460,6 +2460,11 @@ function renderProjectMemoryBoard(board) {
           <p class="muted">${formatDateTime(project.updatedAt)}</p>
           <p><strong>${currentLang === "zh" ? "当前目标" : "Current goal"}:</strong> ${escapeHtml(project.currentGoal || "-")}</p>
           <p><strong>${currentLang === "zh" ? "最近结论" : "Latest summary"}:</strong> ${escapeHtml(project.latestSummary || "-")}</p>
+          <div class="pill-row" style="margin:8px 0;">
+            <span class="pill">${currentLang === "zh" ? "线索" : "Leads"} · ${Number(project.crmLeadCount ?? 0)}</span>
+            <span class="pill">${currentLang === "zh" ? "活跃 cadence" : "Active cadences"} · ${Number(project.crmActiveCadences ?? 0)}</span>
+            <span class="pill">${currentLang === "zh" ? "到期 cadence" : "Overdue cadences"} · ${Number(project.crmOverdueCadences ?? 0)}</span>
+          </div>
           <div class="memory-block">
             <strong>${currentLang === "zh" ? "项目时间线" : "Project history"}</strong>
             ${
@@ -2507,6 +2512,8 @@ function renderProjectMemoryBoard(board) {
         <span class="pill">${currentLang === "zh" ? "待补充" : "Awaiting input"} · ${summary?.awaitingInputTasks ?? 0}</span>
         <span class="pill">${currentLang === "zh" ? "角色就绪" : "Roles ready"} · ${summary?.readyRoles ?? 0}</span>
         <span class="pill">${currentLang === "zh" ? "验证债务" : "Verification debt"} · ${summary?.verificationDebtRoles ?? 0}</span>
+        <span class="pill">${currentLang === "zh" ? "活跃线索" : "Active leads"} · ${summary?.activeLeads ?? 0}</span>
+        <span class="pill">${currentLang === "zh" ? "到期 cadence" : "Overdue cadences"} · ${summary?.overdueCadences ?? 0}</span>
       </div>
     </article>
     ${
@@ -2998,15 +3005,16 @@ workflowShortcutContainer?.addEventListener("click", (event) => {
 
 document.querySelector("#crm-run-due-btn")?.addEventListener("click", async () => {
   try {
-    const result = await request("/api/crm/cadences/run-due", {
+    const result = await request("/api/recurring/run-due", {
       method: "POST"
     });
+    const recurring = result?.crm ?? result;
     if (crmRunDueResult) {
       crmRunDueResult.textContent =
         currentLang === "zh"
-          ? `已处理到期 cadence：${Number(result?.summary?.triggered ?? 0)} 条，跳过 ${Number(result?.summary?.skipped ?? 0)} 条。`
-          : `Processed due cadences: ${Number(result?.summary?.triggered ?? 0)} triggered, ${Number(
-              result?.summary?.skipped ?? 0
+          ? `已处理到期 cadence：${Number(recurring?.summary?.triggered ?? 0)} 条，跳过 ${Number(recurring?.summary?.skipped ?? 0)} 条。`
+          : `Processed due cadences: ${Number(recurring?.summary?.triggered ?? 0)} triggered, ${Number(
+              recurring?.summary?.skipped ?? 0
             )} skipped.`;
     }
     await refresh();

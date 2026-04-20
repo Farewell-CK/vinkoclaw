@@ -104,6 +104,10 @@ export interface ProjectBoardSummary {
   readyRoles: number;
   verificationDebtRoles: number;
   failedSkills: number;
+  activeLeads: number;
+  activeCadences: number;
+  overdueCadences: number;
+  linkedProjectLeads: number;
 }
 
 export interface ProjectBoardPrimaryView {
@@ -175,6 +179,9 @@ export interface ProjectBoardProject {
   blockers: string[];
   nextActions: string[];
   latestArtifacts: string[];
+  crmLeadCount: number;
+  crmActiveCadences: number;
+  crmOverdueCadences: number;
   history: ProjectBoardProjectHistoryEntry[];
 }
 

@@ -75,6 +75,7 @@ import { registerSystemRoutes } from "./routes/system.js";
 import { registerConfigRoutes } from "./routes/config.js";
 import { registerPluginRoutes } from "./routes/plugins.js";
 import { registerCrmRoutes } from "./routes/crm.js";
+import { registerRecurringRoutes } from "./routes/recurring.js";
 import { registerRoutingTemplateRoutes } from "./routes/routing-templates.js";
 import { registerSkillsMarketplaceRoutes } from "./routes/skills-marketplace.js";
 import { summarizeLatencyMetrics } from "./routes/response-utils.js";
@@ -4550,6 +4551,10 @@ registerConfigRoutes(app, {
 });
 
 registerPluginRoutes(app, {
+  store
+});
+
+registerRecurringRoutes(app, {
   store
 });
 

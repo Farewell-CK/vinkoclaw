@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildProjectBoardSnapshot, findProjectBoardProject, listProjectBoardProjects } from "./project-board.js";
-import type { SessionRecord, TaskRecord } from "./types.js";
+import type { CrmCadenceRecord, CrmLeadRecord, SessionRecord, TaskRecord } from "./types.js";
 
 function buildSession(patch: Partial<SessionRecord> = {}): SessionRecord {
   return {
@@ -27,6 +27,40 @@ function buildTask(patch: Partial<TaskRecord> = {}): TaskRecord {
     instruction: "continue",
     status: "queued",
     priority: 80,
+    metadata: {},
+    createdAt: "2026-04-19T00:00:00.000Z",
+    updatedAt: "2026-04-19T00:00:00.000Z",
+    ...patch
+  };
+}
+
+function buildLead(patch: Partial<CrmLeadRecord> = {}): CrmLeadRecord {
+  return {
+    id: "lead_1",
+    name: "Annie Case",
+    source: "manual",
+    stage: "qualified",
+    status: "active",
+    tags: [],
+    latestSummary: "",
+    metadata: {},
+    linkedProjectId: "project:opc-增长引擎",
+    createdAt: "2026-04-19T00:00:00.000Z",
+    updatedAt: "2026-04-19T00:00:00.000Z",
+    ...patch
+  };
+}
+
+function buildCadence(patch: Partial<CrmCadenceRecord> = {}): CrmCadenceRecord {
+  return {
+    id: "cadence_1",
+    leadId: "lead_1",
+    label: "weekly follow-up",
+    channel: "email",
+    intervalDays: 7,
+    objective: "安排演示",
+    nextRunAt: "2026-04-18T09:00:00.000Z",
+    status: "active",
     metadata: {},
     createdAt: "2026-04-19T00:00:00.000Z",
     updatedAt: "2026-04-19T00:00:00.000Z",
@@ -166,7 +200,9 @@ describe("project-board", () => {
           ]
         },
         updatedAt: "2026-04-19T05:00:00.000Z"
-      }
+      },
+      crmLeads: [buildLead()],
+      crmCadences: [buildCadence()]
     });
 
     expect(snapshot.summary.activeProjects).toBe(1);
@@ -178,6 +214,12 @@ describe("project-board", () => {
     expect(snapshot.projects[0]?.latestArtifacts).toEqual(
       expect.arrayContaining(["reports/growth-research.md", "apps/landing/index.html"])
     );
+    expect(snapshot.summary.activeLeads).toBe(1);
+    expect(snapshot.summary.activeCadences).toBe(1);
+    expect(snapshot.summary.overdueCadences).toBe(1);
+    expect(snapshot.projects[0]?.crmLeadCount).toBe(1);
+    expect(snapshot.projects[0]?.crmActiveCadences).toBe(1);
+    expect(snapshot.projects[0]?.crmOverdueCadences).toBe(1);
     expect(snapshot.archivedProjects[0]?.name).toBe("旧项目归档");
     expect(listProjectBoardProjects(snapshot, { includeArchived: true })).toHaveLength(2);
     expect(findProjectBoardProject(snapshot, snapshot.projects[0]!.id)?.name).toBe("OPC 增长引擎");

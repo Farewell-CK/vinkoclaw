@@ -13,6 +13,28 @@ export interface CrmRoutesDeps {
   store: VinkoStore;
 }
 
+export function buildCrmDashboardSnapshot(store: VinkoStore) {
+  const leads = store.listCrmLeads({ limit: 500 });
+  const activeCadences = store.listCrmCadences({ status: "active", limit: 500 });
+  const nowIso = new Date().toISOString();
+  const overdueCadences = store.listCrmCadences({
+    status: "active",
+    dueBefore: nowIso,
+    limit: 500
+  });
+  return {
+    generatedAt: nowIso,
+    summary: {
+      activeLeads: leads.filter((lead) => lead.status === "active").length,
+      activeCadences: activeCadences.length,
+      overdueCadences: overdueCadences.length,
+      projectLinkedLeads: leads.filter((lead) => Boolean(lead.linkedProjectId)).length
+    },
+    overdueCadences: overdueCadences.slice(0, 20),
+    activeLeads: leads.slice(0, 20)
+  };
+}
+
 function buildCadenceFollowUpTask(input: {
   lead: ReturnType<VinkoStore["getCrmLead"]>;
   cadence: ReturnType<VinkoStore["getCrmCadence"]>;
@@ -40,7 +62,7 @@ function buildCadenceFollowUpTask(input: {
   return { title, instruction };
 }
 
-function triggerCadenceFollowUp(
+export function triggerCadenceFollowUp(
   store: VinkoStore,
   cadenceId: string
 ):
@@ -99,6 +121,47 @@ function triggerCadenceFollowUp(
     task,
     session,
     cadence: updatedCadence ?? cadence
+  };
+}
+
+export function runDueCadences(store: VinkoStore) {
+  const dueCadences = store.listCrmCadences({
+    status: "active",
+    dueBefore: new Date().toISOString(),
+    limit: 200
+  });
+  const triggered: Array<{
+    cadenceId: string;
+    taskId: string;
+    sessionId: string;
+  }> = [];
+  const skipped: Array<{
+    cadenceId: string;
+    error: string;
+  }> = [];
+
+  for (const cadence of dueCadences) {
+    const result = triggerCadenceFollowUp(store, cadence.id);
+    if ("error" in result) {
+      skipped.push({ cadenceId: cadence.id, error: result.error });
+      continue;
+    }
+    triggered.push({
+      cadenceId: cadence.id,
+      taskId: result.task.id,
+      sessionId: result.session.id
+    });
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    summary: {
+      dueCadences: dueCadences.length,
+      triggered: triggered.length,
+      skipped: skipped.length
+    },
+    triggered,
+    skipped
   };
 }
 
@@ -215,25 +278,7 @@ export function registerCrmRoutes(app: express.Express, deps: CrmRoutesDeps): vo
   });
 
   app.get("/api/crm/dashboard", (_request, response) => {
-    const leads = store.listCrmLeads({ limit: 500 });
-    const activeCadences = store.listCrmCadences({ status: "active", limit: 500 });
-    const nowIso = new Date().toISOString();
-    const overdueCadences = store.listCrmCadences({
-      status: "active",
-      dueBefore: nowIso,
-      limit: 500
-    });
-    response.json({
-      generatedAt: nowIso,
-      summary: {
-        activeLeads: leads.filter((lead) => lead.status === "active").length,
-        activeCadences: activeCadences.length,
-        overdueCadences: overdueCadences.length,
-        projectLinkedLeads: leads.filter((lead) => Boolean(lead.linkedProjectId)).length
-      },
-      overdueCadences: overdueCadences.slice(0, 20),
-      activeLeads: leads.slice(0, 20)
-    });
+    response.json(buildCrmDashboardSnapshot(store));
   });
 
   app.post("/api/crm/cadences", (request, response) => {
@@ -318,43 +363,6 @@ export function registerCrmRoutes(app: express.Express, deps: CrmRoutesDeps): vo
   });
 
   app.post("/api/crm/cadences/run-due", (_request, response) => {
-    const dueCadences = store.listCrmCadences({
-      status: "active",
-      dueBefore: new Date().toISOString(),
-      limit: 200
-    });
-    const triggered: Array<{
-      cadenceId: string;
-      taskId: string;
-      sessionId: string;
-    }> = [];
-    const skipped: Array<{
-      cadenceId: string;
-      error: string;
-    }> = [];
-
-    for (const cadence of dueCadences) {
-      const result = triggerCadenceFollowUp(store, cadence.id);
-      if ("error" in result) {
-        skipped.push({ cadenceId: cadence.id, error: result.error });
-        continue;
-      }
-      triggered.push({
-        cadenceId: cadence.id,
-        taskId: result.task.id,
-        sessionId: result.session.id
-      });
-    }
-
-    response.json({
-      generatedAt: new Date().toISOString(),
-      summary: {
-        dueCadences: dueCadences.length,
-        triggered: triggered.length,
-        skipped: skipped.length
-      },
-      triggered,
-      skipped
-    });
+    response.json(runDueCadences(store));
   });
 }

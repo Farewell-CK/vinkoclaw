@@ -119,7 +119,9 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
         sessions,
         tasks,
         roleBindingsByRole,
-        workspaceMemory: store.getWorkspaceMemory?.()
+        workspaceMemory: store.getWorkspaceMemory?.(),
+        crmLeads: store.listCrmLeads?.({ limit: 500 }) ?? [],
+        crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? []
       })
     );
   });
@@ -142,7 +144,9 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
         research: store.resolveSkillsForRole("research"),
         operations: store.resolveSkillsForRole("operations")
       },
-      workspaceMemory: store.getWorkspaceMemory?.()
+      workspaceMemory: store.getWorkspaceMemory?.(),
+      crmLeads: store.listCrmLeads?.({ limit: 500 }) ?? [],
+      crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? []
     });
     response.json({
       generatedAt: snapshot.generatedAt,
@@ -169,7 +173,9 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
         research: store.resolveSkillsForRole("research"),
         operations: store.resolveSkillsForRole("operations")
       },
-      workspaceMemory: store.getWorkspaceMemory?.()
+      workspaceMemory: store.getWorkspaceMemory?.(),
+      crmLeads: store.listCrmLeads?.({ limit: 500 }) ?? [],
+      crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? []
     });
     const project = findProjectBoardProject(snapshot, request.params.projectId);
     if (!project) {
@@ -200,7 +206,9 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
         research: store.resolveSkillsForRole("research"),
         operations: store.resolveSkillsForRole("operations")
       },
-      workspaceMemory: store.getWorkspaceMemory?.()
+      workspaceMemory: store.getWorkspaceMemory?.(),
+      crmLeads: store.listCrmLeads?.({ limit: 500 }) ?? [],
+      crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? []
     });
     const project = findProjectBoardProject(snapshot, request.params.projectId);
     if (!project) {

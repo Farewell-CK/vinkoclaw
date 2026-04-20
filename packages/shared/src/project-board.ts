@@ -3,6 +3,8 @@ import { normalizeProjectMemory } from "./project-memory.js";
 import { listRoles } from "./roles.js";
 import type { WorkspaceMemoryRecord } from "./workspace-memory.js";
 import type {
+  CrmCadenceRecord,
+  CrmLeadRecord,
   ProjectBoardProject,
   ProjectBoardProjectHistoryEntry,
   ProjectBoardPrimaryView,
@@ -32,6 +34,20 @@ function normalizeProjectKey(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
     .replace(/^-+|-+$/g, "") || "project";
+}
+
+function matchesProjectLink(input: {
+  linkedProjectId?: string | undefined;
+  projectId: string;
+  projectName: string;
+}): boolean {
+  const linked = (input.linkedProjectId ?? "").trim().toLowerCase();
+  if (!linked) {
+    return false;
+  }
+  const projectId = input.projectId.trim().toLowerCase();
+  const projectNameKey = normalizeProjectKey(input.projectName);
+  return linked === projectId || linked === projectNameKey || linked.endsWith(`:${projectNameKey}`);
 }
 
 function mergeArtifacts(memoryArtifacts: string[], orchestration: OrchestrationStateRecord | undefined): string[] {
@@ -190,6 +206,8 @@ function buildProjectCollection(input: {
   >;
   workspaceMemory?: WorkspaceMemoryRecord | undefined;
   archived?: boolean;
+  crmLeads?: CrmLeadRecord[] | undefined;
+  crmCadences?: CrmCadenceRecord[] | undefined;
 }): ProjectBoardProject[] {
   const grouped = new Map<
     string,
@@ -285,6 +303,36 @@ function buildProjectCollection(input: {
         blockers,
         nextActions,
         latestArtifacts,
+        crmLeadCount: (input.crmLeads ?? []).filter((lead) =>
+          matchesProjectLink({
+            linkedProjectId: lead.linkedProjectId,
+            projectId: id,
+            projectName: value.name
+          })
+        ).length,
+        crmActiveCadences: (input.crmCadences ?? []).filter((cadence) => {
+          const linkedLead = (input.crmLeads ?? []).find((lead) => lead.id === cadence.leadId);
+          return (
+            cadence.status === "active" &&
+            matchesProjectLink({
+              linkedProjectId: linkedLead?.linkedProjectId,
+              projectId: id,
+              projectName: value.name
+            })
+          );
+        }).length,
+        crmOverdueCadences: (input.crmCadences ?? []).filter((cadence) => {
+          const linkedLead = (input.crmLeads ?? []).find((lead) => lead.id === cadence.leadId);
+          return (
+            cadence.status === "active" &&
+            parseTimestamp(cadence.nextRunAt) <= Date.now() &&
+            matchesProjectLink({
+              linkedProjectId: linkedLead?.linkedProjectId,
+              projectId: id,
+              projectName: value.name
+            })
+          );
+        }).length,
         history: sortedHistory.slice(0, 8)
       };
     })
@@ -358,6 +406,8 @@ export function buildProjectBoardSnapshot(input: {
   tasks: TaskRecord[];
   roleBindingsByRole: Partial<Record<ProjectBoardRoleReadiness["roleId"], SkillBindingRecord[]>>;
   workspaceMemory?: WorkspaceMemoryRecord | undefined;
+  crmLeads?: CrmLeadRecord[] | undefined;
+  crmCadences?: CrmCadenceRecord[] | undefined;
 }): ProjectBoardSnapshot {
   const orchestrationBySession = new Map<
     string,
@@ -391,13 +441,17 @@ export function buildProjectBoardSnapshot(input: {
   const projects = buildProjectCollection({
     sessions: input.sessions,
     orchestrationBySession,
-    workspaceMemory: input.workspaceMemory
+    workspaceMemory: input.workspaceMemory,
+    crmLeads: input.crmLeads,
+    crmCadences: input.crmCadences
   });
   const archivedProjects = buildProjectCollection({
     sessions: input.sessions,
     orchestrationBySession,
     workspaceMemory: input.workspaceMemory,
-    archived: true
+    archived: true,
+    crmLeads: input.crmLeads,
+    crmCadences: input.crmCadences
   });
   const workstreams = sessionsWithState
     .slice(0, 6)
@@ -435,6 +489,9 @@ export function buildProjectBoardSnapshot(input: {
     10
   );
   const teamReadiness = buildRoleReadiness(input.roleBindingsByRole);
+  const crmLeads = input.crmLeads ?? [];
+  const crmCadences = input.crmCadences ?? [];
+  const overdueCadences = crmCadences.filter((cadence) => cadence.status === "active" && parseTimestamp(cadence.nextRunAt) <= Date.now());
 
   return {
     generatedAt: new Date().toISOString(),
@@ -446,7 +503,11 @@ export function buildProjectBoardSnapshot(input: {
       recentArtifacts: latestArtifacts.length,
       readyRoles: teamReadiness.filter((role) => role.ready).length,
       verificationDebtRoles: teamReadiness.filter((role) => role.unverifiedSkills > 0).length,
-      failedSkills: teamReadiness.reduce((total, role) => total + role.failedSkills, 0)
+      failedSkills: teamReadiness.reduce((total, role) => total + role.failedSkills, 0),
+      activeLeads: crmLeads.filter((lead) => lead.status === "active").length,
+      activeCadences: crmCadences.filter((cadence) => cadence.status === "active").length,
+      overdueCadences: overdueCadences.length,
+      linkedProjectLeads: crmLeads.filter((lead) => Boolean(lead.linkedProjectId)).length
     },
     primary,
     blockers,
