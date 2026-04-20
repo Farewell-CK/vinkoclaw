@@ -121,4 +121,30 @@ describe("VinkoStore CRM cadences", () => {
     expect(archived?.status).toBe("archived");
     expect(store.listCrmCadences({ status: "archived" })).toHaveLength(1);
   });
+
+  it("filters cadences by due date", () => {
+    const store = createTestStore();
+    const lead = store.createCrmLead({
+      name: "Due Prospect",
+      source: "email"
+    });
+    store.createCrmCadence({
+      leadId: lead.id,
+      label: "overdue cadence",
+      intervalDays: 2,
+      objective: "尽快补发跟进",
+      nextRunAt: "2026-04-20T09:00:00.000Z"
+    });
+    store.createCrmCadence({
+      leadId: lead.id,
+      label: "future cadence",
+      intervalDays: 7,
+      objective: "下周再跟进",
+      nextRunAt: "2026-04-27T09:00:00.000Z"
+    });
+
+    const due = store.listCrmCadences({ dueBefore: "2026-04-21T00:00:00.000Z" });
+    expect(due).toHaveLength(1);
+    expect(due[0]?.label).toBe("overdue cadence");
+  });
 });

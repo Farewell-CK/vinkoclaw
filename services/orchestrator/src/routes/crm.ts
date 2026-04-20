@@ -112,11 +112,38 @@ export function registerCrmRoutes(app: express.Express, deps: CrmRoutesDeps): vo
       typeof request.query.leadId === "string" && request.query.leadId.trim()
         ? request.query.leadId.trim()
         : undefined;
+    const dueBefore =
+      typeof request.query.dueBefore === "string" && request.query.dueBefore.trim()
+        ? request.query.dueBefore.trim()
+        : undefined;
     response.json({
       cadences: store.listCrmCadences({
         leadId,
-        status: includeArchived ? status : status ?? "active"
+        status: includeArchived ? status : status ?? "active",
+        dueBefore
       })
+    });
+  });
+
+  app.get("/api/crm/dashboard", (_request, response) => {
+    const leads = store.listCrmLeads({ limit: 500 });
+    const activeCadences = store.listCrmCadences({ status: "active", limit: 500 });
+    const nowIso = new Date().toISOString();
+    const overdueCadences = store.listCrmCadences({
+      status: "active",
+      dueBefore: nowIso,
+      limit: 500
+    });
+    response.json({
+      generatedAt: nowIso,
+      summary: {
+        activeLeads: leads.filter((lead) => lead.status === "active").length,
+        activeCadences: activeCadences.length,
+        overdueCadences: overdueCadences.length,
+        projectLinkedLeads: leads.filter((lead) => Boolean(lead.linkedProjectId)).length
+      },
+      overdueCadences: overdueCadences.slice(0, 20),
+      activeLeads: leads.slice(0, 20)
     });
   });
 

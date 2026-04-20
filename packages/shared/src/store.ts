@@ -5601,6 +5601,7 @@ export class VinkoStore {
   listCrmCadences(input?: {
     leadId?: string | undefined;
     status?: CrmCadenceStatus | undefined;
+    dueBefore?: string | undefined;
     limit?: number | undefined;
   }): CrmCadenceRecord[] {
     const where: string[] = [];
@@ -5612,6 +5613,10 @@ export class VinkoStore {
     if (input?.status) {
       where.push("status = ?");
       values.push(input.status);
+    }
+    if (input?.dueBefore) {
+      where.push("next_run_at <= ?");
+      values.push(input.dueBefore);
     }
     const limit = Math.max(1, Math.min(500, Math.round(input?.limit ?? 100)));
     values.push(limit);

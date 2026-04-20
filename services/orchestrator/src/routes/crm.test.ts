@@ -189,4 +189,35 @@ describe("crm routes", () => {
       expect(payload.cadence.status).toBe("archived");
     });
   });
+
+  it("returns a CRM dashboard with overdue cadences", async () => {
+    const lead = buildLead({ linkedProjectId: "project:vinkoclaw" });
+    const overdue = buildCadence({ nextRunAt: "2026-04-19T09:00:00.000Z" });
+    const active = buildCadence({ id: "cadence_2", nextRunAt: "2026-04-25T09:00:00.000Z" });
+    const store = {
+      listCrmLeads: vi.fn(() => [lead]),
+      listCrmCadences: vi
+        .fn()
+        .mockImplementation((input?: { dueBefore?: string; status?: string }) =>
+          input?.dueBefore ? [overdue] : input?.status === "active" ? [overdue, active] : [overdue, active]
+        )
+    } as unknown as VinkoStore;
+    const app = createApp(store);
+
+    await withServer(app, async (baseUrl) => {
+      const dashboardResponse = await fetch(`${baseUrl}/api/crm/dashboard`);
+      expect(dashboardResponse.status).toBe(200);
+      const payload = (await dashboardResponse.json()) as {
+        summary: Record<string, number>;
+        overdueCadences: Array<Record<string, unknown>>;
+        activeLeads: Array<Record<string, unknown>>;
+      };
+      expect(payload.summary.activeLeads).toBe(1);
+      expect(payload.summary.activeCadences).toBe(2);
+      expect(payload.summary.overdueCadences).toBe(1);
+      expect(payload.summary.projectLinkedLeads).toBe(1);
+      expect(payload.overdueCadences[0]?.id).toBe("cadence_1");
+      expect(payload.activeLeads[0]?.id).toBe("lead_1");
+    });
+  });
 });
