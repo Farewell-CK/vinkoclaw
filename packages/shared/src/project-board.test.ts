@@ -302,4 +302,53 @@ describe("project-board", () => {
       expect.arrayContaining(["decision:implementation", "verification:verified", "artifact:implementation"])
     );
   });
+
+  it("includes goal-run progress in project history", () => {
+    const snapshot = buildProjectBoardSnapshot({
+      sessions: [
+        buildSession({
+          id: "session_goal_run",
+          title: "增长项目",
+          metadata: {
+            projectMemory: {
+              currentGoal: "增长项目",
+              currentStage: "deploy",
+              latestSummary: "目标流程推进中",
+              updatedAt: "2026-04-20T04:00:00.000Z",
+              updatedBy: "operations"
+            }
+          }
+        })
+      ],
+      tasks: [],
+      roleBindingsByRole: {},
+      goalRuns: [
+        {
+          id: "goal_1",
+          source: "control-center",
+          objective: "完成增长项目从实现到部署",
+          status: "running",
+          currentStage: "deploy",
+          sessionId: "session_goal_run",
+          language: "zh-CN",
+          metadata: {},
+          context: {},
+          retryCount: 0,
+          maxRetries: 2,
+          awaitingInputFields: [],
+          result: {
+            summary: "部署前检查已完成",
+            deliverable: "等待最终部署",
+            nextActions: ["执行部署"]
+          },
+          createdAt: "2026-04-20T03:30:00.000Z",
+          updatedAt: "2026-04-20T04:05:00.000Z"
+        }
+      ]
+    });
+
+    const project = snapshot.projects[0];
+    expect(project?.history.map((entry) => entry.kind)).toEqual(expect.arrayContaining(["session", "goal_run"]));
+    expect(project?.history.map((entry) => entry.stage)).toContain("goal_run:deploy:running");
+  });
 });

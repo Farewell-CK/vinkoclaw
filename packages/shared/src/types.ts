@@ -163,6 +163,7 @@ export interface ProjectBoardProjectHistoryEntry {
     | "workspace"
     | "crm_lead"
     | "crm_cadence"
+    | "goal_run"
     | "orchestration_decision"
     | "orchestration_verification"
     | "orchestration_artifact";

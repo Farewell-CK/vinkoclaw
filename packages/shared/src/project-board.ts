@@ -5,6 +5,7 @@ import type { WorkspaceMemoryRecord } from "./workspace-memory.js";
 import type {
   CrmCadenceRecord,
   CrmLeadRecord,
+  GoalRunRecord,
   ProjectBoardProject,
   ProjectBoardProjectHistoryEntry,
   ProjectBoardPrimaryView,
@@ -311,6 +312,28 @@ function buildCrmCadenceHistoryEntry(input: {
   };
 }
 
+function buildGoalRunHistoryEntry(input: {
+  run: GoalRunRecord;
+  sessionTitle: string;
+  sessionSource: SessionRecord["source"];
+}): ProjectBoardProjectHistoryEntry {
+  const runSummary =
+    input.run.result?.summary?.trim() ||
+    input.run.errorText?.trim() ||
+    input.run.awaitingInputPrompt?.trim() ||
+    input.run.objective.trim();
+  return {
+    kind: "goal_run",
+    sessionId: input.run.sessionId,
+    sessionTitle: input.sessionTitle,
+    source: input.sessionSource,
+    updatedAt: input.run.updatedAt || input.run.createdAt,
+    stage: `goal_run:${input.run.currentStage}:${input.run.status}`,
+    summary: runSummary,
+    artifacts: []
+  };
+}
+
 function buildProjectCollection(input: {
   sessions: SessionRecord[];
   orchestrationBySession: Map<
@@ -325,6 +348,7 @@ function buildProjectCollection(input: {
   archived?: boolean;
   crmLeads?: CrmLeadRecord[] | undefined;
   crmCadences?: CrmCadenceRecord[] | undefined;
+  goalRuns?: GoalRunRecord[] | undefined;
 }): ProjectBoardProject[] {
   const grouped = new Map<
     string,
@@ -451,6 +475,37 @@ function buildProjectCollection(input: {
       if (parseTimestamp(historyEntry.updatedAt) > parseTimestamp(value.updatedAt)) {
         value.updatedAt = historyEntry.updatedAt;
       }
+    }
+  }
+
+  for (const run of input.goalRuns ?? []) {
+    const sessionId = run.sessionId?.trim();
+    if (!sessionId) {
+      continue;
+    }
+    const session = targetSessions.find((item) => item.id === sessionId);
+    if (!session) {
+      continue;
+    }
+    const orchestrationTask = input.orchestrationBySession.get(session.id);
+    const projectName = resolveProjectName({
+      session,
+      orchestration: orchestrationTask?.orchestration,
+      workspaceMemory: input.workspaceMemory
+    });
+    const key = normalizeProjectKey(projectName);
+    const existing = grouped.get(key);
+    if (!existing) {
+      continue;
+    }
+    const historyEntry = buildGoalRunHistoryEntry({
+      run,
+      sessionTitle: session.title,
+      sessionSource: session.source
+    });
+    existing.history.push(historyEntry);
+    if (parseTimestamp(historyEntry.updatedAt) > parseTimestamp(existing.updatedAt)) {
+      existing.updatedAt = historyEntry.updatedAt;
     }
   }
 
@@ -583,6 +638,7 @@ export function buildProjectBoardSnapshot(input: {
   workspaceMemory?: WorkspaceMemoryRecord | undefined;
   crmLeads?: CrmLeadRecord[] | undefined;
   crmCadences?: CrmCadenceRecord[] | undefined;
+  goalRuns?: GoalRunRecord[] | undefined;
 }): ProjectBoardSnapshot {
   const orchestrationBySession = new Map<
     string,
@@ -618,7 +674,8 @@ export function buildProjectBoardSnapshot(input: {
     orchestrationBySession,
     workspaceMemory: input.workspaceMemory,
     crmLeads: input.crmLeads,
-    crmCadences: input.crmCadences
+    crmCadences: input.crmCadences,
+    goalRuns: input.goalRuns
   });
   const archivedProjects = buildProjectCollection({
     sessions: input.sessions,
@@ -626,7 +683,8 @@ export function buildProjectBoardSnapshot(input: {
     workspaceMemory: input.workspaceMemory,
     archived: true,
     crmLeads: input.crmLeads,
-    crmCadences: input.crmCadences
+    crmCadences: input.crmCadences,
+    goalRuns: input.goalRuns
   });
   const workstreams = sessionsWithState
     .slice(0, 6)

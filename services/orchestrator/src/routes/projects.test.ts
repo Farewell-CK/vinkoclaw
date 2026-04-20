@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   CrmCadenceRecord,
   CrmLeadRecord,
+  GoalRunRecord,
   SessionRecord,
   SkillBindingRecord,
   TaskRecord,
@@ -172,6 +173,31 @@ function buildCadence(patch: Partial<CrmCadenceRecord> = {}): CrmCadenceRecord {
   };
 }
 
+function buildGoalRun(patch: Partial<GoalRunRecord> = {}): GoalRunRecord {
+  return {
+    id: "goal_1",
+    source: "control-center",
+    objective: "完成增长项目从实现到部署",
+    status: "running",
+    currentStage: "deploy",
+    sessionId: "session_1",
+    language: "zh-CN",
+    metadata: {},
+    context: {},
+    retryCount: 0,
+    maxRetries: 2,
+    awaitingInputFields: [],
+    result: {
+      summary: "部署前检查已完成",
+      deliverable: "等待最终部署",
+      nextActions: ["执行部署"]
+    },
+    createdAt: "2026-04-20T00:40:00.000Z",
+    updatedAt: "2026-04-20T01:15:00.000Z",
+    ...patch
+  };
+}
+
 describe("project routes", () => {
   it("lists active and archived projects", async () => {
     const sessions = [
@@ -237,6 +263,7 @@ describe("project routes", () => {
       })),
       listCrmLeads: vi.fn(() => [buildLead()]),
       listCrmCadences: vi.fn(() => [buildCadence()]),
+      listGoalRuns: vi.fn(() => [buildGoalRun()]),
       listToolRunsByTask: vi.fn(() => []),
       listTaskChildren: vi.fn(() => [])
     } as unknown as VinkoStore;
@@ -294,6 +321,7 @@ describe("project routes", () => {
       })),
       listCrmLeads: vi.fn(() => [buildLead()]),
       listCrmCadences: vi.fn(() => [buildCadence()]),
+      listGoalRuns: vi.fn(() => [buildGoalRun()]),
       listToolRunsByTask: vi.fn(() => []),
       listTaskChildren: vi.fn(() => [])
     } as unknown as VinkoStore;
@@ -315,9 +343,10 @@ describe("project routes", () => {
       const historyPayload = (await historyResponse.json()) as { history: Array<Record<string, unknown>> };
       expect(historyPayload.history.length).toBeGreaterThan(0);
       expect(historyPayload.history.map((entry) => entry.kind)).toEqual(
-        expect.arrayContaining(["workspace", "session", "crm_lead", "crm_cadence"])
+        expect.arrayContaining(["workspace", "session", "crm_lead", "crm_cadence", "goal_run"])
       );
       expect(historyPayload.history.map((entry) => entry.stage)).toContain("cadence:active");
+      expect(historyPayload.history.map((entry) => entry.stage)).toContain("goal_run:deploy:running");
     });
   });
 });

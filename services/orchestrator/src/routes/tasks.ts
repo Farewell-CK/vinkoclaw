@@ -119,10 +119,11 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
         sessions,
         tasks,
         roleBindingsByRole,
-        workspaceMemory: store.getWorkspaceMemory?.(),
-        crmLeads: store.listCrmLeads?.({ limit: 500 }) ?? [],
-        crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? []
-      })
+      workspaceMemory: store.getWorkspaceMemory?.(),
+      crmLeads: store.listCrmLeads?.({ limit: 500 }) ?? [],
+      crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? [],
+      goalRuns: store.listGoalRuns?.({ limit: 500 }) ?? []
+    })
     );
   });
 
@@ -146,7 +147,8 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
       },
       workspaceMemory: store.getWorkspaceMemory?.(),
       crmLeads: store.listCrmLeads?.({ limit: 500 }) ?? [],
-      crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? []
+      crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? [],
+      goalRuns: store.listGoalRuns?.({ limit: 500 }) ?? []
     });
     response.json({
       generatedAt: snapshot.generatedAt,
@@ -175,7 +177,8 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
       },
       workspaceMemory: store.getWorkspaceMemory?.(),
       crmLeads: store.listCrmLeads?.({ limit: 500 }) ?? [],
-      crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? []
+      crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? [],
+      goalRuns: store.listGoalRuns?.({ limit: 500 }) ?? []
     });
     const project = findProjectBoardProject(snapshot, request.params.projectId);
     if (!project) {
@@ -208,7 +211,8 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
       },
       workspaceMemory: store.getWorkspaceMemory?.(),
       crmLeads: store.listCrmLeads?.({ limit: 500 }) ?? [],
-      crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? []
+      crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? [],
+      goalRuns: store.listGoalRuns?.({ limit: 500 }) ?? []
     });
     const project = findProjectBoardProject(snapshot, request.params.projectId);
     if (!project) {
