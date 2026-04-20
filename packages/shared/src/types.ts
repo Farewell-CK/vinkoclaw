@@ -165,6 +165,7 @@ export interface ProjectBoardProjectHistoryEntry {
     | "workspace"
     | "crm_lead"
     | "crm_cadence"
+    | "crm_contact"
     | "goal_run"
     | "goal_run_handoff"
     | "goal_run_trace"

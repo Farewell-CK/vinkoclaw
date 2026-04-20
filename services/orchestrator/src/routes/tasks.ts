@@ -88,6 +88,7 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
       workspaceMemory: store.getWorkspaceMemory?.(),
       crmLeads: store.listCrmLeads?.({ limit: 500 }) ?? [],
       crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? [],
+      crmContacts: store.listCrmContacts?.({ limit: 500 }) ?? [],
       goalRuns,
       goalRunHandoffs: goalRuns.flatMap((run) =>
         (store.listGoalRunHandoffArtifacts?.(run.id, 20) ?? []).map((entry) => ({

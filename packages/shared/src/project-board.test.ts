@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildProjectBoardSnapshot, findProjectBoardProject, listProjectBoardProjects } from "./project-board.js";
-import type { CrmCadenceRecord, CrmLeadRecord, SessionRecord, TaskRecord } from "./types.js";
+import type { CrmCadenceRecord, CrmContactRecord, CrmLeadRecord, SessionRecord, TaskRecord } from "./types.js";
 
 function buildSession(patch: Partial<SessionRecord> = {}): SessionRecord {
   return {
@@ -64,6 +64,20 @@ function buildCadence(patch: Partial<CrmCadenceRecord> = {}): CrmCadenceRecord {
     metadata: {},
     createdAt: "2026-04-19T00:00:00.000Z",
     updatedAt: "2026-04-19T00:00:00.000Z",
+    ...patch
+  };
+}
+
+function buildContact(patch: Partial<CrmContactRecord> = {}): CrmContactRecord {
+  return {
+    id: "contact_1",
+    leadId: "lead_1",
+    channel: "email",
+    outcome: "replied",
+    summary: "对方回复愿意进一步沟通",
+    nextAction: "安排演示",
+    happenedAt: "2026-04-19T06:00:00.000Z",
+    createdAt: "2026-04-19T06:00:00.000Z",
     ...patch
   };
 }
@@ -202,17 +216,18 @@ describe("project-board", () => {
         updatedAt: "2026-04-19T05:00:00.000Z"
       },
       crmLeads: [buildLead()],
-      crmCadences: [buildCadence()]
+      crmCadences: [buildCadence()],
+      crmContacts: [buildContact()]
     });
 
     expect(snapshot.summary.activeProjects).toBe(1);
     expect(snapshot.summary.archivedProjects).toBe(1);
     expect(snapshot.projects).toHaveLength(1);
     expect(snapshot.projects[0]?.name).toBe("OPC 增长引擎");
-    expect(snapshot.projects[0]?.history).toHaveLength(5);
-    expect(snapshot.projects[0]?.history[0]?.updatedAt).toBe("2026-04-19T05:00:00.000Z");
+    expect(snapshot.projects[0]?.history).toHaveLength(6);
+    expect(snapshot.projects[0]?.history[0]?.updatedAt).toBe("2026-04-19T06:00:00.000Z");
     expect(snapshot.projects[0]?.history.map((entry) => entry.kind)).toEqual(
-      expect.arrayContaining(["workspace", "session", "crm_lead", "crm_cadence"])
+      expect.arrayContaining(["workspace", "session", "crm_lead", "crm_cadence", "crm_contact"])
     );
     expect(snapshot.projects[0]?.latestArtifacts).toEqual(
       expect.arrayContaining(["reports/growth-research.md", "apps/landing/index.html"])

@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   CrmCadenceRecord,
+  CrmContactRecord,
   CrmLeadRecord,
   GoalRunRecord,
   SessionRecord,
@@ -174,6 +175,20 @@ function buildCadence(patch: Partial<CrmCadenceRecord> = {}): CrmCadenceRecord {
   };
 }
 
+function buildContact(patch: Partial<CrmContactRecord> = {}): CrmContactRecord {
+  return {
+    id: "contact_1",
+    leadId: "lead_1",
+    channel: "email",
+    outcome: "replied",
+    summary: "对方回复愿意进一步沟通",
+    nextAction: "安排演示",
+    happenedAt: "2026-04-20T01:20:00.000Z",
+    createdAt: "2026-04-20T01:20:00.000Z",
+    ...patch
+  };
+}
+
 function buildGoalRun(patch: Partial<GoalRunRecord> = {}): GoalRunRecord {
   return {
     id: "goal_1",
@@ -300,6 +315,7 @@ describe("project routes", () => {
       })),
       listCrmLeads: vi.fn(() => [buildLead()]),
       listCrmCadences: vi.fn(() => [buildCadence()]),
+      listCrmContacts: vi.fn(() => [buildContact()]),
       listGoalRuns: vi.fn(() => [buildGoalRun()]),
       listGoalRunHandoffArtifacts: vi.fn(() => [buildGoalRunHandoff()]),
       listGoalRunTraces: vi.fn(() => [buildGoalRunTrace()]),
@@ -384,7 +400,15 @@ describe("project routes", () => {
       const historyPayload = (await historyResponse.json()) as { history: Array<Record<string, unknown>> };
       expect(historyPayload.history.length).toBeGreaterThan(0);
       expect(historyPayload.history.map((entry) => entry.kind)).toEqual(
-        expect.arrayContaining(["workspace", "session", "crm_lead", "crm_cadence", "goal_run", "goal_run_handoff", "goal_run_trace"])
+        expect.arrayContaining([
+          "workspace",
+          "session",
+          "crm_lead",
+          "crm_cadence",
+          "goal_run",
+          "goal_run_handoff",
+          "goal_run_trace"
+        ])
       );
       expect(historyPayload.history.map((entry) => entry.stage)).toContain("cadence:active");
       expect(historyPayload.history.map((entry) => entry.stage)).toContain("goal_run:deploy:running");

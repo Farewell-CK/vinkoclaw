@@ -574,6 +574,9 @@ function getProjectHistoryKindLabel(kind) {
   if (kind === "crm_cadence") {
     return currentLang === "zh" ? "跟进节奏" : "Cadence";
   }
+  if (kind === "crm_contact") {
+    return currentLang === "zh" ? "跟进记录" : "Contact";
+  }
   if (kind === "goal_run") {
     return currentLang === "zh" ? "目标流程" : "Goal run";
   }
