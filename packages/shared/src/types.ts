@@ -185,6 +185,8 @@ export interface ProjectBoardProject {
   id: string;
   name: string;
   stage: string;
+  health: "healthy" | "watch" | "blocked";
+  priority: "low" | "medium" | "high";
   currentGoal: string;
   latestSummary: string;
   updatedAt: string;

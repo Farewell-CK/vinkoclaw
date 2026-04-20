@@ -601,6 +601,26 @@ function getProjectHistoryKindLabel(kind) {
   return currentLang === "zh" ? "会话" : "Session";
 }
 
+function getProjectHealthLabel(value) {
+  if (value === "blocked") {
+    return currentLang === "zh" ? "阻塞" : "Blocked";
+  }
+  if (value === "watch") {
+    return currentLang === "zh" ? "关注" : "Watch";
+  }
+  return currentLang === "zh" ? "健康" : "Healthy";
+}
+
+function getProjectPriorityLabel(value) {
+  if (value === "high") {
+    return currentLang === "zh" ? "高优先级" : "High priority";
+  }
+  if (value === "medium") {
+    return currentLang === "zh" ? "中优先级" : "Medium priority";
+  }
+  return currentLang === "zh" ? "低优先级" : "Low priority";
+}
+
 function formatStructuredValue(value) {
   if (typeof value === "string") {
     return value;
@@ -2492,6 +2512,10 @@ function renderProjectMemoryBoard(board) {
             <span>${escapeHtml(project.stage || (currentLang === "zh" ? "未设阶段" : "no stage"))}</span>
           </div>
           <p class="muted">${formatDateTime(project.updatedAt)}</p>
+          <div class="pill-row" style="margin:8px 0;">
+            <span class="pill">${escapeHtml(getProjectHealthLabel(project.health))}</span>
+            <span class="pill">${escapeHtml(getProjectPriorityLabel(project.priority))}</span>
+          </div>
           <p><strong>${currentLang === "zh" ? "当前目标" : "Current goal"}:</strong> ${escapeHtml(project.currentGoal || "-")}</p>
           <p><strong>${currentLang === "zh" ? "最近结论" : "Latest summary"}:</strong> ${escapeHtml(project.latestSummary || "-")}</p>
           <div class="pill-row" style="margin:8px 0;">

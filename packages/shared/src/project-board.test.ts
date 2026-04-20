@@ -235,6 +235,8 @@ describe("project-board", () => {
     expect(snapshot.summary.activeLeads).toBe(1);
     expect(snapshot.summary.activeCadences).toBe(1);
     expect(snapshot.summary.overdueCadences).toBe(1);
+    expect(snapshot.projects[0]?.health).toBe("watch");
+    expect(snapshot.projects[0]?.priority).toBe("high");
     expect(snapshot.projects[0]?.crmLeadCount).toBe(1);
     expect(snapshot.projects[0]?.crmActiveCadences).toBe(1);
     expect(snapshot.projects[0]?.crmOverdueCadences).toBe(1);

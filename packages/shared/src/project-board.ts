@@ -634,10 +634,50 @@ function buildProjectCollection(input: {
         value.workstreams.find((stream) => stream.currentGoal.trim())?.currentGoal ||
         value.sessions[0]?.title ||
         value.name;
+      const linkedLeadCount = (input.crmLeads ?? []).filter((lead) =>
+        matchesProjectLink({
+          linkedProjectId: lead.linkedProjectId,
+          projectId: id,
+          projectName: value.name
+        })
+      ).length;
+      const activeCadenceCount = (input.crmCadences ?? []).filter((cadence) => {
+        const linkedLead = (input.crmLeads ?? []).find((lead) => lead.id === cadence.leadId);
+        return (
+          cadence.status === "active" &&
+          matchesProjectLink({
+            linkedProjectId: linkedLead?.linkedProjectId,
+            projectId: id,
+            projectName: value.name
+          })
+        );
+      }).length;
+      const overdueCadenceCount = (input.crmCadences ?? []).filter((cadence) => {
+        const linkedLead = (input.crmLeads ?? []).find((lead) => lead.id === cadence.leadId);
+        return (
+          cadence.status === "active" &&
+          parseTimestamp(cadence.nextRunAt) <= Date.now() &&
+          matchesProjectLink({
+            linkedProjectId: linkedLead?.linkedProjectId,
+            projectId: id,
+            projectName: value.name
+          })
+        );
+      }).length;
+      const health: ProjectBoardProject["health"] =
+        blockers.length > 0 ? "blocked" : overdueCadenceCount > 0 ? "watch" : "healthy";
+      const priority: ProjectBoardProject["priority"] =
+        blockers.length > 0 || overdueCadenceCount > 0 || activeCadenceCount > 0 || linkedLeadCount > 0
+          ? "high"
+          : nextActions.length > 0
+            ? "medium"
+            : "low";
       return {
         id,
         name: value.name,
         stage,
+        health,
+        priority,
         currentGoal,
         latestSummary,
         updatedAt: value.updatedAt,
@@ -645,36 +685,9 @@ function buildProjectCollection(input: {
         blockers,
         nextActions,
         latestArtifacts,
-        crmLeadCount: (input.crmLeads ?? []).filter((lead) =>
-          matchesProjectLink({
-            linkedProjectId: lead.linkedProjectId,
-            projectId: id,
-            projectName: value.name
-          })
-        ).length,
-        crmActiveCadences: (input.crmCadences ?? []).filter((cadence) => {
-          const linkedLead = (input.crmLeads ?? []).find((lead) => lead.id === cadence.leadId);
-          return (
-            cadence.status === "active" &&
-            matchesProjectLink({
-              linkedProjectId: linkedLead?.linkedProjectId,
-              projectId: id,
-              projectName: value.name
-            })
-          );
-        }).length,
-        crmOverdueCadences: (input.crmCadences ?? []).filter((cadence) => {
-          const linkedLead = (input.crmLeads ?? []).find((lead) => lead.id === cadence.leadId);
-          return (
-            cadence.status === "active" &&
-            parseTimestamp(cadence.nextRunAt) <= Date.now() &&
-            matchesProjectLink({
-              linkedProjectId: linkedLead?.linkedProjectId,
-              projectId: id,
-              projectName: value.name
-            })
-          );
-        }).length,
+        crmLeadCount: linkedLeadCount,
+        crmActiveCadences: activeCadenceCount,
+        crmOverdueCadences: overdueCadenceCount,
         history: sortedHistory.slice(0, 12)
       };
     })
