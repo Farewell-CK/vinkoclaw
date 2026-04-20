@@ -3991,7 +3991,7 @@ async function handleInboundMessage(input: {
         inboundText: enrichedInstruction,
         taskText: enrichedInstruction,
         stage: "goal_run_discover",
-        nextActions: ["等待目标流程完成 discover/plan/execute 阶段"]
+        nextActions: ["等待目标流程完成信息澄清、计划拆解与执行交付阶段"]
       });
       return finalize({
         type: "goal_run_queued",
@@ -4149,7 +4149,7 @@ async function handleInboundMessage(input: {
       inboundText,
       taskText,
       stage: "goal_run_discover",
-      nextActions: ["等待目标流程完成 discover/plan/execute 阶段"]
+      nextActions: ["等待目标流程完成信息澄清、计划拆解与执行交付阶段"]
     });
     return finalize({
       type: "goal_run_queued",

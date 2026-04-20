@@ -20,6 +20,7 @@ Development, bootstrap, and deployment scripts live here.
 - `self-check-artifact-export.mjs`: artifact export check (`markdown artifact -> html/csv companion files`).
 - `self-check-collaboration.mjs`: collaboration-focused self-check for execute-stage real collaboration creation.
 - `self-check-skill-lifecycle.mjs`: skill marketplace lifecycle check (`search -> install -> verify-task`).
+- `self-check-crm-cadence.mjs`: CRM cadence lifecycle check (`lead -> cadence -> dashboard -> trigger-followup -> run-due`).
 - Founder / collaboration / skill-lifecycle self-checks now start a temporary `@vinko/task-runner` process themselves, so harness runs do not depend on an external `tsx watch` runner staying healthy.
 - `harness-runner.mjs`: unified harness runner that executes a named suite and writes standardized reports to `.run/harness/<suite>/`.
   - `npm run harness:product`: writes `.run/harness/product/latest.json`.
@@ -35,6 +36,7 @@ Development, bootstrap, and deployment scripts live here.
   - `npm run harness:artifact-export`: writes `.run/harness/artifact-export/latest.json`.
   - `npm run harness:collaboration`: writes `.run/harness/collaboration/latest.json`.
   - `npm run harness:skill-lifecycle`: writes `.run/harness/skill-lifecycle/latest.json`.
+  - `npm run harness:crm-cadence`: writes `.run/harness/crm-cadence/latest.json`.
   - By default, harness records whether a suite exceeded its budget but does not kill it.
   - `stateCompleteness=false` now fails the suite grade and marks `failedInvariant=orchestration_state_complete`.
   - `HARNESS_SUITE_BUDGET_MS`: optional per-run budget override.
