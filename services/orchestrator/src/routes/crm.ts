@@ -13,6 +13,33 @@ export interface CrmRoutesDeps {
   store: VinkoStore;
 }
 
+function buildCadenceFollowUpTask(input: {
+  lead: ReturnType<VinkoStore["getCrmLead"]>;
+  cadence: ReturnType<VinkoStore["getCrmCadence"]>;
+}): { title: string; instruction: string } {
+  const lead = input.lead;
+  const cadence = input.cadence;
+  const leadName = lead?.name?.trim() || "Unknown Lead";
+  const title = `CRM Follow-up: ${leadName} / ${cadence?.label ?? "cadence"}`;
+  const instruction = [
+    "你正在执行一条 CRM 跟进任务。",
+    `线索：${leadName}`,
+    lead?.company ? `公司：${lead.company}` : undefined,
+    lead?.title ? `身份：${lead.title}` : undefined,
+    `来源：${lead?.source ?? "unknown"}`,
+    `当前阶段：${lead?.stage ?? "new"}`,
+    `Cadence：${cadence?.label ?? "follow-up"}`,
+    `目标：${cadence?.objective ?? ""}`,
+    lead?.latestSummary ? `最新摘要：${lead.latestSummary}` : undefined,
+    lead?.nextAction ? `既定下一步：${lead.nextAction}` : undefined,
+    cadence?.nextRunAt ? `本轮触发时间：${cadence.nextRunAt}` : undefined,
+    "请输出本轮跟进建议、发送内容草稿、风险和下一步。"
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return { title, instruction };
+}
+
 export function registerCrmRoutes(app: express.Express, deps: CrmRoutesDeps): void {
   const { store } = deps;
 
@@ -217,5 +244,60 @@ export function registerCrmRoutes(app: express.Express, deps: CrmRoutesDeps): vo
       return;
     }
     response.json({ cadence });
+  });
+
+  app.post("/api/crm/cadences/:cadenceId/trigger-followup", (request, response) => {
+    const cadence = store.getCrmCadence(request.params.cadenceId);
+    if (!cadence) {
+      response.status(404).json({ error: "cadence_not_found" });
+      return;
+    }
+    const lead = store.getCrmLead(cadence.leadId);
+    if (!lead) {
+      response.status(404).json({ error: "lead_not_found" });
+      return;
+    }
+
+    const session = store.ensureSession({
+      source: "system",
+      sourceKey: `crm:lead:${lead.id}`,
+      title: `CRM / ${lead.name}`,
+      metadata: {
+        crmLeadId: lead.id,
+        crmCadenceId: cadence.id,
+        linkedProjectId: lead.linkedProjectId
+      }
+    });
+    const followUp = buildCadenceFollowUpTask({ lead, cadence });
+    const task = store.createTask({
+      sessionId: session.id,
+      source: "system",
+      roleId: cadence.ownerRoleId ?? "operations",
+      title: followUp.title,
+      instruction: followUp.instruction,
+      requestedBy: "crm-cadence",
+      priority: 72,
+      metadata: {
+        crmLeadId: lead.id,
+        crmCadenceId: cadence.id,
+        linkedProjectId: lead.linkedProjectId,
+        workflowLabel: "crm_follow_up",
+        deliverableMode: "artifact_required",
+        cadenceTriggeredAt: new Date().toISOString()
+      }
+    });
+    const lastRunAt = new Date().toISOString();
+    const nextRunAt = new Date(Date.now() + cadence.intervalDays * 24 * 60 * 60 * 1000).toISOString();
+    const updatedCadence = store.updateCrmCadence(cadence.id, {
+      lastRunAt,
+      nextRunAt,
+      status: cadence.status === "paused" || cadence.status === "archived" ? cadence.status : "active"
+    });
+
+    response.status(201).json({
+      task,
+      session,
+      cadence: updatedCadence ?? cadence
+    });
   });
 }

@@ -220,4 +220,64 @@ describe("crm routes", () => {
       expect(payload.activeLeads[0]?.id).toBe("lead_1");
     });
   });
+
+  it("triggers a follow-up task from cadence", async () => {
+    const lead = buildLead({ company: "Indie Labs", linkedProjectId: "project:vinkoclaw" });
+    const cadence = buildCadence({ ownerRoleId: "operations" });
+    const session = {
+      id: "session_1",
+      source: "system",
+      sourceKey: `crm:lead:${lead.id}`,
+      title: "CRM / Annie Case",
+      status: "active",
+      metadata: {},
+      createdAt: "2026-04-20T00:00:00.000Z",
+      updatedAt: "2026-04-20T00:00:00.000Z",
+      lastMessageAt: "2026-04-20T00:00:00.000Z"
+    };
+    const task = {
+      id: "task_1",
+      sessionId: session.id,
+      source: "system",
+      roleId: "operations",
+      title: "CRM Follow-up: Annie Case / weekly follow-up",
+      instruction: "跟进内容",
+      status: "queued",
+      priority: 72,
+      metadata: {
+        crmLeadId: lead.id,
+        crmCadenceId: cadence.id
+      },
+      createdAt: "2026-04-20T00:00:00.000Z",
+      updatedAt: "2026-04-20T00:00:00.000Z"
+    };
+    const updatedCadence = buildCadence({
+      nextRunAt: "2026-04-27T09:00:00.000Z",
+      lastRunAt: "2026-04-20T09:00:00.000Z"
+    });
+    const store = {
+      getCrmCadence: vi.fn(() => cadence),
+      getCrmLead: vi.fn(() => lead),
+      ensureSession: vi.fn(() => session),
+      createTask: vi.fn(() => task),
+      updateCrmCadence: vi.fn(() => updatedCadence)
+    } as unknown as VinkoStore;
+    const app = createApp(store);
+
+    await withServer(app, async (baseUrl) => {
+      const triggerResponse = await fetch(`${baseUrl}/api/crm/cadences/${cadence.id}/trigger-followup`, {
+        method: "POST"
+      });
+      expect(triggerResponse.status).toBe(201);
+      const payload = (await triggerResponse.json()) as {
+        task: Record<string, unknown>;
+        session: Record<string, unknown>;
+        cadence: Record<string, unknown>;
+      };
+      expect(payload.task.id).toBe("task_1");
+      expect(payload.session.id).toBe("session_1");
+      expect(payload.cadence.id).toBe("cadence_1");
+      expect(payload.task.title).toBe("CRM Follow-up: Annie Case / weekly follow-up");
+    });
+  });
 });
