@@ -938,6 +938,54 @@ function renderWorkflowSummaryBlock(summary) {
   `;
 }
 
+function renderGoalRunWorkflowStateBlock(workflowState) {
+  if (!workflowState || typeof workflowState !== "object") {
+    return "";
+  }
+  const renderList = (items, emptyLabel) =>
+    Array.isArray(items) && items.length > 0
+      ? `<ul style="margin:8px 0 0 18px;padding:0;">${items.map((item) => `<li>${escapeHtml(String(item))}</li>`).join("")}</ul>`
+      : `<p class="muted">${emptyLabel}</p>`;
+  return `
+    <article class="list-card compact">
+      <div class="list-head">
+        <strong>${currentLang === "zh" ? "GoalRun Workflow State" : "GoalRun Workflow State"}</strong>
+        <span>${escapeHtml(String(workflowState.status || "-"))}</span>
+      </div>
+      <p><strong>${currentLang === "zh" ? "工作流" : "Workflow"}:</strong> ${escapeHtml(workflowState.workflowLabel || "-")}</p>
+      <p><strong>${currentLang === "zh" ? "目标" : "Goal"}:</strong> ${escapeHtml(workflowState.goal || "-")}</p>
+      <p><strong>${currentLang === "zh" ? "阶段" : "Stage"}:</strong> ${escapeHtml(workflowState.stage || "-")}</p>
+      <p><strong>${currentLang === "zh" ? "下一步" : "Next Step"}:</strong> ${escapeHtml(workflowState.nextStep || "-")}</p>
+      <div class="memory-block">
+        <strong>${currentLang === "zh" ? "待补充 / 授权" : "Pending / Approval"}</strong>
+        ${renderList(workflowState.pendingItems, currentLang === "zh" ? "当前无待补充项" : "No pending items")}
+      </div>
+      <div class="memory-block">
+        <strong>${currentLang === "zh" ? "阻塞" : "Blocked"}</strong>
+        ${renderList(workflowState.blockedItems, currentLang === "zh" ? "当前无阻塞项" : "No blockers")}
+      </div>
+      <div class="memory-block">
+        <strong>${currentLang === "zh" ? "成功标准" : "Success Criteria"}</strong>
+        ${renderList(workflowState.successCriteria, currentLang === "zh" ? "当前无成功标准" : "No success criteria")}
+      </div>
+      ${
+        workflowState.completionSignal
+          ? `<p><strong>${currentLang === "zh" ? "完成信号" : "Completion Signal"}:</strong> ${escapeHtml(workflowState.completionSignal)}</p>`
+          : ""
+      }
+      <div class="memory-block">
+        <strong>${currentLang === "zh" ? "最近产物" : "Recent Artifacts"}</strong>
+        ${renderList(workflowState.recentArtifacts, currentLang === "zh" ? "当前无产物" : "No recent artifacts")}
+      </div>
+      ${
+        workflowState.handoffSummary
+          ? `<p><strong>${currentLang === "zh" ? "最近交接" : "Latest Handoff"}:</strong> ${escapeHtml(workflowState.handoffSummary)}</p>`
+          : ""
+      }
+    </article>
+  `;
+}
+
 function renderRuntimeHarnessBoard(payload) {
   if (!payload) {
     return "";
@@ -1678,23 +1726,25 @@ function renderGoalRuns(goalRuns) {
   goalRunsContainer.innerHTML = runs
     .map((run) => {
       const completionEvidence = run?.completionEvidence || {};
+      const workflowState = run?.workflowState || {};
       const harness = completionEvidence.harness || null;
       const telemetry = completionEvidence.telemetry || {};
       const rules = completionEvidence.rules || {};
       const completedRoles = Array.isArray(completionEvidence.completedRoles) ? completionEvidence.completedRoles : [];
       const failedRoles = Array.isArray(completionEvidence.failedRoles) ? completionEvidence.failedRoles : [];
-      const preview = run?.result?.summary || run?.errorText || run?.objective || "";
+      const preview = workflowState?.nextStep || run?.result?.summary || run?.errorText || run?.objective || "";
       return `
         <article class="list-card ${selectedGoalRunId === run.id ? "is-selected" : ""}" data-goal-run-detail="${escapeHtml(run.id)}" style="cursor:pointer">
           <div class="list-head">
             <strong>${escapeHtml(String(run.objective || "").slice(0, 96))}${String(run.objective || "").length > 96 ? "..." : ""}</strong>
             ${statusBadge(run.status)}
           </div>
-          <p class="muted">${escapeHtml(run.currentStage || "-")} · ${escapeHtml(run.source || "-")} · ${
+          <p class="muted">${escapeHtml(workflowState.stage || run.currentStage || "-")} · ${escapeHtml(run.source || "-")} · ${
             run.updatedAt ? formatDateTime(run.updatedAt) : "-"
           }</p>
           <p>${escapeHtml(String(preview).slice(0, 180))}${String(preview).length > 180 ? "..." : ""}</p>
           <div class="pill-row">
+            ${workflowState?.workflowLabel ? `<span class="pill">${escapeHtml(String(workflowState.workflowLabel))}</span>` : ""}
             ${harness ? renderHarnessGradeBadge(harness) : ""}
             <span class="pill">retry:${escapeHtml(`${run.retryCount || 0}/${run.maxRetries || 0}`)}</span>
             <span class="pill">turns:${escapeHtml(String(telemetry.turns || 0))}</span>
@@ -1730,6 +1780,7 @@ function renderGoalRunDetail(goalRunId, detail) {
 
   const goalRun = detail.goalRun;
   const completionEvidence = goalRun.completionEvidence || {};
+  const workflowState = goalRun.workflowState || {};
   const harness = completionEvidence.harness || null;
   const skills = completionEvidence.skills || null;
   const orchestration = completionEvidence.orchestration || null;
@@ -1763,7 +1814,7 @@ function renderGoalRunDetail(goalRunId, detail) {
           <strong>${currentLang === "zh" ? "运行概览" : "Run Overview"}</strong>
           ${statusBadge(goalRun.status)}
         </div>
-        <p class="muted">${escapeHtml(goalRun.currentStage || "-")} · ${escapeHtml(goalRun.language || "-")} · ${
+        <p class="muted">${escapeHtml(workflowState.stage || goalRun.currentStage || "-")} · ${escapeHtml(goalRun.language || "-")} · ${
           goalRun.updatedAt ? formatDateTime(goalRun.updatedAt) : "-"
         }</p>
         <div class="pill-row">
@@ -1783,10 +1834,11 @@ function renderGoalRunDetail(goalRunId, detail) {
             : ""
         }
       </article>
+      ${renderGoalRunWorkflowStateBlock(workflowState)}
       <article class="list-card compact">
         <div class="list-head">
           <strong>${currentLang === "zh" ? "结果与恢复态" : "Result & Resume State"}</strong>
-          <span>${escapeHtml(goalRun.currentStage || "-")}</span>
+          <span>${escapeHtml(workflowState.workflowLabel || goalRun.currentStage || "-")}</span>
         </div>
         ${
           result
@@ -2297,6 +2349,8 @@ function renderProjectMemoryBoard(board) {
   const primary = board?.primary || null;
   const teamReadiness = Array.isArray(board?.teamReadiness) ? board.teamReadiness : [];
   const workstreams = Array.isArray(board?.workstreams) ? board.workstreams : [];
+  const projects = Array.isArray(board?.projects) ? board.projects : [];
+  const archivedProjects = Array.isArray(board?.archivedProjects) ? board.archivedProjects : [];
   const blockers = Array.isArray(board?.blockers) ? board.blockers.slice(0, 5) : [];
   const pendingDecisions = Array.isArray(board?.pendingDecisions) ? board.pendingDecisions.slice(0, 5) : [];
   const nextActions = Array.isArray(board?.nextActions) ? board.nextActions.slice(0, 5) : [];
@@ -2386,6 +2440,51 @@ function renderProjectMemoryBoard(board) {
       `
     )
     .join("");
+  const projectCards = projects
+    .slice(0, 4)
+    .map(
+      (project) => `
+        <article class="list-card compact">
+          <div class="list-head">
+            <strong>${escapeHtml(project.name || project.currentGoal || project.id)}</strong>
+            <span>${escapeHtml(project.stage || (currentLang === "zh" ? "未设阶段" : "no stage"))}</span>
+          </div>
+          <p class="muted">${formatDateTime(project.updatedAt)}</p>
+          <p><strong>${currentLang === "zh" ? "当前目标" : "Current goal"}:</strong> ${escapeHtml(project.currentGoal || "-")}</p>
+          <p><strong>${currentLang === "zh" ? "最近结论" : "Latest summary"}:</strong> ${escapeHtml(project.latestSummary || "-")}</p>
+          <div class="memory-block">
+            <strong>${currentLang === "zh" ? "项目时间线" : "Project history"}</strong>
+            ${
+              Array.isArray(project.history) && project.history.length > 0
+                ? `<ul style="margin:8px 0 0 18px;padding:0;">${project.history
+                    .slice(0, 4)
+                    .map(
+                      (entry) =>
+                        `<li><strong>${escapeHtml(entry.stage || "-")}</strong> · ${escapeHtml(entry.summary || entry.sessionTitle || "-")} <span class="muted">(${formatDateTime(entry.updatedAt)})</span></li>`
+                    )
+                    .join("")}</ul>`
+                : `<p class="muted">${currentLang === "zh" ? "暂无项目历史" : "No project history yet"}</p>`
+            }
+          </div>
+        </article>
+      `
+    )
+    .join("");
+  const archivedProjectCards = archivedProjects
+    .slice(0, 3)
+    .map(
+      (project) => `
+        <article class="list-card compact">
+          <div class="list-head">
+            <strong>${escapeHtml(project.name || project.currentGoal || project.id)}</strong>
+            <span>${currentLang === "zh" ? "已归档" : "archived"}</span>
+          </div>
+          <p class="muted">${formatDateTime(project.updatedAt)}</p>
+          <p>${escapeHtml(project.latestSummary || project.currentGoal || "-")}</p>
+        </article>
+      `
+    )
+    .join("");
 
   projectMemoryBoardContainer.innerHTML = `
     <article class="list-card compact">
@@ -2395,6 +2494,7 @@ function renderProjectMemoryBoard(board) {
       </div>
       <div class="pill-row">
         <span class="pill">${currentLang === "zh" ? "项目" : "Projects"} · ${summary?.activeProjects ?? 0}</span>
+        <span class="pill">${currentLang === "zh" ? "归档项目" : "Archived"} · ${summary?.archivedProjects ?? 0}</span>
         <span class="pill">${currentLang === "zh" ? "阻塞任务" : "Blocked"} · ${summary?.blockedTasks ?? 0}</span>
         <span class="pill">${currentLang === "zh" ? "待补充" : "Awaiting input"} · ${summary?.awaitingInputTasks ?? 0}</span>
         <span class="pill">${currentLang === "zh" ? "角色就绪" : "Roles ready"} · ${summary?.readyRoles ?? 0}</span>
@@ -2442,7 +2542,43 @@ function renderProjectMemoryBoard(board) {
         : ""
     }
     ${readinessCards}
+    ${
+      projectCards
+        ? `
+          <article class="list-card compact">
+            <div class="list-head">
+              <strong>${currentLang === "zh" ? "多项目视图" : "Multi-project view"}</strong>
+              <span>${projects.length}</span>
+            </div>
+            <p class="muted">${
+              currentLang === "zh"
+                ? "按项目聚合主目标、最近结论和历史节点。"
+                : "Grouped by project with current goals, summaries, and history."
+            }</p>
+          </article>
+          ${projectCards}
+        `
+        : ""
+    }
     ${workstreamCards}
+    ${
+      archivedProjectCards
+        ? `
+          <article class="list-card compact">
+            <div class="list-head">
+              <strong>${currentLang === "zh" ? "项目归档" : "Project archive"}</strong>
+              <span>${archivedProjects.length}</span>
+            </div>
+            <p class="muted">${
+              currentLang === "zh"
+                ? "保留最近归档项目，便于回看结论和产物。"
+                : "Recently archived projects for historical context."
+            }</p>
+          </article>
+          ${archivedProjectCards}
+        `
+        : ""
+    }
   `;
 }
 

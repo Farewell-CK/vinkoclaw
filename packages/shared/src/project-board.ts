@@ -1,7 +1,10 @@
 import { normalizeOrchestrationState, type OrchestrationStateRecord } from "./orchestration-state.js";
 import { normalizeProjectMemory } from "./project-memory.js";
 import { listRoles } from "./roles.js";
+import type { WorkspaceMemoryRecord } from "./workspace-memory.js";
 import type {
+  ProjectBoardProject,
+  ProjectBoardProjectHistoryEntry,
   ProjectBoardPrimaryView,
   ProjectBoardRoleReadiness,
   ProjectBoardSnapshot,
@@ -23,11 +26,50 @@ function parseTimestamp(value: string | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function normalizeProjectKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "project";
+}
+
 function mergeArtifacts(memoryArtifacts: string[], orchestration: OrchestrationStateRecord | undefined): string[] {
   if (!orchestration) {
     return memoryArtifacts;
   }
   return dedupeStrings([...orchestration.artifactIndex.items.map((item) => item.path), ...memoryArtifacts], 16);
+}
+
+function resolveProjectName(input: {
+  session: SessionRecord;
+  orchestration: OrchestrationStateRecord | undefined;
+  workspaceMemory: WorkspaceMemoryRecord | undefined;
+}): string {
+  const memory = normalizeProjectMemory(input.session.metadata?.projectMemory);
+  const candidates = [
+    input.orchestration?.spec.goal,
+    memory.currentGoal,
+    input.session.title
+  ]
+    .map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value));
+  const workspaceProjects = input.workspaceMemory?.projectContext.activeProjects ?? [];
+  for (const candidate of candidates) {
+    const normalizedCandidate = candidate.toLowerCase();
+    const matched = workspaceProjects.find((project: WorkspaceMemoryRecord["projectContext"]["activeProjects"][number]) => {
+      const normalizedProject = project.name.trim().toLowerCase();
+      return (
+        normalizedCandidate === normalizedProject ||
+        normalizedCandidate.includes(normalizedProject) ||
+        normalizedProject.includes(normalizedCandidate)
+      );
+    });
+    if (matched) {
+      return matched.name;
+    }
+  }
+  return candidates[0] ?? input.session.id;
 }
 
 function buildOrchestrationUnresolved(orchestration: OrchestrationStateRecord | undefined): string[] {
@@ -101,6 +143,154 @@ function buildWorkstreamView(
   };
 }
 
+function buildProjectHistoryEntry(
+  session: SessionRecord,
+  orchestrationTask:
+    | {
+        task: TaskRecord;
+        orchestration: OrchestrationStateRecord;
+      }
+    | undefined
+): ProjectBoardProjectHistoryEntry {
+  const memory = normalizeProjectMemory(session.metadata?.projectMemory);
+  const orchestration = orchestrationTask?.orchestration;
+  return {
+    kind: "session",
+    sessionId: session.id,
+    sessionTitle: session.title,
+    source: session.source,
+    updatedAt: orchestration?.updatedAt || memory.updatedAt || orchestrationTask?.task.updatedAt || session.updatedAt,
+    stage: orchestration?.progress.stage || memory.currentStage || "unknown",
+    summary: orchestration?.decision.summary || memory.latestSummary || session.title,
+    artifacts: mergeArtifacts(memory.latestArtifacts, orchestration).slice(0, 6)
+  };
+}
+
+function buildWorkspaceHistoryEntry(project: { name: string; stage: string; lastUpdate: string }): ProjectBoardProjectHistoryEntry {
+  return {
+    kind: "workspace",
+    sessionTitle: project.name,
+    source: "system",
+    updatedAt: project.lastUpdate,
+    stage: project.stage,
+    summary: project.stage,
+    artifacts: []
+  };
+}
+
+function buildProjectCollection(input: {
+  sessions: SessionRecord[];
+  orchestrationBySession: Map<
+    string,
+    {
+      task: TaskRecord;
+      orchestration: OrchestrationStateRecord;
+      updatedAt: string;
+    }
+  >;
+  workspaceMemory?: WorkspaceMemoryRecord | undefined;
+  archived?: boolean;
+}): ProjectBoardProject[] {
+  const grouped = new Map<
+    string,
+    {
+      name: string;
+      sessions: SessionRecord[];
+      history: ProjectBoardProjectHistoryEntry[];
+      workstreams: ProjectBoardWorkstream[];
+      updatedAt: string;
+    }
+  >();
+
+  const targetSessions = input.sessions.filter((session) => (input.archived ? session.status === "archived" : session.status !== "archived"));
+  for (const session of targetSessions) {
+    const orchestrationTask = input.orchestrationBySession.get(session.id);
+    const orchestration = orchestrationTask?.orchestration;
+    const projectName = resolveProjectName({
+      session,
+      orchestration,
+      workspaceMemory: input.workspaceMemory
+    });
+    const key = normalizeProjectKey(projectName);
+    const historyEntry = buildProjectHistoryEntry(session, orchestrationTask);
+    const workstream = buildWorkstreamView(session, orchestrationTask);
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.sessions.push(session);
+      existing.history.push(historyEntry);
+      existing.workstreams.push(workstream);
+      if (parseTimestamp(historyEntry.updatedAt) > parseTimestamp(existing.updatedAt)) {
+        existing.updatedAt = historyEntry.updatedAt;
+      }
+      continue;
+    }
+    grouped.set(key, {
+      name: projectName,
+      sessions: [session],
+      history: [historyEntry],
+      workstreams: [workstream],
+      updatedAt: historyEntry.updatedAt
+    });
+  }
+
+  for (const project of input.workspaceMemory?.projectContext.activeProjects ?? []) {
+    const projectArchived = project.status === "archived";
+    if (Boolean(input.archived) !== projectArchived) {
+      continue;
+    }
+    if (!input.archived && projectArchived) {
+      continue;
+    }
+    {
+      const key = normalizeProjectKey(project.name);
+      const existing = grouped.get(key);
+      if (existing) {
+        existing.history.push(buildWorkspaceHistoryEntry(project));
+        if (parseTimestamp(project.lastUpdate) > parseTimestamp(existing.updatedAt)) {
+          existing.updatedAt = project.lastUpdate;
+        }
+        continue;
+      }
+      grouped.set(key, {
+        name: project.name,
+        sessions: [],
+        history: [buildWorkspaceHistoryEntry(project)],
+        workstreams: [],
+        updatedAt: project.lastUpdate
+      });
+    }
+  }
+
+  return Array.from(grouped.entries())
+    .map(([id, value]) => {
+      const sortedHistory = value.history.sort((left, right) => parseTimestamp(right.updatedAt) - parseTimestamp(left.updatedAt));
+      const primaryHistory = sortedHistory[0];
+      const blockers = dedupeStrings(value.workstreams.flatMap((stream) => stream.unresolvedQuestions), 8);
+      const nextActions = dedupeStrings(value.workstreams.flatMap((stream) => stream.nextActions), 8);
+      const latestArtifacts = dedupeStrings(value.workstreams.flatMap((stream) => stream.latestArtifacts), 10);
+      const stage = primaryHistory?.stage || value.workstreams[0]?.currentStage || "unknown";
+      const latestSummary = primaryHistory?.summary || value.workstreams[0]?.latestSummary || value.name;
+      const currentGoal =
+        value.workstreams.find((stream) => stream.currentGoal.trim())?.currentGoal ||
+        value.sessions[0]?.title ||
+        value.name;
+      return {
+        id,
+        name: value.name,
+        stage,
+        currentGoal,
+        latestSummary,
+        updatedAt: value.updatedAt,
+        sourceSessionIds: dedupeStrings(value.sessions.map((session) => session.id), 24),
+        blockers,
+        nextActions,
+        latestArtifacts,
+        history: sortedHistory.slice(0, 8)
+      };
+    })
+    .sort((left, right) => parseTimestamp(right.updatedAt) - parseTimestamp(left.updatedAt));
+}
+
 function pickLatestOrchestrationTask(
   tasks: TaskRecord[],
   sessionId: string
@@ -167,6 +357,7 @@ export function buildProjectBoardSnapshot(input: {
   sessions: SessionRecord[];
   tasks: TaskRecord[];
   roleBindingsByRole: Partial<Record<ProjectBoardRoleReadiness["roleId"], SkillBindingRecord[]>>;
+  workspaceMemory?: WorkspaceMemoryRecord | undefined;
 }): ProjectBoardSnapshot {
   const orchestrationBySession = new Map<
     string,
@@ -197,6 +388,17 @@ export function buildProjectBoardSnapshot(input: {
 
   const primarySession = sessionsWithState[0];
   const primary = primarySession ? buildPrimaryView(primarySession, orchestrationBySession.get(primarySession.id)) : null;
+  const projects = buildProjectCollection({
+    sessions: input.sessions,
+    orchestrationBySession,
+    workspaceMemory: input.workspaceMemory
+  });
+  const archivedProjects = buildProjectCollection({
+    sessions: input.sessions,
+    orchestrationBySession,
+    workspaceMemory: input.workspaceMemory,
+    archived: true
+  });
   const workstreams = sessionsWithState
     .slice(0, 6)
     .map((session) => buildWorkstreamView(session, orchestrationBySession.get(session.id)));
@@ -237,7 +439,8 @@ export function buildProjectBoardSnapshot(input: {
   return {
     generatedAt: new Date().toISOString(),
     summary: {
-      activeProjects: workstreams.length,
+      activeProjects: projects.length,
+      archivedProjects: archivedProjects.length,
       blockedTasks: blockedTasks.length,
       awaitingInputTasks: awaitingInputTasks.length,
       recentArtifacts: latestArtifacts.length,
@@ -251,6 +454,8 @@ export function buildProjectBoardSnapshot(input: {
     nextActions,
     latestArtifacts,
     teamReadiness,
-    workstreams
+    workstreams,
+    projects,
+    archivedProjects
   };
 }

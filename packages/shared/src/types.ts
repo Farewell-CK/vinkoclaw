@@ -91,6 +91,7 @@ export interface ProjectMemoryUpdate {
 
 export interface ProjectBoardSummary {
   activeProjects: number;
+  archivedProjects: number;
   blockedTasks: number;
   awaitingInputTasks: number;
   recentArtifacts: number;
@@ -146,6 +147,30 @@ export interface ProjectBoardWorkstream {
   orchestrationVerificationStatus?: "pending" | "verified" | "failed" | undefined;
 }
 
+export interface ProjectBoardProjectHistoryEntry {
+  kind: "session" | "workspace";
+  sessionId?: string | undefined;
+  sessionTitle: string;
+  source: SessionSource;
+  updatedAt: string;
+  stage: string;
+  summary: string;
+  artifacts: string[];
+}
+
+export interface ProjectBoardProject {
+  id: string;
+  name: string;
+  stage: string;
+  currentGoal: string;
+  latestSummary: string;
+  updatedAt: string;
+  sourceSessionIds: string[];
+  blockers: string[];
+  nextActions: string[];
+  latestArtifacts: string[];
+  history: ProjectBoardProjectHistoryEntry[];
+}
 
 export interface ProjectBoardSnapshot {
   generatedAt: string;
@@ -157,6 +182,8 @@ export interface ProjectBoardSnapshot {
   latestArtifacts: string[];
   teamReadiness: ProjectBoardRoleReadiness[];
   workstreams: ProjectBoardWorkstream[];
+  projects: ProjectBoardProject[];
+  archivedProjects: ProjectBoardProject[];
 }
 
 export interface ReflectionNote {
@@ -590,6 +617,9 @@ export interface RoutingTaskTemplate {
   instructionTemplate: string;
   deliverableMode?: DeliverableMode | undefined;
   deliverableSections?: string[] | undefined;
+  successCriteria?: string[] | undefined;
+  completionSignal?: string | undefined;
+  workflowLabel?: string | undefined;
   priority?: number | undefined;
 }
 
@@ -771,6 +801,7 @@ export interface GoalRunHarnessGradeRecord {
   handoffCoverage?: number | undefined;
   approvalCoverage?: number | undefined;
   resumeCoverage?: number | undefined;
+  stateCompleteness?: boolean | undefined;
   generatedAt: string;
 }
 

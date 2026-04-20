@@ -4,7 +4,7 @@ import {
   orchestratorInboundMessageSchema,
   orchestratorTaskSplitSchema
 } from "@vinko/protocol";
-import { buildWorkflowStatusSummary } from "@vinko/shared";
+import { buildProjectBoardSnapshot, buildWorkflowStatusSummary } from "@vinko/shared";
 import type { RoleId, TaskAttachment, TaskMetadata, TaskRecord, VinkoStore } from "@vinko/shared";
 import { enrichTaskRecord } from "./response-utils.js";
 
@@ -95,6 +95,33 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
       session,
       messages: store.listSessionMessages(session.id, limit)
     });
+  });
+
+  app.get("/api/project-board", (_request, response) => {
+    const sessions = store.listSessions(100);
+    const tasks = store.listTasks(500);
+    const roleBindingsByRole = {
+      ceo: store.resolveSkillsForRole("ceo"),
+      cto: store.resolveSkillsForRole("cto"),
+      product: store.resolveSkillsForRole("product"),
+      uiux: store.resolveSkillsForRole("uiux"),
+      frontend: store.resolveSkillsForRole("frontend"),
+      backend: store.resolveSkillsForRole("backend"),
+      algorithm: store.resolveSkillsForRole("algorithm"),
+      qa: store.resolveSkillsForRole("qa"),
+      developer: store.resolveSkillsForRole("developer"),
+      engineering: store.resolveSkillsForRole("engineering"),
+      research: store.resolveSkillsForRole("research"),
+      operations: store.resolveSkillsForRole("operations")
+    };
+    response.json(
+      buildProjectBoardSnapshot({
+        sessions,
+        tasks,
+        roleBindingsByRole,
+        workspaceMemory: store.getWorkspaceMemory?.()
+      })
+    );
   });
 
   app.get("/api/tasks/:taskId", (request, response) => {

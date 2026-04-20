@@ -94,4 +94,90 @@ describe("project-board", () => {
     expect(snapshot.primary?.orchestrationOwnerRoleId).toBe("product");
     expect(snapshot.primary?.orchestrationVerificationStatus).toBe("pending");
   });
+
+  it("builds grouped projects and history from workspace memory and sessions", () => {
+    const snapshot = buildProjectBoardSnapshot({
+      sessions: [
+        buildSession({
+          id: "session_a",
+          title: "OPC 增长引擎",
+          updatedAt: "2026-04-19T03:00:00.000Z",
+          metadata: {
+            projectMemory: {
+              currentGoal: "OPC 增长引擎",
+              currentStage: "research",
+              latestSummary: "完成第一轮增长调研",
+              latestArtifacts: ["reports/growth-research.md"],
+              updatedAt: "2026-04-19T03:00:00.000Z",
+              updatedBy: "research"
+            }
+          }
+        }),
+        buildSession({
+          id: "session_b",
+          title: "OPC 增长引擎 - 实现",
+          updatedAt: "2026-04-19T04:00:00.000Z",
+          metadata: {
+            projectMemory: {
+              currentGoal: "OPC 增长引擎",
+              currentStage: "implementation",
+              latestSummary: "首页实验开始开发",
+              latestArtifacts: ["apps/landing/index.html"],
+              updatedAt: "2026-04-19T04:00:00.000Z",
+              updatedBy: "frontend"
+            }
+          }
+        }),
+        buildSession({
+          id: "session_archived",
+          status: "archived",
+          title: "旧项目归档",
+          updatedAt: "2026-04-18T01:00:00.000Z",
+          metadata: {
+            projectMemory: {
+              currentGoal: "旧项目归档",
+              currentStage: "done",
+              latestSummary: "项目已归档",
+              updatedAt: "2026-04-18T01:00:00.000Z",
+              updatedBy: "operations"
+            }
+          }
+        })
+      ],
+      tasks: [],
+      roleBindingsByRole: {},
+      workspaceMemory: {
+        userPreferences: {
+          preferredLanguage: "zh",
+          preferredTechStack: [],
+          communicationStyle: "concise"
+        },
+        keyDecisions: [],
+        projectContext: {
+          currentGoals: ["OPC 增长引擎"],
+          activeProjects: [
+            {
+              id: "project:opc-增长引擎",
+              name: "OPC 增长引擎",
+              stage: "implementation",
+              status: "active",
+              lastUpdate: "2026-04-19T05:00:00.000Z"
+            }
+          ]
+        },
+        updatedAt: "2026-04-19T05:00:00.000Z"
+      }
+    });
+
+    expect(snapshot.summary.activeProjects).toBe(1);
+    expect(snapshot.summary.archivedProjects).toBe(1);
+    expect(snapshot.projects).toHaveLength(1);
+    expect(snapshot.projects[0]?.name).toBe("OPC 增长引擎");
+    expect(snapshot.projects[0]?.history).toHaveLength(3);
+    expect(snapshot.projects[0]?.history[0]?.updatedAt).toBe("2026-04-19T05:00:00.000Z");
+    expect(snapshot.projects[0]?.latestArtifacts).toEqual(
+      expect.arrayContaining(["reports/growth-research.md", "apps/landing/index.html"])
+    );
+    expect(snapshot.archivedProjects[0]?.name).toBe("旧项目归档");
+  });
 });
