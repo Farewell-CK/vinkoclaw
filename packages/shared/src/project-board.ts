@@ -182,6 +182,88 @@ function buildProjectHistoryEntry(
   };
 }
 
+function buildOrchestrationDecisionHistoryEntry(
+  session: SessionRecord,
+  orchestrationTask: {
+    task: TaskRecord;
+    orchestration: OrchestrationStateRecord;
+  }
+): ProjectBoardProjectHistoryEntry | undefined {
+  const orchestration = orchestrationTask.orchestration;
+  const decisionSummary = orchestration.decision.summary.trim();
+  const decisionItems = dedupeStrings(orchestration.decision.entries, 4);
+  if (!decisionSummary && decisionItems.length === 0) {
+    return undefined;
+  }
+  return {
+    kind: "orchestration_decision",
+    sessionId: session.id,
+    sessionTitle: session.title,
+    source: session.source,
+    updatedAt: orchestration.updatedAt || orchestrationTask.task.updatedAt,
+    stage: `decision:${orchestration.progress.stage || "unknown"}`,
+    summary: decisionSummary || decisionItems.join("；"),
+    artifacts: []
+  };
+}
+
+function buildOrchestrationVerificationHistoryEntry(
+  session: SessionRecord,
+  orchestrationTask: {
+    task: TaskRecord;
+    orchestration: OrchestrationStateRecord;
+  }
+): ProjectBoardProjectHistoryEntry | undefined {
+  const orchestration = orchestrationTask.orchestration;
+  const verificationStatus = orchestration.verificationStatus?.trim();
+  if (!verificationStatus) {
+    return undefined;
+  }
+  const verificationSummary =
+    verificationStatus === "verified"
+      ? "main agent verification passed"
+      : verificationStatus === "failed"
+        ? "main agent verification failed"
+        : "main agent verification pending";
+  return {
+    kind: "orchestration_verification",
+    sessionId: session.id,
+    sessionTitle: session.title,
+    source: session.source,
+    updatedAt: orchestration.updatedAt || orchestrationTask.task.updatedAt,
+    stage: `verification:${verificationStatus}`,
+    summary: verificationSummary,
+    artifacts: orchestration.artifactIndex.items
+      .filter((item) => item.status === "verified" || item.status === "failed")
+      .map((item) => item.path)
+      .slice(0, 6)
+  };
+}
+
+function buildOrchestrationArtifactHistoryEntry(
+  session: SessionRecord,
+  orchestrationTask: {
+    task: TaskRecord;
+    orchestration: OrchestrationStateRecord;
+  }
+): ProjectBoardProjectHistoryEntry | undefined {
+  const orchestration = orchestrationTask.orchestration;
+  const artifactItems = orchestration.artifactIndex.items.filter((item) => item.path.trim());
+  if (artifactItems.length === 0) {
+    return undefined;
+  }
+  return {
+    kind: "orchestration_artifact",
+    sessionId: session.id,
+    sessionTitle: session.title,
+    source: session.source,
+    updatedAt: orchestration.updatedAt || orchestrationTask.task.updatedAt,
+    stage: `artifact:${orchestration.progress.stage || "unknown"}`,
+    summary: dedupeStrings(artifactItems.map((item) => item.title || item.path), 3).join(" · "),
+    artifacts: artifactItems.map((item) => item.path).slice(0, 6)
+  };
+}
+
 function buildWorkspaceHistoryEntry(project: { name: string; stage: string; lastUpdate: string }): ProjectBoardProjectHistoryEntry {
   return {
     kind: "workspace",
@@ -271,6 +353,14 @@ function buildProjectCollection(input: {
     if (existing) {
       existing.sessions.push(session);
       existing.history.push(historyEntry);
+      if (orchestrationTask) {
+        const extraEntries = [
+          buildOrchestrationDecisionHistoryEntry(session, orchestrationTask),
+          buildOrchestrationVerificationHistoryEntry(session, orchestrationTask),
+          buildOrchestrationArtifactHistoryEntry(session, orchestrationTask)
+        ].filter((entry): entry is ProjectBoardProjectHistoryEntry => Boolean(entry));
+        existing.history.push(...extraEntries);
+      }
       existing.workstreams.push(workstream);
       if (parseTimestamp(historyEntry.updatedAt) > parseTimestamp(existing.updatedAt)) {
         existing.updatedAt = historyEntry.updatedAt;
@@ -280,7 +370,18 @@ function buildProjectCollection(input: {
     grouped.set(key, {
       name: projectName,
       sessions: [session],
-      history: [historyEntry],
+      history: [
+        historyEntry,
+        ...(
+          orchestrationTask
+            ? [
+                buildOrchestrationDecisionHistoryEntry(session, orchestrationTask),
+                buildOrchestrationVerificationHistoryEntry(session, orchestrationTask),
+                buildOrchestrationArtifactHistoryEntry(session, orchestrationTask)
+              ].filter((entry): entry is ProjectBoardProjectHistoryEntry => Boolean(entry))
+            : []
+        )
+      ],
       workstreams: [workstream],
       updatedAt: historyEntry.updatedAt
     });

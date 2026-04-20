@@ -577,6 +577,15 @@ function getProjectHistoryKindLabel(kind) {
   if (kind === "workspace") {
     return currentLang === "zh" ? "项目状态" : "Workspace";
   }
+  if (kind === "orchestration_decision") {
+    return currentLang === "zh" ? "主 Agent 决策" : "Main-agent decision";
+  }
+  if (kind === "orchestration_verification") {
+    return currentLang === "zh" ? "主 Agent 验证" : "Main-agent verification";
+  }
+  if (kind === "orchestration_artifact") {
+    return currentLang === "zh" ? "主 Agent 交付" : "Main-agent artifact";
+  }
   return currentLang === "zh" ? "会话" : "Session";
 }
 

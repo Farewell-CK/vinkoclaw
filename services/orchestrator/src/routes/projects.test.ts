@@ -22,7 +22,45 @@ function buildTask(patch: Partial<TaskRecord> = {}): TaskRecord {
     instruction: "continue",
     status: "queued",
     priority: 80,
-    metadata: {},
+    metadata: {
+      orchestrationState: {
+        version: 1,
+        mode: "main_agent",
+        ownerRoleId: "product",
+        spec: {
+          goal: "增长项目",
+          successCriteria: [],
+          constraints: [],
+          scope: []
+        },
+        progress: {
+          stage: "implementation",
+          status: "completed",
+          completed: ["landing page delivered"],
+          inFlight: [],
+          blocked: [],
+          awaitingInput: [],
+          nextActions: ["准备发布复盘"]
+        },
+        decision: {
+          summary: "确定首页先上 MVP",
+          entries: ["AB 实验下一轮再做"]
+        },
+        artifactIndex: {
+          items: [
+            {
+              path: "apps/site/index.html",
+              title: "Landing Page",
+              stage: "implementation",
+              status: "verified"
+            }
+          ]
+        },
+        verificationStatus: "verified",
+        updatedAt: "2026-04-20T00:00:00.000Z",
+        updatedBy: "product"
+      }
+    },
     createdAt: "2026-04-20T00:00:00.000Z",
     updatedAt: "2026-04-20T00:00:00.000Z",
     ...patch

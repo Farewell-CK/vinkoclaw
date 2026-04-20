@@ -227,4 +227,79 @@ describe("project-board", () => {
     expect(listProjectBoardProjects(snapshot, { includeArchived: true })).toHaveLength(2);
     expect(findProjectBoardProject(snapshot, snapshot.projects[0]!.id)?.name).toBe("OPC 增长引擎");
   });
+
+  it("includes orchestration decision, verification, and artifact events in project history", () => {
+    const snapshot = buildProjectBoardSnapshot({
+      sessions: [
+        buildSession({
+          id: "session_orchestrated",
+          title: "增长项目",
+          metadata: {
+            projectMemory: {
+              currentGoal: "增长项目",
+              currentStage: "implementation",
+              latestSummary: "主 Agent 已汇总实现结果",
+              updatedAt: "2026-04-20T03:00:00.000Z",
+              updatedBy: "product"
+            }
+          }
+        })
+      ],
+      tasks: [
+        buildTask({
+          id: "task_orchestrated",
+          sessionId: "session_orchestrated",
+          updatedAt: "2026-04-20T03:00:00.000Z",
+          metadata: {
+            orchestrationState: {
+              version: 1,
+              mode: "main_agent",
+              ownerRoleId: "product",
+              spec: {
+                goal: "增长项目",
+                successCriteria: [],
+                constraints: [],
+                scope: []
+              },
+              progress: {
+                stage: "implementation",
+                status: "completed",
+                completed: ["landing page delivered"],
+                inFlight: [],
+                blocked: [],
+                awaitingInput: [],
+                nextActions: ["prepare release recap"]
+              },
+              decision: {
+                summary: "确定先交付 landing page MVP",
+                entries: ["保留后续 AB 实验到下一迭代"]
+              },
+              artifactIndex: {
+                items: [
+                  {
+                    path: "apps/site/index.html",
+                    title: "Landing Page",
+                    stage: "implementation",
+                    status: "verified"
+                  }
+                ]
+              },
+              verificationStatus: "verified",
+              updatedAt: "2026-04-20T03:00:00.000Z",
+              updatedBy: "product"
+            }
+          }
+        })
+      ],
+      roleBindingsByRole: {}
+    });
+
+    const project = snapshot.projects[0];
+    expect(project?.history.map((entry) => entry.kind)).toEqual(
+      expect.arrayContaining(["session", "orchestration_decision", "orchestration_verification", "orchestration_artifact"])
+    );
+    expect(project?.history.map((entry) => entry.stage)).toEqual(
+      expect.arrayContaining(["decision:implementation", "verification:verified", "artifact:implementation"])
+    );
+  });
 });
