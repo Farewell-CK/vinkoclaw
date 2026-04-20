@@ -2853,6 +2853,15 @@ function renderCrmBoard(board) {
               summary?.projectLinkedLeads ?? 0
             )}`
       }</p>
+      <p class="muted">${
+        summary?.lastRunAt
+          ? currentLang === "zh"
+            ? `最近运行 ${formatDateTime(summary.lastRunAt)}`
+            : `last run ${formatDateTime(summary.lastRunAt)}`
+          : currentLang === "zh"
+            ? "暂无运行记录"
+            : "no recent runs"
+      }</p>
     </article>
   `;
 
@@ -2891,6 +2900,23 @@ function renderCrmBoard(board) {
     `;
   });
 
+  const recentRuns = Array.isArray(data?.history?.recentRuns) ? data.history.recentRuns : [];
+  const recentRunCards = recentRuns.slice(0, 4).map((run) => {
+    const title = typeof run?.title === "string" ? run.title : run?.cadenceId || "run";
+    const status = typeof run?.status === "string" ? run.status : "unknown";
+    const triggeredAt = typeof run?.triggeredAt === "string" ? run.triggeredAt : "";
+    return `
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${escapeHtml(title)}</strong>
+          <span>${escapeHtml(status)}</span>
+        </div>
+        <p class="muted">${escapeHtml(String(run?.cadenceId ?? "-"))}</p>
+        <p>${escapeHtml(triggeredAt ? formatDateTime(triggeredAt) : currentLang === "zh" ? "无时间" : "No timestamp")}</p>
+      </article>
+    `;
+  });
+
   crmBoardContainer.innerHTML = `
     ${overviewCard}
     ${
@@ -2909,6 +2935,15 @@ function renderCrmBoard(board) {
             currentLang === "zh" ? "活跃线索" : "Active leads"
           }</strong><span>0</span></div><p class="muted">${
             currentLang === "zh" ? "当前没有活跃线索。" : "No active leads right now."
+          }</p></article>`
+    }
+    ${
+      recentRunCards.length > 0
+        ? recentRunCards.join("")
+        : `<article class="list-card compact"><div class="list-head"><strong>${
+            currentLang === "zh" ? "最近运行" : "Recent recurring runs"
+          }</strong><span>0</span></div><p class="muted">${
+            currentLang === "zh" ? "当前没有运行记录。" : "No recurring runs yet."
           }</p></article>`
     }
   `;
