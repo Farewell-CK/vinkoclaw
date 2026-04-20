@@ -17,6 +17,7 @@ import type {
   CreateApprovalInput,
   CreateAuthSessionInput,
   CreateCrmLeadInput,
+  CreateCrmCadenceInput,
   CreateAgentInstanceInput,
   CreateCredentialInput,
   CreateGoalRunInput,
@@ -60,8 +61,11 @@ import type {
   CrmLeadRecord,
   CrmLeadStage,
   CrmLeadStatus,
+  CrmCadenceRecord,
+  CrmCadenceStatus,
   UpdateRoutingTemplateInput,
   UpdateCrmLeadInput,
+  UpdateCrmCadenceInput,
   UpdateAgentInstanceInput,
   UpdateUserInput,
   UserRecord,
@@ -969,6 +973,36 @@ function toCrmLeadRecord(row: JsonRow): CrmLeadRecord {
   };
 }
 
+function normalizeCrmCadenceStatus(value: unknown): CrmCadenceStatus {
+  switch (value) {
+    case "active":
+    case "paused":
+    case "completed":
+    case "archived":
+      return value;
+    default:
+      return "active";
+  }
+}
+
+function toCrmCadenceRecord(row: JsonRow): CrmCadenceRecord {
+  return {
+    id: String(row.id),
+    leadId: String(row.lead_id ?? ""),
+    label: String(row.label ?? ""),
+    channel: (maybeString(row.channel) as CrmCadenceRecord["channel"] | undefined) ?? "manual",
+    intervalDays: Number(row.interval_days ?? 0),
+    status: normalizeCrmCadenceStatus(row.status),
+    objective: String(row.objective ?? ""),
+    nextRunAt: String(row.next_run_at ?? now()),
+    lastRunAt: maybeString(row.last_run_at),
+    ownerRoleId: maybeString(row.owner_role_id) as RoleId | undefined,
+    metadata: jsonParse<Record<string, unknown>>(row.metadata_json, {}),
+    createdAt: String(row.created_at ?? now()),
+    updatedAt: String(row.updated_at ?? now())
+  };
+}
+
 function toAgentCollaboration(row: JsonRow): AgentCollaboration {
   const result: AgentCollaboration = {
     id: String(row.id),
@@ -1524,6 +1558,26 @@ export class VinkoStore {
       CREATE INDEX IF NOT EXISTS idx_crm_leads_status ON crm_leads(status);
       CREATE INDEX IF NOT EXISTS idx_crm_leads_stage ON crm_leads(stage);
       CREATE INDEX IF NOT EXISTS idx_crm_leads_project ON crm_leads(linked_project_id);
+
+      CREATE TABLE IF NOT EXISTS crm_cadences (
+        id TEXT PRIMARY KEY,
+        lead_id TEXT NOT NULL,
+        label TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        interval_days INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        objective TEXT NOT NULL,
+        next_run_at TEXT NOT NULL,
+        last_run_at TEXT,
+        owner_role_id TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_crm_cadences_lead_id ON crm_cadences(lead_id);
+      CREATE INDEX IF NOT EXISTS idx_crm_cadences_status ON crm_cadences(status);
+      CREATE INDEX IF NOT EXISTS idx_crm_cadences_next_run_at ON crm_cadences(next_run_at);
 
       CREATE TABLE IF NOT EXISTS agent_collaborations (
         id TEXT PRIMARY KEY,
@@ -5510,6 +5564,124 @@ export class VinkoStore {
     return this.updateCrmLead(id, {
       status: "archived",
       archivedAt: now()
+    });
+  }
+
+  createCrmCadence(input: CreateCrmCadenceInput): CrmCadenceRecord {
+    const id = randomUUID();
+    const timestamp = now();
+    this.db
+      .prepare(`
+        INSERT INTO crm_cadences (
+          id, lead_id, label, channel, interval_days, status, objective,
+          next_run_at, last_run_at, owner_role_id, metadata_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, NULL, ?, ?, ?, ?)
+      `)
+      .run(
+        id,
+        input.leadId,
+        input.label.trim(),
+        input.channel ?? "manual",
+        Math.max(1, Math.round(input.intervalDays)),
+        input.objective.trim(),
+        input.nextRunAt,
+        input.ownerRoleId ?? null,
+        jsonStringify(input.metadata ?? {}),
+        timestamp,
+        timestamp
+      );
+    return this.getCrmCadence(id)!;
+  }
+
+  getCrmCadence(id: string): CrmCadenceRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM crm_cadences WHERE id = ?").get(id) as JsonRow | undefined;
+    return row ? toCrmCadenceRecord(row) : undefined;
+  }
+
+  listCrmCadences(input?: {
+    leadId?: string | undefined;
+    status?: CrmCadenceStatus | undefined;
+    limit?: number | undefined;
+  }): CrmCadenceRecord[] {
+    const where: string[] = [];
+    const values: Array<string | number> = [];
+    if (input?.leadId) {
+      where.push("lead_id = ?");
+      values.push(input.leadId);
+    }
+    if (input?.status) {
+      where.push("status = ?");
+      values.push(input.status);
+    }
+    const limit = Math.max(1, Math.min(500, Math.round(input?.limit ?? 100)));
+    values.push(limit);
+    const query = `
+      SELECT *
+      FROM crm_cadences
+      ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
+      ORDER BY next_run_at ASC, updated_at DESC
+      LIMIT ?
+    `;
+    const rows = this.db.prepare(query).all(...values) as JsonRow[];
+    return rows.map(toCrmCadenceRecord);
+  }
+
+  updateCrmCadence(id: string, patch: UpdateCrmCadenceInput): CrmCadenceRecord | undefined {
+    const existing = this.getCrmCadence(id);
+    if (!existing) {
+      return undefined;
+    }
+    const updates: string[] = [];
+    const values: Array<string | number | null> = [];
+    if (patch.label !== undefined) {
+      updates.push("label = ?");
+      values.push(patch.label.trim());
+    }
+    if (patch.channel !== undefined) {
+      updates.push("channel = ?");
+      values.push(patch.channel);
+    }
+    if (patch.intervalDays !== undefined) {
+      updates.push("interval_days = ?");
+      values.push(Math.max(1, Math.round(patch.intervalDays)));
+    }
+    if (patch.status !== undefined) {
+      updates.push("status = ?");
+      values.push(patch.status);
+    }
+    if (patch.objective !== undefined) {
+      updates.push("objective = ?");
+      values.push(patch.objective.trim());
+    }
+    if (patch.nextRunAt !== undefined) {
+      updates.push("next_run_at = ?");
+      values.push(patch.nextRunAt);
+    }
+    if (patch.lastRunAt !== undefined) {
+      updates.push("last_run_at = ?");
+      values.push(patch.lastRunAt ?? null);
+    }
+    if (patch.ownerRoleId !== undefined) {
+      updates.push("owner_role_id = ?");
+      values.push(patch.ownerRoleId ?? null);
+    }
+    if (patch.metadata !== undefined) {
+      updates.push("metadata_json = ?");
+      values.push(jsonStringify(patch.metadata));
+    }
+    if (updates.length === 0) {
+      return existing;
+    }
+    updates.push("updated_at = ?");
+    values.push(now());
+    values.push(id);
+    this.db.prepare(`UPDATE crm_cadences SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+    return this.getCrmCadence(id);
+  }
+
+  archiveCrmCadence(id: string): CrmCadenceRecord | undefined {
+    return this.updateCrmCadence(id, {
+      status: "archived"
     });
   }
 

@@ -52,6 +52,8 @@ export const CRM_LEAD_STAGES = ["new", "contacted", "qualified", "proposal", "wo
 export type CrmLeadStage = (typeof CRM_LEAD_STAGES)[number];
 export const CRM_LEAD_STATUSES = ["active", "archived"] as const;
 export type CrmLeadStatus = (typeof CRM_LEAD_STATUSES)[number];
+export const CRM_CADENCE_STATUSES = ["active", "paused", "completed", "archived"] as const;
+export type CrmCadenceStatus = (typeof CRM_CADENCE_STATUSES)[number];
 
 export type MemoryBackend = "none" | "sqlite" | "vector-db";
 export const DELIVERABLE_MODES = ["answer_only", "artifact_preferred", "artifact_required"] as const;
@@ -269,6 +271,45 @@ export interface UpdateCrmLeadInput {
   linkedProjectId?: string | undefined;
   lastContactAt?: string | undefined;
   archivedAt?: string | undefined;
+  metadata?: Record<string, unknown> | undefined;
+}
+
+export interface CrmCadenceRecord {
+  id: string;
+  leadId: string;
+  label: string;
+  channel: "feishu" | "email" | "manual";
+  intervalDays: number;
+  status: CrmCadenceStatus;
+  objective: string;
+  nextRunAt: string;
+  lastRunAt?: string | undefined;
+  ownerRoleId?: RoleId | undefined;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateCrmCadenceInput {
+  leadId: string;
+  label: string;
+  channel?: "feishu" | "email" | "manual" | undefined;
+  intervalDays: number;
+  objective: string;
+  nextRunAt: string;
+  ownerRoleId?: RoleId | undefined;
+  metadata?: Record<string, unknown> | undefined;
+}
+
+export interface UpdateCrmCadenceInput {
+  label?: string | undefined;
+  channel?: "feishu" | "email" | "manual" | undefined;
+  intervalDays?: number | undefined;
+  status?: CrmCadenceStatus | undefined;
+  objective?: string | undefined;
+  nextRunAt?: string | undefined;
+  lastRunAt?: string | undefined;
+  ownerRoleId?: RoleId | undefined;
   metadata?: Record<string, unknown> | undefined;
 }
 
