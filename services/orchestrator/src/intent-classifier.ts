@@ -62,6 +62,10 @@ export async function classifyInboundIntent(
     baseUrl = env.zhipuBaseUrl.replace(/\/$/, "");
     model = env.zhipuModel;
     apiKey = env.zhipuApiKey || undefined;
+  } else if (env.primaryBackend === "dashscope") {
+    baseUrl = env.dashscopeBaseUrl.replace(/\/$/, "");
+    model = env.dashscopeModel;
+    apiKey = env.dashscopeApiKey || undefined;
   } else if (env.primaryBackend === "sglang") {
     baseUrl = env.sglangBaseUrl.replace(/\/$/, "");
     model = env.sglangModel;

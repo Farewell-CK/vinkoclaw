@@ -354,6 +354,7 @@ function resolveQualityLLMBaseUrl(): string {
   const e = env;
   if (e.primaryBackend === "zhipu") return e.zhipuBaseUrl.replace(/\/$/, "");
   if (e.primaryBackend === "openai") return e.openaiBaseUrl.replace(/\/$/, "");
+  if (e.primaryBackend === "dashscope") return e.dashscopeBaseUrl.replace(/\/$/, "");
   if (e.primaryBackend === "sglang") return e.sglangBaseUrl.replace(/\/$/, "");
   return e.ollamaBaseUrl.replace(/\/$/, "");
 }
@@ -362,6 +363,7 @@ function resolveQualityLLMModel(): string {
   const e = env;
   if (e.primaryBackend === "zhipu") return e.zhipuModel;
   if (e.primaryBackend === "openai") return e.openaiModel;
+  if (e.primaryBackend === "dashscope") return e.dashscopeModel;
   if (e.primaryBackend === "sglang") return e.sglangModel;
   return e.ollamaModel;
 }
@@ -371,6 +373,7 @@ function resolveQualityLLMHeaders(): Record<string, string> {
   const e = env;
   const apiKey = e.primaryBackend === "zhipu" ? e.zhipuApiKey
     : e.primaryBackend === "openai" ? e.openaiApiKey
+    : e.primaryBackend === "dashscope" ? e.dashscopeApiKey
     : undefined;
   if (apiKey) headers["authorization"] = `Bearer ${apiKey}`;
   return headers;
@@ -2273,7 +2276,7 @@ async function processNormalTask(
     minSemanticScore: preferSemanticRetrieval ? 0.05 : 0.1
   });
   // Pre-fetch web search only when tool calling is NOT available (local-only mode without zhipu)
-  const hasToolCallingBackend = env.primaryBackend === "zhipu" || env.primaryBackend === "sglang";
+  const hasToolCallingBackend = env.primaryBackend === "zhipu" || env.primaryBackend === "dashscope" || env.primaryBackend === "sglang";
   const webSearchSnippets =
     !hasToolCallingBackend && skillIds.includes("web-search")
       ? await retrieveWebSearchSnippets(effectiveTask, skillIds)

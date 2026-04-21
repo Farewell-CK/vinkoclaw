@@ -21,6 +21,8 @@ function createInput(overrides: Partial<RuntimeValueResolverInput> = {}): Runtim
       ollamaModel: "m",
       openaiBaseUrl: "https://api.openai.com/v1",
       openaiModel: "gpt-4.1",
+      dashscopeBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      dashscopeModel: "qwen3.6-plus",
       zhipuBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
       zhipuModel: "glm-5",
       feishuAppId: "env-app-id",
@@ -54,6 +56,7 @@ function createInput(overrides: Partial<RuntimeValueResolverInput> = {}): Runtim
       opencodeBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
       opencodeApiKey: "",
       zhipuApiKey: "",
+      dashscopeApiKey: "",
       openaiApiKey: "",
       anthropicApiKey: "",
       searchProvider: "",
@@ -93,5 +96,23 @@ describe("runtime-config resolver", () => {
     );
     expect(resolver.getBoolean("EMAIL_INBOUND_ENABLED", false)).toBe(true);
     expect(resolver.getList("EMAIL_INBOUND_ALLOWED_SENDERS")).toEqual(["a@example.com", "b@example.com"]);
+  });
+
+  it("resolves DashScope provider settings from loaded env", () => {
+    const resolver = createRuntimeValueResolver(
+      createInput({
+        env: {
+          ...createInput().env,
+          primaryBackend: "dashscope",
+          dashscopeApiKey: "dashscope-key",
+          dashscopeBaseUrl: "https://coding.dashscope.aliyuncs.com/v1",
+          dashscopeModel: "qwen3.6-plus"
+        }
+      })
+    );
+
+    expect(resolver.get("DASHSCOPE_API_KEY")).toBe("dashscope-key");
+    expect(resolver.get("DASHSCOPE_BASE_URL")).toBe("https://coding.dashscope.aliyuncs.com/v1");
+    expect(resolver.get("DASHSCOPE_MODEL")).toBe("qwen3.6-plus");
   });
 });

@@ -139,8 +139,9 @@ export function listToolProviderStatuses(
   const opencodeKeyConfigured = Boolean(
     _env.opencodeApiKey ||
       _env.zhipuApiKey ||
+      _env.dashscopeApiKey ||
       _env.openaiApiKey ||
-      hasAnyEnv(["OPENCODE_API_KEY", "OPENCODE_ZEN_API_KEY", "ZHIPUAI_API_KEY", "OPENAI_API_KEY"], runtimeSecrets)
+      hasAnyEnv(["OPENCODE_API_KEY", "OPENCODE_ZEN_API_KEY", "ZHIPUAI_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY"], runtimeSecrets)
   );
   const codexKeyConfigured = Boolean(
     _env.openaiApiKey || hasAnyEnv(["OPENAI_API_KEY"], runtimeSecrets)

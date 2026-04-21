@@ -40,7 +40,7 @@ export interface RuntimeEnv {
   authUsername: string;
   authPassword: string;
   authCredentials: string;
-  primaryBackend: "sglang" | "ollama" | "zhipu" | "openai";
+  primaryBackend: "sglang" | "ollama" | "zhipu" | "openai" | "dashscope";
   primaryModel: string;
   sglangBaseUrl: string;
   sglangModel: string;
@@ -48,6 +48,8 @@ export interface RuntimeEnv {
   ollamaModel: string;
   openaiBaseUrl: string;
   openaiModel: string;
+  dashscopeBaseUrl: string;
+  dashscopeModel: string;
   zhipuBaseUrl: string;
   zhipuModel: string;
   feishuAppId: string;
@@ -81,6 +83,7 @@ export interface RuntimeEnv {
   opencodeBaseUrl: string;
   opencodeApiKey: string;
   zhipuApiKey: string;
+  dashscopeApiKey: string;
   openaiApiKey: string;
   anthropicApiKey: string;
   searchProvider: string;
@@ -122,7 +125,7 @@ function parseNumber(value: string | undefined, fallback: number, minimum: numbe
 
 function chooseDefaultPrimaryBackend(merged: Record<string, string | undefined>): RuntimeEnv["primaryBackend"] {
   const explicit = merged.PRIMARY_BACKEND?.trim().toLowerCase();
-  if (explicit === "sglang" || explicit === "ollama" || explicit === "zhipu" || explicit === "openai") {
+  if (explicit === "sglang" || explicit === "ollama" || explicit === "zhipu" || explicit === "openai" || explicit === "dashscope") {
     return explicit;
   }
   if (merged.SGLANG_BASE_URL?.trim()) {
@@ -130,6 +133,9 @@ function chooseDefaultPrimaryBackend(merged: Record<string, string | undefined>)
   }
   if (merged.OPENAI_API_KEY?.trim()) {
     return "openai";
+  }
+  if (merged.DASHSCOPE_API_KEY?.trim() || merged.DASHSCOPE_BASE_URL?.trim()) {
+    return "dashscope";
   }
   if (merged.ZHIPUAI_API_KEY?.trim()) {
     return "zhipu";
@@ -167,6 +173,8 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): RuntimeEnv {
     ollamaModel: merged.OLLAMA_MODEL ?? "qwen3.5-instruct-14b",
     openaiBaseUrl: merged.OPENAI_BASE_URL ?? "https://api.openai.com/v1",
     openaiModel: merged.OPENAI_MODEL ?? "gpt-4.1",
+    dashscopeBaseUrl: merged.DASHSCOPE_BASE_URL ?? "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    dashscopeModel: merged.DASHSCOPE_MODEL ?? "qwen3.6-plus",
     zhipuBaseUrl: merged.ZHIPU_BASE_URL ?? "https://open.bigmodel.cn/api/paas/v4",
     zhipuModel: merged.ZHIPU_MODEL ?? "glm-5",
     feishuAppId: merged.FEISHU_APP_ID ?? "",
@@ -202,6 +210,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): RuntimeEnv {
     opencodeBaseUrl: merged.VINKOCLAW_OPENCODE_BASE_URL ?? "https://open.bigmodel.cn/api/paas/v4",
     opencodeApiKey: merged.OPENCODE_API_KEY ?? merged.OPENCODE_ZEN_API_KEY ?? "",
     zhipuApiKey: merged.ZHIPUAI_API_KEY ?? "",
+    dashscopeApiKey: merged.DASHSCOPE_API_KEY ?? "",
     anthropicApiKey: merged.ANTHROPIC_API_KEY ?? "",
     searchProvider: merged.SEARCH_PROVIDER ?? "",
     tavilyApiKey: merged.TAVILY_API_KEY ?? "",

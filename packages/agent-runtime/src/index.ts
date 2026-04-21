@@ -106,7 +106,7 @@ export interface RuntimeExecutionInput {
 export interface RuntimeExecutionOutput {
   result: TaskResult;
   reflection: ReflectionNote;
-  backendUsed: "sglang" | "ollama" | "zhipu" | "openai" | "fallback";
+  backendUsed: "sglang" | "ollama" | "zhipu" | "openai" | "dashscope" | "fallback";
   modelUsed: string;
   /** Files produced by tool execution during this task */
   artifactFiles: string[];
@@ -128,7 +128,7 @@ interface ModelMessage {
 
 interface ModelCompletion {
   text: string;
-  backendUsed: "sglang" | "ollama" | "zhipu" | "openai" | "fallback";
+  backendUsed: "sglang" | "ollama" | "zhipu" | "openai" | "dashscope" | "fallback";
   modelUsed: string;
 }
 
@@ -755,7 +755,7 @@ export class LocalModelClient {
   private readonly env = loadEnv();
 
   async finalizeReasoning(
-    backend: "sglang" | "ollama" | "zhipu" | "openai",
+    backend: "sglang" | "ollama" | "zhipu" | "openai" | "dashscope",
     messages: ModelMessage[],
     reasoningText: string
   ): Promise<string | undefined> {
@@ -764,6 +764,8 @@ export class LocalModelClient {
         ? this.env.zhipuBaseUrl.replace(/\/$/, "")
         : backend === "openai"
           ? this.env.openaiBaseUrl.replace(/\/$/, "")
+          : backend === "dashscope"
+            ? this.env.dashscopeBaseUrl.replace(/\/$/, "")
           : backend === "sglang"
             ? this.env.sglangBaseUrl.replace(/\/$/, "")
             : this.env.ollamaBaseUrl.replace(/\/$/, "");
@@ -772,6 +774,8 @@ export class LocalModelClient {
         ? this.env.zhipuModel
         : backend === "openai"
           ? this.env.openaiModel
+          : backend === "dashscope"
+            ? this.env.dashscopeModel
           : backend === "sglang"
             ? this.env.sglangModel
             : this.env.ollamaModel;
@@ -855,16 +859,21 @@ export class LocalModelClient {
   }
 
   private async callOpenAiCompatible(
-    backend: "zhipu" | "openai",
+    backend: "zhipu" | "openai" | "dashscope",
     messages: ModelMessage[]
   ): Promise<ModelCompletion | undefined> {
-    const apiKey = backend === "zhipu" ? this.env.zhipuApiKey : this.env.openaiApiKey;
+    const apiKey =
+      backend === "zhipu" ? this.env.zhipuApiKey : backend === "dashscope" ? this.env.dashscopeApiKey : this.env.openaiApiKey;
     if (!apiKey) {
       return undefined;
     }
     const baseUrl =
-      backend === "zhipu" ? this.env.zhipuBaseUrl.replace(/\/$/, "") : this.env.openaiBaseUrl.replace(/\/$/, "");
-    const model = backend === "zhipu" ? this.env.zhipuModel : this.env.openaiModel;
+      backend === "zhipu"
+        ? this.env.zhipuBaseUrl.replace(/\/$/, "")
+        : backend === "dashscope"
+          ? this.env.dashscopeBaseUrl.replace(/\/$/, "")
+          : this.env.openaiBaseUrl.replace(/\/$/, "");
+    const model = backend === "zhipu" ? this.env.zhipuModel : backend === "dashscope" ? this.env.dashscopeModel : this.env.openaiModel;
 
     const requestBody: Record<string, unknown> = {
       model,
@@ -894,10 +903,10 @@ export class LocalModelClient {
   }
 
   private async callBackend(
-    backend: "sglang" | "ollama" | "zhipu" | "openai",
+    backend: "sglang" | "ollama" | "zhipu" | "openai" | "dashscope",
     messages: ModelMessage[]
   ): Promise<ModelCompletion | undefined> {
-    if (backend === "zhipu" || backend === "openai") {
+    if (backend === "zhipu" || backend === "openai" || backend === "dashscope") {
       return this.callOpenAiCompatible(backend, messages);
     }
 
@@ -942,14 +951,16 @@ export class LocalModelClient {
   async completeWithTools(
     messages: ModelMessage[],
     tools: ToolDefinition[]
-  ): Promise<{ message: ChatCompletionMessage; backendUsed: "sglang" | "ollama" | "zhipu" | "openai" | "fallback"; modelUsed: string }> {
+  ): Promise<{ message: ChatCompletionMessage; backendUsed: "sglang" | "ollama" | "zhipu" | "openai" | "dashscope" | "fallback"; modelUsed: string }> {
     const env = this.env;
-    const backends: Array<"openai" | "zhipu" | "sglang" | "ollama"> =
+    const backends: Array<"openai" | "zhipu" | "dashscope" | "sglang" | "ollama"> =
       env.primaryBackend === "openai"
-        ? ["openai", "zhipu", "sglang"]
+        ? ["openai", "dashscope", "zhipu", "sglang"]
         : env.primaryBackend === "zhipu"
-          ? ["zhipu", "openai", "sglang"]
-          : ["sglang", "openai", "zhipu"];
+          ? ["zhipu", "dashscope", "openai", "sglang"]
+          : env.primaryBackend === "dashscope"
+            ? ["dashscope", "openai", "zhipu", "sglang"]
+            : ["sglang", "dashscope", "openai", "zhipu"];
 
     for (const backend of backends) {
       try {
@@ -958,6 +969,8 @@ export class LocalModelClient {
             ? env.zhipuBaseUrl.replace(/\/$/, "")
             : backend === "openai"
               ? env.openaiBaseUrl.replace(/\/$/, "")
+            : backend === "dashscope"
+              ? env.dashscopeBaseUrl.replace(/\/$/, "")
             : backend === "sglang"
               ? env.sglangBaseUrl.replace(/\/$/, "")
               : env.ollamaBaseUrl.replace(/\/$/, "");
@@ -966,6 +979,8 @@ export class LocalModelClient {
             ? env.zhipuModel
             : backend === "openai"
               ? env.openaiModel
+            : backend === "dashscope"
+              ? env.dashscopeModel
             : backend === "sglang"
               ? env.sglangModel
               : env.ollamaModel;
@@ -974,6 +989,8 @@ export class LocalModelClient {
             ? (env.zhipuApiKey || undefined)
             : backend === "openai"
               ? (env.openaiApiKey || undefined)
+              : backend === "dashscope"
+                ? (env.dashscopeApiKey || undefined)
               : undefined;
 
         const body: Record<string, unknown> = {
@@ -1008,14 +1025,16 @@ export class LocalModelClient {
   }
 
   async complete(messages: ModelMessage[]): Promise<ModelCompletion> {
-    const backends: Array<"sglang" | "ollama" | "zhipu" | "openai"> =
+    const backends: Array<"sglang" | "ollama" | "zhipu" | "openai" | "dashscope"> =
       this.env.primaryBackend === "openai"
-        ? ["openai", "zhipu", "sglang", "ollama"]
+        ? ["openai", "dashscope", "zhipu", "sglang", "ollama"]
         : this.env.primaryBackend === "zhipu"
-          ? ["zhipu", "openai", "sglang", "ollama"]
+          ? ["zhipu", "dashscope", "openai", "sglang", "ollama"]
+          : this.env.primaryBackend === "dashscope"
+            ? ["dashscope", "openai", "zhipu", "sglang", "ollama"]
           : this.env.primaryBackend === "sglang"
-            ? ["sglang", "openai", "ollama", "zhipu"]
-            : ["ollama", "openai", "sglang", "zhipu"];
+            ? ["sglang", "dashscope", "openai", "ollama", "zhipu"]
+            : ["ollama", "dashscope", "openai", "sglang", "zhipu"];
 
     for (const backend of backends) {
       try {

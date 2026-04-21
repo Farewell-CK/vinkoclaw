@@ -705,8 +705,8 @@ export interface RuntimeConfig {
     roleBackends: Partial<Record<RoleId, MemoryBackend>>;
   };
   routing: {
-    primaryBackend: "sglang" | "ollama" | "zhipu" | "openai";
-    fallbackBackend: "ollama" | "sglang" | "zhipu" | "openai";
+    primaryBackend: "sglang" | "ollama" | "zhipu" | "openai" | "dashscope";
+    fallbackBackend: "ollama" | "sglang" | "zhipu" | "openai" | "dashscope";
   };
   channels: {
     feishuEnabled: boolean;

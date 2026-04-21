@@ -49,7 +49,7 @@ const LEADERSHIP_FACILITATORS = new Set<RoleId>(["ceo", "cto"]);
 type LeaderAssignmentPlan = {
   participants: RoleId[];
   rationale: string;
-  backendUsed: "sglang" | "ollama" | "zhipu" | "openai" | "fallback";
+  backendUsed: "sglang" | "ollama" | "zhipu" | "openai" | "dashscope" | "fallback";
   modelUsed: string;
 };
 
