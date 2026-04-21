@@ -6,6 +6,7 @@ export * from "./env.js";
 export * from "./feishu-policy.js";
 export * from "./inbound-commands.js";
 export * from "./logger.js";
+export * from "./model-providers.js";
 export * from "./observability.js";
 export * from "./operator-actions.js";
 export * from "./orchestration-state.js";
