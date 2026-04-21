@@ -2875,11 +2875,13 @@ function renderCrmBoard(board) {
   if (!crmBoardContainer) {
     return;
   }
-  const summary = board?.summary || null;
-  const overdueCadences = Array.isArray(board?.overdueCadences) ? board.overdueCadences : [];
-  const activeLeads = Array.isArray(board?.activeLeads) ? board.activeLeads : [];
-  const recentContacts = Array.isArray(board?.recentContacts) ? board.recentContacts : [];
-  const contactOutcomes = board?.contactOutcomes && typeof board.contactOutcomes === "object" ? board.contactOutcomes : {};
+  const recurringStatus = board?.crm ? board : null;
+  const crmBoard = recurringStatus?.crm || board;
+  const summary = crmBoard?.summary || null;
+  const overdueCadences = Array.isArray(crmBoard?.overdueCadences) ? crmBoard.overdueCadences : [];
+  const activeLeads = Array.isArray(crmBoard?.activeLeads) ? crmBoard.activeLeads : [];
+  const recentContacts = Array.isArray(crmBoard?.recentContacts) ? crmBoard.recentContacts : [];
+  const contactOutcomes = crmBoard?.contactOutcomes && typeof crmBoard.contactOutcomes === "object" ? crmBoard.contactOutcomes : {};
   if (!summary && overdueCadences.length === 0 && activeLeads.length === 0) {
     crmBoardContainer.innerHTML = `
       <article class="list-card compact">
@@ -2921,14 +2923,23 @@ function renderCrmBoard(board) {
           : `contacts ${Number(summary?.totalContacts ?? 0)} · positive ${Number(summary?.positiveContacts ?? 0)}`
       }</p>
       <p class="muted">${
-        summary?.lastRunAt
+        recurringStatus?.summary?.lastRunAt || summary?.lastRunAt
           ? currentLang === "zh"
-            ? `最近运行 ${formatDateTime(summary.lastRunAt)}`
-            : `last run ${formatDateTime(summary.lastRunAt)}`
+            ? `最近运行 ${formatDateTime(recurringStatus?.summary?.lastRunAt || summary.lastRunAt)}`
+            : `last run ${formatDateTime(recurringStatus?.summary?.lastRunAt || summary.lastRunAt)}`
           : currentLang === "zh"
             ? "暂无运行记录"
             : "no recent runs"
       }</p>
+      ${
+        recurringStatus
+          ? `<p class="muted">${
+              currentLang === "zh"
+                ? `周期状态 ${recurringStatus.health || "unknown"} · 下一步 ${recurringStatus.nextAction || "-"}`
+                : `recurring ${recurringStatus.health || "unknown"} · next ${recurringStatus.nextAction || "-"}`
+            }</p>`
+          : ""
+      }
     </article>
   `;
 
@@ -2988,7 +2999,11 @@ function renderCrmBoard(board) {
     .map(([outcome, count]) => `<span class="pill">${escapeHtml(outcome)} · ${Number(count)}</span>`)
     .join("");
 
-  const recentRuns = Array.isArray(board?.history?.recentRuns) ? board.history.recentRuns : [];
+  const recentRuns = Array.isArray(recurringStatus?.history?.recentRuns)
+    ? recurringStatus.history.recentRuns
+    : Array.isArray(crmBoard?.history?.recentRuns)
+      ? crmBoard.history.recentRuns
+      : [];
   const recentRunCards = recentRuns.slice(0, 4).map((run) => {
     const title = typeof run?.title === "string" ? run.title : run?.cadenceId || "run";
     const status = typeof run?.status === "string" ? run.status : "unknown";
@@ -3065,7 +3080,7 @@ async function refresh() {
     request("/api/system/telemetry").catch(() => null),
     request("/api/system/runtime-harness").catch(() => null),
     request("/api/system/harness/grades").catch(() => null),
-    request("/api/crm/dashboard").catch(() => null)
+    request("/api/recurring/status").catch(() => request("/api/crm/dashboard").catch(() => null))
   ]);
 
   renderRoles(rolesPayload);
