@@ -2403,12 +2403,36 @@ function renderProviderStatus(payload) {
   `;
 }
 
+function normalizeOperatingSystemBoard(payload) {
+  if (!payload || payload.mode !== "solo_founder_os") {
+    return payload;
+  }
+  return {
+    ...payload,
+    primary: payload.primary || null,
+    projects: Array.isArray(payload.projects)
+      ? payload.projects
+      : Array.isArray(payload.focusProjects)
+        ? payload.focusProjects
+        : [],
+    archivedProjects: Array.isArray(payload.archivedProjects) ? payload.archivedProjects : [],
+    workstreams: Array.isArray(payload.workstreams) ? payload.workstreams : [],
+    blockers: Array.isArray(payload.blockers) ? payload.blockers : [],
+    pendingDecisions: Array.isArray(payload.pendingDecisions) ? payload.pendingDecisions : [],
+    nextActions: Array.isArray(payload.nextActions) ? payload.nextActions : [],
+    latestArtifacts: Array.isArray(payload.latestArtifacts) ? payload.latestArtifacts : [],
+    teamReadiness: Array.isArray(payload.teamReadiness) ? payload.teamReadiness : []
+  };
+}
+
 function renderProjectMemoryBoard(board) {
   if (!projectMemoryBoardContainer) {
     return;
   }
+  board = normalizeOperatingSystemBoard(board);
   const summary = board?.summary || null;
   const primary = board?.primary || null;
+  const operatingMode = board?.mode === "solo_founder_os";
   const teamReadiness = Array.isArray(board?.teamReadiness) ? board.teamReadiness : [];
   const workstreams = Array.isArray(board?.workstreams) ? board.workstreams : [];
   const projects = Array.isArray(board?.projects) ? board.projects : [];
@@ -2423,7 +2447,7 @@ function renderProjectMemoryBoard(board) {
       ? `<ul style="margin:8px 0 0 18px;padding:0;">${items.map((item) => `<li>${escapeHtml(String(item))}</li>`).join("")}</ul>`
       : `<p class="muted">${emptyLabel}</p>`;
 
-  if (!primary && workstreams.length === 0) {
+  if (!primary && workstreams.length === 0 && projects.length === 0) {
     projectMemoryBoardContainer.innerHTML = `
       <article class="list-card compact">
         <div class="list-head">
@@ -2575,11 +2599,29 @@ function renderProjectMemoryBoard(board) {
   projectMemoryBoardContainer.innerHTML = `
     <article class="list-card compact">
       <div class="list-head">
-        <strong>${currentLang === "zh" ? "CEO 总览" : "CEO Overview"}</strong>
+        <strong>${
+          operatingMode
+            ? currentLang === "zh"
+              ? "CEO 操作系统"
+              : "CEO Operating System"
+            : currentLang === "zh"
+              ? "CEO 总览"
+              : "CEO Overview"
+        }</strong>
         <span>${formatDateTime(board?.generatedAt || new Date().toISOString())}</span>
       </div>
       <div class="pill-row">
+        ${
+          operatingMode
+            ? `<span class="pill">${currentLang === "zh" ? "健康度" : "Health"} · ${escapeHtml(String(board?.health || "unknown"))}</span>`
+            : ""
+        }
         <span class="pill">${currentLang === "zh" ? "项目" : "Projects"} · ${summary?.activeProjects ?? 0}</span>
+        ${
+          operatingMode
+            ? `<span class="pill">${currentLang === "zh" ? "总项目" : "Total projects"} · ${summary?.totalProjects ?? projects.length}</span>`
+            : ""
+        }
         <span class="pill">${currentLang === "zh" ? "归档项目" : "Archived"} · ${summary?.archivedProjects ?? 0}</span>
         <span class="pill">${currentLang === "zh" ? "阻塞任务" : "Blocked"} · ${summary?.blockedTasks ?? 0}</span>
         <span class="pill">${currentLang === "zh" ? "待补充" : "Awaiting input"} · ${summary?.awaitingInputTasks ?? 0}</span>
@@ -2587,7 +2629,21 @@ function renderProjectMemoryBoard(board) {
         <span class="pill">${currentLang === "zh" ? "验证债务" : "Verification debt"} · ${summary?.verificationDebtRoles ?? 0}</span>
         <span class="pill">${currentLang === "zh" ? "活跃线索" : "Active leads"} · ${summary?.activeLeads ?? 0}</span>
         <span class="pill">${currentLang === "zh" ? "到期 cadence" : "Overdue cadences"} · ${summary?.overdueCadences ?? 0}</span>
+        ${
+          operatingMode
+            ? `<span class="pill">${currentLang === "zh" ? "周期任务" : "Recurring"} · ${escapeHtml(String(summary?.recurringHealth || "unknown"))}</span>`
+            : ""
+        }
       </div>
+      ${
+        operatingMode
+          ? `<p class="muted">${
+              currentLang === "zh"
+                ? `系统建议下一步：${escapeHtml(String(summary?.recurringNextAction || nextActions[0] || "review_operating_snapshot"))}`
+                : `Suggested next action: ${escapeHtml(String(summary?.recurringNextAction || nextActions[0] || "review_operating_snapshot"))}`
+            }</p>`
+          : ""
+      }
     </article>
     ${
       primary
@@ -3069,12 +3125,12 @@ function renderCrmBoard(board) {
 }
 
 async function refresh() {
-  const [dashboard, rolesPayload, channelsPayload, providersPayload, projectBoardPayload, goalRunsPayload, harnessPayload, telemetryPayload, runtimeHarnessPayload, harnessGradesPayload, crmBoardPayload] = await Promise.all([
+  const [dashboard, rolesPayload, channelsPayload, providersPayload, operatingSystemPayload, goalRunsPayload, harnessPayload, telemetryPayload, runtimeHarnessPayload, harnessGradesPayload, crmBoardPayload] = await Promise.all([
     request("/api/dashboard"),
     request("/api/roles"),
     request("/api/channels/status").catch(() => null),
     request("/api/tool-providers").catch(() => null),
-    request("/api/project-board").catch(() => null),
+    request("/api/operating-system").catch(() => request("/api/project-board").catch(() => null)),
     request("/api/goal-runs?limit=40").catch(() => []),
     request("/api/system/harness").catch(() => null),
     request("/api/system/telemetry").catch(() => null),
@@ -3093,7 +3149,7 @@ async function refresh() {
   renderQueueMetrics(dashboard.queueMetrics);
   renderChannelsStatus(channelsPayload);
   renderProviderStatus(providersPayload);
-  renderProjectMemoryBoard(projectBoardPayload);
+  renderProjectMemoryBoard(operatingSystemPayload);
   window._lastGoalRuns = Array.isArray(goalRunsPayload) ? goalRunsPayload : [];
   renderGoalRuns(window._lastGoalRuns);
   lastRuntimeHarnessPayload = runtimeHarnessPayload;

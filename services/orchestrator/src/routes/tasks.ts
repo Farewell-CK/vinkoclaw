@@ -187,6 +187,13 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
         .slice()
         .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
         .slice(0, 6),
+      primary: snapshot.primary,
+      projects: snapshot.projects,
+      archivedProjects: snapshot.archivedProjects,
+      workstreams: snapshot.workstreams,
+      blockers: snapshot.blockers,
+      pendingDecisions: snapshot.pendingDecisions,
+      teamReadiness: snapshot.teamReadiness,
       attentionQueue: attentionQueue.slice(0, 12),
       nextActions: nextActions.slice(0, 12),
       latestArtifacts: snapshot.latestArtifacts.slice(0, 12),

@@ -311,6 +311,8 @@ describe("project routes", () => {
       expect((payload.summary as Record<string, unknown>).totalProjects).toBe(1);
       expect((payload.summary as Record<string, unknown>).recurringNextAction).toBe("run_due_cadences");
       expect(payload.focusProjects).toBeInstanceOf(Array);
+      expect(payload.projects).toBeInstanceOf(Array);
+      expect(payload.teamReadiness).toBeInstanceOf(Array);
       expect(payload.attentionQueue).toBeInstanceOf(Array);
       expect(payload.nextActions).toBeInstanceOf(Array);
       expect((payload.recurring as Record<string, unknown>).health).toBe("attention_required");

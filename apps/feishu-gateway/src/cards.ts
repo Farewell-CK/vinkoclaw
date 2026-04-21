@@ -161,12 +161,18 @@ export interface TaskQueuedCardInput {
 
 export function buildTaskQueuedCard(input: TaskQueuedCardInput): Record<string, unknown> {
   return card(
-    header("已接收", "blue"),
+    header("CEO 工作已接收", "blue"),
     [
-      md(`**${input.roleLabel}** 正在处理：${input.title}`),
-      ...(input.workflowSummary?.trim() ? [hr(), md(input.workflowSummary.trim())] : []),
+      md(
+        [
+          `**目标**：${input.title}`,
+          `**执行负责人**：${input.roleLabel}`,
+          "**当前状态**：已进入执行队列，系统会按目标推进、验证和回报结果"
+        ].join("\n")
+      ),
+      ...(input.workflowSummary?.trim() ? [hr(), md(`**执行简报**\n\n${input.workflowSummary.trim()}`)] : []),
       hr(),
-      note("任务完成后我会通知你"),
+      note("你是 CEO。需要决策或补充信息时我会暂停并明确提问；完成后会回报产物、验证状态和下一步。"),
     ],
   );
 }
