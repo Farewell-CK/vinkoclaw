@@ -2845,6 +2845,8 @@ function renderCrmBoard(board) {
   const summary = board?.summary || null;
   const overdueCadences = Array.isArray(board?.overdueCadences) ? board.overdueCadences : [];
   const activeLeads = Array.isArray(board?.activeLeads) ? board.activeLeads : [];
+  const recentContacts = Array.isArray(board?.recentContacts) ? board.recentContacts : [];
+  const contactOutcomes = board?.contactOutcomes && typeof board.contactOutcomes === "object" ? board.contactOutcomes : {};
   if (!summary && overdueCadences.length === 0 && activeLeads.length === 0) {
     crmBoardContainer.innerHTML = `
       <article class="list-card compact">
@@ -2875,10 +2877,15 @@ function renderCrmBoard(board) {
       }</p>
       <p class="muted">${
         currentLang === "zh"
-          ? `到期 cadence ${Number(summary?.overdueCadences ?? 0)} · 关联项目 ${Number(summary?.projectLinkedLeads ?? 0)}`
+          ? `到期 cadence ${Number(summary?.overdueCadences ?? 0)} · 完成 cadence ${Number(summary?.completedCadences ?? 0)} · 关联项目 ${Number(summary?.projectLinkedLeads ?? 0)}`
           : `overdue cadences ${Number(summary?.overdueCadences ?? 0)} · linked projects ${Number(
               summary?.projectLinkedLeads ?? 0
-            )}`
+            )} · completed cadences ${Number(summary?.completedCadences ?? 0)}`
+      }</p>
+      <p class="muted">${
+        currentLang === "zh"
+          ? `联系记录 ${Number(summary?.totalContacts ?? 0)} · 正向反馈 ${Number(summary?.positiveContacts ?? 0)}`
+          : `contacts ${Number(summary?.totalContacts ?? 0)} · positive ${Number(summary?.positiveContacts ?? 0)}`
       }</p>
       <p class="muted">${
         summary?.lastRunAt
@@ -2927,7 +2934,28 @@ function renderCrmBoard(board) {
     `;
   });
 
-  const recentRuns = Array.isArray(data?.history?.recentRuns) ? data.history.recentRuns : [];
+  const contactCards = recentContacts.slice(0, 4).map((contact) => {
+    const summaryText = typeof contact?.summary === "string" ? contact.summary : "";
+    const outcome = typeof contact?.outcome === "string" ? contact.outcome : "note";
+    const happenedAt = typeof contact?.happenedAt === "string" ? contact.happenedAt : "";
+    return `
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${escapeHtml(outcome)}</strong>
+          <span>${escapeHtml(String(contact?.channel ?? "manual"))}</span>
+        </div>
+        <p class="muted">${escapeHtml(happenedAt ? formatDateTime(happenedAt) : currentLang === "zh" ? "无时间" : "No timestamp")}</p>
+        <p>${escapeHtml(summaryText || (currentLang === "zh" ? "暂无摘要" : "No summary"))}</p>
+      </article>
+    `;
+  });
+
+  const outcomeSummary = Object.entries(contactOutcomes)
+    .slice(0, 6)
+    .map(([outcome, count]) => `<span class="pill">${escapeHtml(outcome)} · ${Number(count)}</span>`)
+    .join("");
+
+  const recentRuns = Array.isArray(board?.history?.recentRuns) ? board.history.recentRuns : [];
   const recentRunCards = recentRuns.slice(0, 4).map((run) => {
     const title = typeof run?.title === "string" ? run.title : run?.cadenceId || "run";
     const status = typeof run?.status === "string" ? run.status : "unknown";
@@ -2962,6 +2990,22 @@ function renderCrmBoard(board) {
             currentLang === "zh" ? "活跃线索" : "Active leads"
           }</strong><span>0</span></div><p class="muted">${
             currentLang === "zh" ? "当前没有活跃线索。" : "No active leads right now."
+          }</p></article>`
+    }
+    <article class="list-card compact">
+      <div class="list-head">
+        <strong>${currentLang === "zh" ? "联系结果分布" : "Contact outcomes"}</strong>
+        <span>${Number(summary?.totalContacts ?? 0)}</span>
+      </div>
+      <div class="pill-row">${outcomeSummary || `<span class="pill">${currentLang === "zh" ? "暂无记录" : "No records"}</span>`}</div>
+    </article>
+    ${
+      contactCards.length > 0
+        ? contactCards.join("")
+        : `<article class="list-card compact"><div class="list-head"><strong>${
+            currentLang === "zh" ? "最近联系" : "Recent contacts"
+          }</strong><span>0</span></div><p class="muted">${
+            currentLang === "zh" ? "当前没有联系记录。" : "No contact records yet."
           }</p></article>`
     }
     ${

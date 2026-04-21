@@ -255,12 +255,21 @@ describe("crm routes", () => {
     const lead = buildLead({ linkedProjectId: "project:vinkoclaw" });
     const overdue = buildCadence({ nextRunAt: "2026-04-19T09:00:00.000Z" });
     const active = buildCadence({ id: "cadence_2", nextRunAt: "2026-04-25T09:00:00.000Z" });
+    const completed = buildCadence({ id: "cadence_3", status: "completed", nextRunAt: "2026-04-18T09:00:00.000Z" });
+    const contact = buildContact({ outcome: "meeting_booked" });
     const store = {
       listCrmLeads: vi.fn(() => [lead]),
+      listCrmContacts: vi.fn(() => [contact]),
       listCrmCadences: vi
         .fn()
         .mockImplementation((input?: { dueBefore?: string; status?: string }) =>
-          input?.dueBefore ? [overdue] : input?.status === "active" ? [overdue, active] : [overdue, active]
+          input?.dueBefore
+            ? [overdue]
+            : input?.status === "completed"
+              ? [completed]
+              : input?.status === "active"
+                ? [overdue, active]
+                : [overdue, active, completed]
         )
     } as unknown as VinkoStore;
     const app = createApp(store);
@@ -270,13 +279,20 @@ describe("crm routes", () => {
       expect(dashboardResponse.status).toBe(200);
       const payload = (await dashboardResponse.json()) as {
         summary: Record<string, number>;
+        contactOutcomes: Record<string, number>;
+        recentContacts: Array<Record<string, unknown>>;
         overdueCadences: Array<Record<string, unknown>>;
         activeLeads: Array<Record<string, unknown>>;
       };
       expect(payload.summary.activeLeads).toBe(1);
       expect(payload.summary.activeCadences).toBe(2);
+      expect(payload.summary.completedCadences).toBe(1);
       expect(payload.summary.overdueCadences).toBe(1);
       expect(payload.summary.projectLinkedLeads).toBe(1);
+      expect(payload.summary.totalContacts).toBe(1);
+      expect(payload.summary.positiveContacts).toBe(1);
+      expect(payload.contactOutcomes.meeting_booked).toBe(1);
+      expect(payload.recentContacts[0]?.id).toBe("contact_1");
       expect(payload.overdueCadences[0]?.id).toBe("cadence_1");
       expect(payload.activeLeads[0]?.id).toBe("lead_1");
     });

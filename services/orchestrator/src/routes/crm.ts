@@ -17,20 +17,33 @@ export interface CrmRoutesDeps {
 export function buildCrmDashboardSnapshot(store: VinkoStore) {
   const leads = store.listCrmLeads({ limit: 500 });
   const activeCadences = store.listCrmCadences({ status: "active", limit: 500 });
+  const completedCadences = store.listCrmCadences({ status: "completed", limit: 500 });
+  const contacts = store.listCrmContacts?.({ limit: 500 }) ?? [];
   const nowIso = new Date().toISOString();
   const overdueCadences = store.listCrmCadences({
     status: "active",
     dueBefore: nowIso,
     limit: 500
   });
+  const contactOutcomes = contacts.reduce<Record<string, number>>((acc, contact) => {
+    acc[contact.outcome] = (acc[contact.outcome] ?? 0) + 1;
+    return acc;
+  }, {});
   return {
     generatedAt: nowIso,
     summary: {
       activeLeads: leads.filter((lead) => lead.status === "active").length,
       activeCadences: activeCadences.length,
+      completedCadences: completedCadences.length,
       overdueCadences: overdueCadences.length,
-      projectLinkedLeads: leads.filter((lead) => Boolean(lead.linkedProjectId)).length
+      projectLinkedLeads: leads.filter((lead) => Boolean(lead.linkedProjectId)).length,
+      totalContacts: contacts.length,
+      positiveContacts: contacts.filter(
+        (contact) => contact.outcome === "replied" || contact.outcome === "meeting_booked" || contact.outcome === "won"
+      ).length
     },
+    contactOutcomes,
+    recentContacts: contacts.slice(0, 20),
     overdueCadences: overdueCadences.slice(0, 20),
     activeLeads: leads.slice(0, 20)
   };
