@@ -120,6 +120,10 @@ export function shouldUseTeamCollaboration(
   return normalized.length >= 40;
 }
 
+export function hasExplicitTeamCollaborationSignal(text: string): boolean {
+  return EXPLICIT_TEAM_REQUEST_PATTERN.test(text.trim());
+}
+
 function normalizeSmalltalkCandidate(text: string): string {
   let normalized = text.trim();
   if (!normalized) {
@@ -230,5 +234,6 @@ export function resolveExplicitRoleDirective(text: string): RoleId | undefined {
 
 export function resolveCollaborationEntryRole(text: string): RoleId {
   const explicitRole = resolveExplicitRoleDirective(text);
-  return explicitRole ?? "ceo";
+  // User is the CEO. AI does not play CEO — default to CTO as the technical coordinator.
+  return explicitRole ?? "cto";
 }
