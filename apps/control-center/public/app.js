@@ -2413,6 +2413,7 @@ function renderProjectMemoryBoard(board) {
   const workstreams = Array.isArray(board?.workstreams) ? board.workstreams : [];
   const projects = Array.isArray(board?.projects) ? board.projects : [];
   const archivedProjects = Array.isArray(board?.archivedProjects) ? board.archivedProjects : [];
+  const attentionQueue = Array.isArray(board?.attentionQueue) ? board.attentionQueue.slice(0, 6) : [];
   const blockers = Array.isArray(board?.blockers) ? board.blockers.slice(0, 5) : [];
   const pendingDecisions = Array.isArray(board?.pendingDecisions) ? board.pendingDecisions.slice(0, 5) : [];
   const nextActions = Array.isArray(board?.nextActions) ? board.nextActions.slice(0, 5) : [];
@@ -2556,6 +2557,20 @@ function renderProjectMemoryBoard(board) {
       `
     )
     .join("");
+  const attentionCards = attentionQueue
+    .map(
+      (item) => `
+        <article class="list-card compact">
+          <div class="list-head">
+            <strong>${escapeHtml(item.projectName || item.projectId)}</strong>
+            <span>${escapeHtml(item.level === "critical" ? (currentLang === "zh" ? "需要处理" : "critical") : currentLang === "zh" ? "关注" : "watch")}</span>
+          </div>
+          <p><strong>${escapeHtml(item.reason || "-")}:</strong> ${escapeHtml(item.summary || "-")}</p>
+          <p class="muted">${currentLang === "zh" ? "建议动作" : "Next action"} · ${escapeHtml(item.nextAction || "review_project_status")}</p>
+        </article>
+      `
+    )
+    .join("");
 
   projectMemoryBoardContainer.innerHTML = `
     <article class="list-card compact">
@@ -2611,6 +2626,24 @@ function renderProjectMemoryBoard(board) {
               ${renderMiniList(latestArtifacts, currentLang === "zh" ? "暂无产物" : "No artifacts")}
             </div>
           </article>
+        `
+        : ""
+    }
+    ${
+      attentionCards
+        ? `
+          <article class="list-card compact">
+            <div class="list-head">
+              <strong>${currentLang === "zh" ? "CEO 关注队列" : "CEO attention queue"}</strong>
+              <span>${attentionQueue.length}</span>
+            </div>
+            <p class="muted">${
+              currentLang === "zh"
+                ? "按阻塞、等待输入和到期跟进聚合，帮助 CEO 先处理最需要关注的项目。"
+                : "Prioritized by blockers, awaiting input, and overdue follow-ups."
+            }</p>
+          </article>
+          ${attentionCards}
         `
         : ""
     }
