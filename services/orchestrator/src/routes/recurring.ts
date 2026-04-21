@@ -44,6 +44,42 @@ export function buildRecurringHistorySnapshot(store: VinkoStore) {
   };
 }
 
+export function buildRecurringStatusSnapshot(store: VinkoStore) {
+  const crm = buildCrmDashboardSnapshot(store);
+  const history = buildRecurringHistorySnapshot(store);
+  const dueCadences = Number(crm.summary.overdueCadences ?? 0);
+  const activeCadences = Number(crm.summary.activeCadences ?? 0);
+  const inFlightRuns = Number(history.summary.inFlightRuns ?? 0);
+  const health =
+    dueCadences > 0
+      ? "attention_required"
+      : inFlightRuns > 0
+        ? "running"
+        : activeCadences > 0
+          ? "scheduled"
+          : "idle";
+  return {
+    generatedAt: new Date().toISOString(),
+    health,
+    summary: {
+      activeCadences,
+      dueCadences,
+      inFlightRuns,
+      lastRunAt: history.summary.lastRunAt
+    },
+    nextAction:
+      dueCadences > 0
+        ? "run_due_cadences"
+        : inFlightRuns > 0
+          ? "monitor_runs"
+          : activeCadences > 0
+            ? "wait_for_next_cadence"
+            : "create_cadence",
+    crm,
+    history
+  };
+}
+
 export function createRecurringScheduler(input: {
   store: VinkoStore;
   enabled: boolean;
@@ -110,6 +146,10 @@ export function registerRecurringRoutes(app: express.Express, deps: RecurringRou
       crm,
       history
     });
+  });
+
+  app.get("/api/recurring/status", (_request, response) => {
+    response.json(buildRecurringStatusSnapshot(store));
   });
 
   app.get("/api/recurring/history", (_request, response) => {

@@ -75,6 +75,31 @@ describe("recurring routes", () => {
     });
   });
 
+  it("returns recurring operating status with next action", async () => {
+    const store = {
+      listCrmLeads: vi.fn(() => [{ id: "lead_1", status: "active", linkedProjectId: "project:vinkoclaw" }]),
+      listTasks: vi.fn(() => []),
+      listCrmContacts: vi.fn(() => []),
+      listCrmCadences: vi
+        .fn()
+        .mockImplementation((input?: { dueBefore?: string; status?: string }) =>
+          input?.dueBefore
+            ? [{ id: "cadence_due", status: "active", nextRunAt: "2026-04-19T09:00:00.000Z" }]
+            : [{ id: "cadence_due", status: "active" }]
+        )
+    } as unknown as VinkoStore;
+    const app = createApp(store);
+
+    await withServer(app, async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/recurring/status`);
+      expect(response.status).toBe(200);
+      const payload = (await response.json()) as Record<string, unknown>;
+      expect(payload.health).toBe("attention_required");
+      expect(payload.nextAction).toBe("run_due_cadences");
+      expect((payload.summary as Record<string, unknown>).dueCadences).toBe(1);
+    });
+  });
+
   it("runs the scheduler tick without requiring the HTTP route", () => {
     const cadence = {
       id: "cadence_1",
