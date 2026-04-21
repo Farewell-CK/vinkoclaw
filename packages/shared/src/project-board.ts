@@ -8,8 +8,8 @@ import type {
   CrmLeadRecord,
   GoalRunRecord,
   GoalRunTraceRecord,
-  ProjectBoardProject,
   ProjectBoardAttentionItem,
+  ProjectBoardProject,
   ProjectBoardProjectHistoryEntry,
   ProjectBoardPrimaryView,
   ProjectBoardRoleReadiness,
@@ -958,4 +958,12 @@ export function findProjectBoardProject(
     return undefined;
   }
   return listProjectBoardProjects(snapshot, { includeArchived: true }).find((project) => project.id === normalizedId);
+}
+
+export function listProjectBoardAttentionItems(
+  snapshot: ProjectBoardSnapshot,
+  options?: { level?: ProjectBoardAttentionItem["level"] | undefined }
+): ProjectBoardAttentionItem[] {
+  const items = Array.isArray(snapshot.attentionQueue) ? snapshot.attentionQueue : [];
+  return options?.level ? items.filter((item) => item.level === options.level) : items;
 }

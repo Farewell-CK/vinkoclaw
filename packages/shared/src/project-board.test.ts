@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildProjectBoardSnapshot, findProjectBoardProject, listProjectBoardProjects } from "./project-board.js";
+import {
+  buildProjectBoardSnapshot,
+  findProjectBoardProject,
+  listProjectBoardAttentionItems,
+  listProjectBoardProjects
+} from "./project-board.js";
 import type { CrmCadenceRecord, CrmContactRecord, CrmLeadRecord, SessionRecord, TaskRecord } from "./types.js";
 
 function buildSession(patch: Partial<SessionRecord> = {}): SessionRecord {
@@ -249,6 +254,8 @@ describe("project-board", () => {
     expect(snapshot.archivedProjects[0]?.name).toBe("旧项目归档");
     expect(listProjectBoardProjects(snapshot, { includeArchived: true })).toHaveLength(2);
     expect(findProjectBoardProject(snapshot, snapshot.projects[0]!.id)?.name).toBe("OPC 增长引擎");
+    expect(listProjectBoardAttentionItems(snapshot, { level: "watch" })).toHaveLength(1);
+    expect(listProjectBoardAttentionItems(snapshot, { level: "critical" })).toHaveLength(0);
   });
 
   it("includes orchestration decision, verification, and artifact events in project history", () => {
