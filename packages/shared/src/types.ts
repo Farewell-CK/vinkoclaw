@@ -200,6 +200,16 @@ export interface ProjectBoardProject {
   history: ProjectBoardProjectHistoryEntry[];
 }
 
+export interface ProjectBoardAttentionItem {
+  projectId: string;
+  projectName: string;
+  level: "critical" | "watch";
+  reason: "blocked" | "awaiting_input" | "overdue_cadence" | "high_priority";
+  summary: string;
+  nextAction: string;
+  updatedAt: string;
+}
+
 export interface ProjectBoardSnapshot {
   generatedAt: string;
   summary: ProjectBoardSummary;
@@ -212,6 +222,7 @@ export interface ProjectBoardSnapshot {
   workstreams: ProjectBoardWorkstream[];
   projects: ProjectBoardProject[];
   archivedProjects: ProjectBoardProject[];
+  attentionQueue: ProjectBoardAttentionItem[];
 }
 
 export interface ReflectionNote {

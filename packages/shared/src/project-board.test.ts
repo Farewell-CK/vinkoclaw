@@ -240,6 +240,12 @@ describe("project-board", () => {
     expect(snapshot.projects[0]?.crmLeadCount).toBe(1);
     expect(snapshot.projects[0]?.crmActiveCadences).toBe(1);
     expect(snapshot.projects[0]?.crmOverdueCadences).toBe(1);
+    expect(snapshot.attentionQueue[0]).toMatchObject({
+      projectName: "OPC 增长引擎",
+      level: "watch",
+      reason: "overdue_cadence",
+      nextAction: "run_due_cadences"
+    });
     expect(snapshot.archivedProjects[0]?.name).toBe("旧项目归档");
     expect(listProjectBoardProjects(snapshot, { includeArchived: true })).toHaveLength(2);
     expect(findProjectBoardProject(snapshot, snapshot.projects[0]!.id)?.name).toBe("OPC 增长引擎");

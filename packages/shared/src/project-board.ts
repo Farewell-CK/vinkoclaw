@@ -9,6 +9,7 @@ import type {
   GoalRunRecord,
   GoalRunTraceRecord,
   ProjectBoardProject,
+  ProjectBoardAttentionItem,
   ProjectBoardProjectHistoryEntry,
   ProjectBoardPrimaryView,
   ProjectBoardRoleReadiness,
@@ -756,6 +757,56 @@ function buildRoleReadiness(
     });
 }
 
+function buildProjectAttentionQueue(projects: ProjectBoardProject[]): ProjectBoardAttentionItem[] {
+  return projects
+    .flatMap((project): ProjectBoardAttentionItem[] => {
+      const nextAction = project.nextActions[0] ?? "review_project_status";
+      const items: ProjectBoardAttentionItem[] = [];
+      if (project.health === "blocked") {
+        items.push({
+          projectId: project.id,
+          projectName: project.name,
+          level: "critical",
+          reason: project.blockers.length > 0 ? "awaiting_input" : "blocked",
+          summary: project.blockers[0] ?? project.latestSummary,
+          nextAction,
+          updatedAt: project.updatedAt
+        });
+      }
+      if (project.crmOverdueCadences > 0) {
+        items.push({
+          projectId: project.id,
+          projectName: project.name,
+          level: "watch",
+          reason: "overdue_cadence",
+          summary: `${project.crmOverdueCadences} overdue cadence${project.crmOverdueCadences === 1 ? "" : "s"}`,
+          nextAction: nextAction === "review_project_status" ? "run_due_cadences" : nextAction,
+          updatedAt: project.updatedAt
+        });
+      }
+      if (items.length === 0 && project.priority === "high") {
+        items.push({
+          projectId: project.id,
+          projectName: project.name,
+          level: "watch",
+          reason: "high_priority",
+          summary: project.latestSummary,
+          nextAction,
+          updatedAt: project.updatedAt
+        });
+      }
+      return items;
+    })
+    .sort((left, right) => {
+      const levelDelta = (left.level === "critical" ? 0 : 1) - (right.level === "critical" ? 0 : 1);
+      if (levelDelta !== 0) {
+        return levelDelta;
+      }
+      return parseTimestamp(right.updatedAt) - parseTimestamp(left.updatedAt);
+    })
+    .slice(0, 12);
+}
+
 export function buildProjectBoardSnapshot(input: {
   sessions: SessionRecord[];
   tasks: TaskRecord[];
@@ -884,7 +935,8 @@ export function buildProjectBoardSnapshot(input: {
     teamReadiness,
     workstreams,
     projects,
-    archivedProjects
+    archivedProjects,
+    attentionQueue: buildProjectAttentionQueue(projects)
   };
 }
 
