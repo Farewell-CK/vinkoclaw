@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RuntimeEnv } from "./env.js";
 import type { RuntimeConfig } from "./types.js";
-import { listModelProviderStatuses } from "./model-providers.js";
+import { buildModelProviderReadiness, listModelProviderStatuses } from "./model-providers.js";
 
 function createEnv(overrides: Partial<RuntimeEnv> = {}): RuntimeEnv {
   return {
@@ -126,5 +126,26 @@ describe("model provider statuses", () => {
     expect(dashscope?.missing).toContain("DASHSCOPE_API_KEY");
     expect(sglang?.configured).toBe(true);
     expect(sglang?.keyConfigured).toBe(true);
+  });
+
+  it("recommends switching when primary is missing but another provider is configured", () => {
+    const statuses = listModelProviderStatuses(createEnv(), createRuntimeConfig());
+    const readiness = buildModelProviderReadiness(statuses);
+
+    expect(readiness.ok).toBe(true);
+    expect(readiness.primaryProviderId).toBe("dashscope");
+    expect(readiness.primaryConfigured).toBe(false);
+    expect(readiness.configuredProviderIds).toContain("sglang");
+    expect(readiness.unavailablePrimaryReasons).toContain("DASHSCOPE_API_KEY");
+    expect(readiness.recommendedAction).toBe("switch_to_configured_provider");
+  });
+
+  it("passes readiness when the primary provider is configured", () => {
+    const statuses = listModelProviderStatuses(createEnv({ dashscopeApiKey: "dashscope-key" }), createRuntimeConfig());
+    const readiness = buildModelProviderReadiness(statuses);
+
+    expect(readiness.ok).toBe(true);
+    expect(readiness.primaryConfigured).toBe(true);
+    expect(readiness.recommendedAction).toBe("none");
   });
 });

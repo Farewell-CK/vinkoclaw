@@ -15,6 +15,17 @@ export interface ModelProviderStatus {
   missing: string[];
 }
 
+export interface ModelProviderReadiness {
+  ok: boolean;
+  primaryProviderId: ModelProviderId;
+  fallbackProviderId?: ModelProviderId | undefined;
+  primaryConfigured: boolean;
+  fallbackConfigured: boolean;
+  configuredProviderIds: ModelProviderId[];
+  unavailablePrimaryReasons: string[];
+  recommendedAction: "none" | "configure_primary" | "switch_to_configured_provider" | "configure_any_provider";
+}
+
 function hasValue(value: string | undefined): boolean {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -119,4 +130,34 @@ export function listModelProviderStatuses(
       apiKey: ""
     })
   ];
+}
+
+export function buildModelProviderReadiness(statuses: ModelProviderStatus[]): ModelProviderReadiness {
+  const primary = statuses.find((status) => status.primary);
+  const fallback = statuses.find((status) => status.fallback);
+  const configuredProviderIds = statuses
+    .filter((status) => status.configured)
+    .map((status) => status.providerId);
+  const primaryProviderId = primary?.providerId ?? "sglang";
+  const primaryConfigured = Boolean(primary?.configured);
+  const fallbackConfigured = Boolean(fallback?.configured);
+  const ok = primaryConfigured || fallbackConfigured || configuredProviderIds.length > 0;
+  const recommendedAction: ModelProviderReadiness["recommendedAction"] = primaryConfigured
+    ? "none"
+    : configuredProviderIds.length > 0
+      ? "switch_to_configured_provider"
+      : primary
+        ? "configure_primary"
+        : "configure_any_provider";
+
+  return {
+    ok,
+    primaryProviderId,
+    fallbackProviderId: fallback?.providerId,
+    primaryConfigured,
+    fallbackConfigured,
+    configuredProviderIds,
+    unavailablePrimaryReasons: primary?.missing ?? ["primary_provider_not_found"],
+    recommendedAction
+  };
 }
