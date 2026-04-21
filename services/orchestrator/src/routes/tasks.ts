@@ -4,7 +4,13 @@ import {
   orchestratorInboundMessageSchema,
   orchestratorTaskSplitSchema
 } from "@vinko/protocol";
-import { buildProjectBoardSnapshot, buildWorkflowStatusSummary, findProjectBoardProject, listProjectBoardProjects } from "@vinko/shared";
+import {
+  buildProjectBoardSnapshot,
+  buildWorkflowStatusSummary,
+  findProjectBoardProject,
+  listProjectBoardAttentionItems,
+  listProjectBoardProjects
+} from "@vinko/shared";
 import type { RoleId, TaskAttachment, TaskMetadata, TaskRecord, VinkoStore } from "@vinko/shared";
 import { enrichTaskRecord } from "./response-utils.js";
 
@@ -136,6 +142,16 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
 
   app.get("/api/project-board", (_request, response) => {
     response.json(buildProjectBoardSnapshot(buildProjectBoardInput()));
+  });
+
+  app.get("/api/project-board/attention", (request, response) => {
+    const level = request.query.level === "critical" || request.query.level === "watch" ? request.query.level : undefined;
+    const snapshot = buildProjectBoardSnapshot(buildProjectBoardInput());
+    response.json({
+      generatedAt: snapshot.generatedAt,
+      summary: snapshot.summary,
+      attentionQueue: listProjectBoardAttentionItems(snapshot, { level })
+    });
   });
 
   app.get("/api/projects", (_request, response) => {
