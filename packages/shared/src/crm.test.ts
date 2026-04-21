@@ -147,4 +147,84 @@ describe("VinkoStore CRM cadences", () => {
     expect(due).toHaveLength(1);
     expect(due[0]?.label).toBe("overdue cadence");
   });
+
+  it("writes contact outcomes back into cadence state", () => {
+    const store = createTestStore();
+    const lead = store.createCrmLead({
+      name: "Follow-up Prospect",
+      source: "email"
+    });
+    const cadence = store.createCrmCadence({
+      leadId: lead.id,
+      label: "follow-up cadence",
+      channel: "email",
+      intervalDays: 5,
+      objective: "持续推进沟通",
+      nextRunAt: "2026-04-27T09:00:00.000Z"
+    });
+
+    store.createCrmContact({
+      leadId: lead.id,
+      cadenceId: cadence.id,
+      channel: "email",
+      outcome: "replied",
+      summary: "对方回复希望下周继续沟通",
+      happenedAt: "2026-04-20T10:00:00.000Z"
+    });
+
+    const repliedCadence = store.getCrmCadence(cadence.id);
+    expect(repliedCadence?.lastRunAt).toBe("2026-04-20T10:00:00.000Z");
+    expect(repliedCadence?.nextRunAt).toBe("2026-04-25T10:00:00.000Z");
+    expect(repliedCadence?.status).toBe("active");
+
+    store.createCrmContact({
+      leadId: lead.id,
+      cadenceId: cadence.id,
+      channel: "email",
+      outcome: "meeting_booked",
+      summary: "已约好演示会议",
+      happenedAt: "2026-04-21T09:00:00.000Z"
+    });
+
+    const completedCadence = store.getCrmCadence(cadence.id);
+    expect(completedCadence?.lastRunAt).toBe("2026-04-21T09:00:00.000Z");
+    expect(completedCadence?.status).toBe("completed");
+  });
+
+  it("progresses lead stage from contact outcomes", () => {
+    const store = createTestStore();
+    const lead = store.createCrmLead({
+      name: "Stage Prospect",
+      source: "email",
+      stage: "new"
+    });
+
+    store.createCrmContact({
+      leadId: lead.id,
+      outcome: "sent",
+      summary: "已发送首轮外联"
+    });
+    expect(store.getCrmLead(lead.id)?.stage).toBe("contacted");
+
+    store.createCrmContact({
+      leadId: lead.id,
+      outcome: "replied",
+      summary: "对方回复愿意沟通"
+    });
+    expect(store.getCrmLead(lead.id)?.stage).toBe("qualified");
+
+    store.createCrmContact({
+      leadId: lead.id,
+      outcome: "meeting_booked",
+      summary: "已预约演示会议"
+    });
+    expect(store.getCrmLead(lead.id)?.stage).toBe("proposal");
+
+    store.createCrmContact({
+      leadId: lead.id,
+      outcome: "won",
+      summary: "确认合作"
+    });
+    expect(store.getCrmLead(lead.id)?.stage).toBe("won");
+  });
 });

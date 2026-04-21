@@ -145,9 +145,15 @@ describe("crm routes", () => {
       nextAction: "安排演示",
       lastContactAt: "2026-04-20T10:00:00.000Z"
     });
-    const contact = buildContact();
+    const cadence = buildCadence({
+      id: "cadence_1",
+      leadId: lead.id,
+      lastRunAt: "2026-04-20T10:00:00.000Z"
+    });
+    const contact = buildContact({ cadenceId: cadence.id });
     const store = {
       getCrmLead: vi.fn(() => lead),
+      getCrmCadence: vi.fn(() => cadence),
       listCrmContacts: vi.fn(() => [contact]),
       createCrmContact: vi.fn(() => contact),
       updateCrmLead: vi.fn(() => updatedLead)
@@ -165,6 +171,7 @@ describe("crm routes", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           channel: "email",
+          cadenceId: cadence.id,
           outcome: "replied",
           summary: "对方回复愿意进一步沟通",
           nextAction: "安排演示",
@@ -172,8 +179,9 @@ describe("crm routes", () => {
         })
       });
       expect(createResponse.status).toBe(201);
-      const payload = (await createResponse.json()) as { contact: Record<string, unknown> };
+      const payload = (await createResponse.json()) as { contact: Record<string, unknown>; cadence: Record<string, unknown> };
       expect(payload.contact.outcome).toBe("replied");
+      expect(payload.cadence.id).toBe("cadence_1");
     });
   });
 

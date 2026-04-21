@@ -296,7 +296,8 @@ export function registerCrmRoutes(app: express.Express, deps: CrmRoutesDeps): vo
     }
     response.status(201).json({
       contact,
-      lead: store.getCrmLead(lead.id)
+      lead: store.getCrmLead(lead.id),
+      cadence: contact.cadenceId ? store.getCrmCadence?.(contact.cadenceId) : undefined
     });
   });
 

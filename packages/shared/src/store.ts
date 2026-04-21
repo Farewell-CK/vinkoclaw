@@ -1019,6 +1019,31 @@ function toCrmContactRecord(row: JsonRow): CrmContactRecord {
   };
 }
 
+const CRM_LEAD_STAGE_ORDER = ["new", "contacted", "qualified", "proposal", "won", "lost"] as const;
+
+function resolveLeadStageFromContactOutcome(
+  currentStage: CrmLeadStage,
+  outcome: CrmContactRecord["outcome"] | undefined
+): CrmLeadStage {
+  if (outcome === "won") {
+    return "won";
+  }
+  if (outcome === "lost") {
+    return "lost";
+  }
+  const desiredStage: CrmLeadStage | undefined =
+    outcome === "meeting_booked" ? "proposal" : outcome === "replied" ? "qualified" : outcome === "sent" ? "contacted" : undefined;
+  if (!desiredStage) {
+    return currentStage;
+  }
+  const currentIndex = CRM_LEAD_STAGE_ORDER.indexOf(currentStage);
+  const desiredIndex = CRM_LEAD_STAGE_ORDER.indexOf(desiredStage);
+  if (currentIndex === -1 || desiredIndex === -1) {
+    return currentStage;
+  }
+  return desiredIndex > currentIndex ? desiredStage : currentStage;
+}
+
 function toAgentCollaboration(row: JsonRow): AgentCollaboration {
   const result: AgentCollaboration = {
     id: String(row.id),
@@ -5747,9 +5772,20 @@ export class VinkoStore {
     const lead = this.getCrmLead(input.leadId);
     if (lead) {
       this.updateCrmLead(input.leadId, {
+        stage: resolveLeadStageFromContactOutcome(lead.stage, input.outcome),
         latestSummary: input.summary.trim(),
         nextAction: input.nextAction?.trim() || lead.nextAction,
         lastContactAt: happenedAt
+      });
+    }
+    const cadence = input.cadenceId ? this.getCrmCadence(input.cadenceId) : undefined;
+    if (cadence) {
+      const terminalOutcome = input.outcome === "meeting_booked" || input.outcome === "won" || input.outcome === "lost";
+      const nextRunAt = new Date(Date.parse(happenedAt) + cadence.intervalDays * 24 * 60 * 60 * 1000).toISOString();
+      this.updateCrmCadence(cadence.id, {
+        lastRunAt: happenedAt,
+        nextRunAt: terminalOutcome ? cadence.nextRunAt : nextRunAt,
+        status: terminalOutcome ? "completed" : cadence.status === "archived" ? "archived" : "active"
       });
     }
     return this.getCrmContact(id)!;
