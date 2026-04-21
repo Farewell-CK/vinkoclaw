@@ -6,6 +6,11 @@ export interface RecurringRoutesDeps {
   store: VinkoStore;
 }
 
+export interface RecurringScheduler {
+  tickOnce: () => ReturnType<typeof runDueCadences>;
+  stop: () => void;
+}
+
 export function buildRecurringHistorySnapshot(store: VinkoStore) {
   const runs = (store.listTasks?.(500) ?? [])
     .filter((task) => {
@@ -36,6 +41,55 @@ export function buildRecurringHistorySnapshot(store: VinkoStore) {
       lastRunAt: runs[0]?.triggeredAt ?? ""
     },
     recentRuns: runs.slice(0, 20)
+  };
+}
+
+export function createRecurringScheduler(input: {
+  store: VinkoStore;
+  enabled: boolean;
+  intervalMs: number;
+  onRun?: ((summary: ReturnType<typeof runDueCadences>["summary"]) => void) | undefined;
+  onError?: ((error: unknown) => void) | undefined;
+}): RecurringScheduler {
+  let running = false;
+  const tickOnce = () => {
+    if (running) {
+      return {
+        generatedAt: new Date().toISOString(),
+        summary: { dueCadences: 0, triggered: 0, skipped: 0 },
+        triggered: [],
+        skipped: [{ cadenceId: "scheduler", error: "tick_already_running" }]
+      };
+    }
+    running = true;
+    try {
+      const result = runDueCadences(input.store);
+      input.onRun?.(result.summary);
+      return result;
+    } catch (error) {
+      input.onError?.(error);
+      return {
+        generatedAt: new Date().toISOString(),
+        summary: { dueCadences: 0, triggered: 0, skipped: 1 },
+        triggered: [],
+        skipped: [{ cadenceId: "scheduler", error: error instanceof Error ? error.message : "unknown_error" }]
+      };
+    } finally {
+      running = false;
+    }
+  };
+
+  const intervalMs = Math.max(10000, Math.round(input.intervalMs));
+  const timer = input.enabled ? setInterval(tickOnce, intervalMs) : undefined;
+  timer?.unref?.();
+
+  return {
+    tickOnce,
+    stop: () => {
+      if (timer) {
+        clearInterval(timer);
+      }
+    }
   };
 }
 

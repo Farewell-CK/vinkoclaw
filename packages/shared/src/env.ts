@@ -71,6 +71,8 @@ export interface RuntimeEnv {
   emailInboundSubjectPrefix: string;
   emailInboundPollIntervalMs: number;
   emailInboundRateLimitPerMinute: number;
+  recurringRunnerEnabled: boolean;
+  recurringRunnerIntervalMs: number;
   useClashProxy: boolean;
   clashOnCommand: string;
   clashOffCommand: string;
@@ -190,6 +192,8 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): RuntimeEnv {
     emailInboundSubjectPrefix: merged.EMAIL_INBOUND_SUBJECT_PREFIX ?? "",
     emailInboundPollIntervalMs: parseNumber(merged.EMAIL_INBOUND_POLL_INTERVAL_MS, 15000, 1000),
     emailInboundRateLimitPerMinute: parseNumber(merged.EMAIL_INBOUND_RATE_LIMIT_PER_MINUTE, 20, 1),
+    recurringRunnerEnabled: parseBoolean(merged.RECURRING_RUNNER_ENABLED, false),
+    recurringRunnerIntervalMs: parseNumber(merged.RECURRING_RUNNER_INTERVAL_MS, 300000, 10000),
     useClashProxy: parseBoolean(merged.USE_CLASH_PROXY, false),
     clashOnCommand: merged.CLASH_ON_COMMAND ?? "clashon",
     clashOffCommand: merged.CLASH_OFF_COMMAND ?? "clashoff",

@@ -10,12 +10,17 @@ function createInput(overrides: Partial<RuntimeValueResolverInput> = {}): Runtim
       publicUrl: "http://127.0.0.1:8098",
       dataDir: "/tmp/vinko-test",
       workspaceRoot: "/tmp",
+      authUsername: "",
+      authPassword: "",
+      authCredentials: "",
       primaryBackend: "sglang",
       primaryModel: "m",
       sglangBaseUrl: "http://127.0.0.1:8000/v1",
       sglangModel: "m",
       ollamaBaseUrl: "http://127.0.0.1:11434/v1",
       ollamaModel: "m",
+      openaiBaseUrl: "https://api.openai.com/v1",
+      openaiModel: "gpt-4.1",
       zhipuBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
       zhipuModel: "glm-5",
       feishuAppId: "env-app-id",
@@ -39,6 +44,8 @@ function createInput(overrides: Partial<RuntimeValueResolverInput> = {}): Runtim
       emailInboundSubjectPrefix: "",
       emailInboundPollIntervalMs: 15000,
       emailInboundRateLimitPerMinute: 20,
+      recurringRunnerEnabled: false,
+      recurringRunnerIntervalMs: 300000,
       useClashProxy: false,
       clashOnCommand: "clashon",
       clashOffCommand: "clashoff",
@@ -51,7 +58,9 @@ function createInput(overrides: Partial<RuntimeValueResolverInput> = {}): Runtim
       anthropicApiKey: "",
       searchProvider: "",
       tavilyApiKey: "",
-      serpApiKey: ""
+      serpApiKey: "",
+      aiStudioApiKey: "",
+      aiStudioBaseUrl: ""
     },
     ...overrides
   };

@@ -2,7 +2,7 @@ import express from "express";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { VinkoStore } from "@vinko/shared";
-import { registerRecurringRoutes } from "./recurring.js";
+import { createRecurringScheduler, registerRecurringRoutes } from "./recurring.js";
 
 function createApp(store: VinkoStore): express.Express {
   const app = express();
@@ -73,6 +73,62 @@ describe("recurring routes", () => {
       expect(summary.lastRunAt).toBe("2026-04-20T09:00:00.000Z");
       expect((history.summary as Record<string, unknown>).totalRuns).toBe(1);
     });
+  });
+
+  it("runs the scheduler tick without requiring the HTTP route", () => {
+    const cadence = {
+      id: "cadence_1",
+      leadId: "lead_1",
+      label: "weekly follow-up",
+      channel: "email",
+      intervalDays: 7,
+      status: "active",
+      objective: "持续推进合作沟通",
+      nextRunAt: "2026-04-19T09:00:00.000Z",
+      createdAt: "2026-04-20T00:00:00.000Z",
+      updatedAt: "2026-04-20T00:00:00.000Z"
+    };
+    const lead = {
+      id: "lead_1",
+      name: "Annie Case",
+      source: "manual",
+      stage: "qualified",
+      status: "active",
+      tags: [],
+      createdAt: "2026-04-20T00:00:00.000Z",
+      updatedAt: "2026-04-20T00:00:00.000Z"
+    };
+    const onRun = vi.fn();
+    const store = {
+      listCrmCadences: vi.fn(() => [cadence]),
+      getCrmCadence: vi.fn(() => cadence),
+      getCrmLead: vi.fn(() => lead),
+      ensureSession: vi.fn(() => ({
+        id: "session_1",
+        source: "system",
+        sourceKey: "crm:lead:lead_1",
+        title: "CRM / Annie Case",
+        status: "active",
+        metadata: {},
+        createdAt: "2026-04-20T00:00:00.000Z",
+        updatedAt: "2026-04-20T00:00:00.000Z",
+        lastMessageAt: "2026-04-20T00:00:00.000Z"
+      })),
+      createTask: vi.fn(() => ({ id: "task_1", sessionId: "session_1" })),
+      updateCrmCadence: vi.fn(() => cadence)
+    } as unknown as VinkoStore;
+
+    const scheduler = createRecurringScheduler({
+      store,
+      enabled: false,
+      intervalMs: 10000,
+      onRun
+    });
+    const result = scheduler.tickOnce();
+    scheduler.stop();
+
+    expect(result.summary.triggered).toBe(1);
+    expect(onRun).toHaveBeenCalledWith(expect.objectContaining({ triggered: 1 }));
   });
 
   it("runs due cadences through recurring endpoint", async () => {

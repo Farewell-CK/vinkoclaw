@@ -75,7 +75,7 @@ import { registerSystemRoutes } from "./routes/system.js";
 import { registerConfigRoutes } from "./routes/config.js";
 import { registerPluginRoutes } from "./routes/plugins.js";
 import { registerCrmRoutes } from "./routes/crm.js";
-import { registerRecurringRoutes } from "./routes/recurring.js";
+import { createRecurringScheduler, registerRecurringRoutes, type RecurringScheduler } from "./routes/recurring.js";
 import { registerRoutingTemplateRoutes } from "./routes/routing-templates.js";
 import { registerSkillsMarketplaceRoutes } from "./routes/skills-marketplace.js";
 import { summarizeLatencyMetrics } from "./routes/response-utils.js";
@@ -134,6 +134,7 @@ const productSelfcheckHistoryFile = path.join(productSelfcheckDir, "history.json
 const productSelfcheckWatcherPidFile = path.join(productSelfcheckDir, "watch.pid");
 const EMAIL_INBOUND_LEDGER_CONFIG_KEY = "email-inbound-ledger";
 let feishuWebSocketMonitor: FeishuWebSocketMonitor | undefined;
+let recurringScheduler: RecurringScheduler | undefined;
 const FEISHU_APPROVAL_CARD_TTL_MS = 15 * 60 * 1000;
 const FEISHU_CARD_ACTION_TOKEN_TTL_MS = 15 * 60 * 1000;
 const FEISHU_INBOUND_MESSAGE_DEDUP_TTL_MS = 10 * 60 * 1000;
@@ -4558,6 +4559,18 @@ registerRecurringRoutes(app, {
   store
 });
 
+recurringScheduler = createRecurringScheduler({
+  store,
+  enabled: env.recurringRunnerEnabled,
+  intervalMs: env.recurringRunnerIntervalMs,
+  onRun: (summary) => {
+    if (summary.triggered > 0 || summary.skipped > 0) {
+      logger.info("recurring runner tick", summary);
+    }
+  },
+  onError: (error) => logger.warn("recurring runner failed", { error })
+});
+
 registerRoutingTemplateRoutes(app, {
   store
 });
@@ -4852,8 +4865,10 @@ initializePlugins().then(() => {
 });
 
 process.once("SIGINT", () => {
+  recurringScheduler?.stop();
   stopFeishuInboundTransport();
 });
 process.once("SIGTERM", () => {
+  recurringScheduler?.stop();
   stopFeishuInboundTransport();
 });
