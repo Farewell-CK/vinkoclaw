@@ -1,0 +1,32 @@
+{
+  "items": [
+    {
+      "id": "prd-writer",
+      "skillId": "prd-writer",
+      "name": "PRD Writer",
+      "description": "Write structured PRDs for product and CEO roles.",
+      "summary": "Structured PRD output with sections for background, users, scope, acceptance, risk, and next steps.",
+      "allowedRoles": ["ceo", "product"],
+      "aliases": ["写prd", "需求文档", "prd"],
+      "tags": ["product", "delivery", "prd"],
+      "sourceLabel": "official-registry",
+      "sourceUrl": "https://example.com/skills/prd-writer",
+      "version": "1.0.0",
+      "installable": true
+    },
+    {
+      "id": "competitor-research-pro",
+      "skillId": "competitor-research-pro",
+      "name": "Competitor Research Pro",
+      "description": "Deep competitor benchmarking and structured market comparison.",
+      "summary": "Discovery-only example from a remote registry. Use this to verify marketplace search, inspect metadata, and create runtime integration tasks.",
+      "allowedRoles": ["ceo", "research", "operations"],
+      "aliases": ["竞品调研", "市场分析", "竞争分析"],
+      "tags": ["research", "market", "remote"],
+      "sourceLabel": "community-registry",
+      "sourceUrl": "https://example.com/skills/competitor-research-pro",
+      "version": "0.3.1",
+      "installable": true
+    }
+  ]
+}

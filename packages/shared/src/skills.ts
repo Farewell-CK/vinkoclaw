@@ -37,6 +37,16 @@ export const SKILL_CATALOG: SkillDefinition[] = [
     aliases: ["retrieval", "rag", "workspace", "检索", "知识库"]
   },
   {
+    id: "prd-writer",
+    name: "PRD Writer",
+    description: "Produce structured PRD outputs with scope, acceptance criteria, risks, and open questions.",
+    allowedRoles: ["ceo", "product"],
+    defaultConfig: {
+      sections: ["背景", "目标用户", "核心流程", "需求范围", "验收标准", "风险", "待确认项", "下一步"]
+    },
+    aliases: ["prd", "prd-writer", "需求文档", "产品需求", "产品需求文档", "写prd"]
+  },
+  {
     id: "email-ops",
     name: "Email Ops",
     description: "Draft and send approval-gated outbound email.",

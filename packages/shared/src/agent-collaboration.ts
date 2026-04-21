@@ -30,15 +30,17 @@ export class AgentCollaborationService {
     const defaultParticipants: RoleId[] =
       runtimeDefaults.length > 0
         ? runtimeDefaults
-        : ["product", "uiux", "frontend", "backend", "qa", "ceo"];
+        : ["product", "uiux", "frontend", "backend", "qa", "cto"];
+
+    const defaultFacilitator: RoleId = defaultParticipants.includes("cto") ? "cto" : defaultParticipants[0] ?? "product";
 
     const collaboration: AgentCollaboration = {
       id,
       parentTaskId: input.parentTaskId,
       status: "active",
       participants: input.participants ?? defaultParticipants,
-      facilitator: input.facilitator ?? "ceo",
-      currentPhase: "assignment",
+      facilitator: input.facilitator ?? defaultFacilitator,
+      currentPhase: "classify",
       phaseResults: [],
       config: { ...DEFAULT_COLLABORATION_CONFIG, ...input.config },
       createdAt: timestamp,

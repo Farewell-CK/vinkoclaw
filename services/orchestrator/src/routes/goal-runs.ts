@@ -1,6 +1,6 @@
 import express from "express";
-import type { GoalRunStatus, TaskSource, VinkoStore } from "@vinko/shared";
-import { enrichGoalRunRecord, enrichTaskRecord } from "./response-utils.js";
+import type { GoalRunStage, GoalRunStatus, TaskSource, VinkoStore } from "@vinko/shared";
+import { enrichGoalRunRecord, enrichGoalRunRecordWithHarnessEvidence, enrichTaskRecord } from "./response-utils.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -65,7 +65,7 @@ export function registerGoalRunRoutes(app: express.Express, deps: GoalRunRoutesD
       limit,
       ...(status ? { status } : {})
     });
-    response.json(goalRuns.map((run) => enrichGoalRunRecord(run)));
+    response.json(goalRuns.map((run) => enrichGoalRunRecordWithHarnessEvidence(store, run)));
   });
 
   app.post("/api/goal-runs", (request, response) => {
@@ -98,7 +98,7 @@ export function registerGoalRunRoutes(app: express.Express, deps: GoalRunRoutesD
     });
 
     response.status(201).json({
-      goalRun: enrichGoalRunRecord(goalRun),
+      goalRun: enrichGoalRunRecordWithHarnessEvidence(store, goalRun),
       message: `GoalRun ${goalRun.id.slice(0, 8)} queued`
     });
   });
@@ -110,10 +110,16 @@ export function registerGoalRunRoutes(app: express.Express, deps: GoalRunRoutesD
       return;
     }
     const task = goalRun.currentTaskId ? store.getTask(goalRun.currentTaskId) : undefined;
+    const traces = store.listGoalRunTraces(goalRun.id, 200);
+    const latestHandoff = store.getLatestGoalRunHandoff(goalRun.id);
+    const enriched = enrichGoalRunRecordWithHarnessEvidence(store, goalRun, {
+      traceCount: traces.length
+    });
     response.json({
-      goalRun: enrichGoalRunRecord(goalRun),
+      goalRun: enriched,
       task: task ? enrichTaskRecord(store, task) : undefined,
       inputs: store.listGoalRunInputs(goalRun.id),
+      latestHandoff,
       authTokens: store.listRunAuthTokens(goalRun.id, 10).map((entry) => ({
         ...entry,
         token: `${entry.token.slice(0, 6)}...`
@@ -130,8 +136,59 @@ export function registerGoalRunRoutes(app: express.Express, deps: GoalRunRoutesD
     const limitRaw = Number(request.query.limit);
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(2000, Math.round(limitRaw))) : 1000;
     response.json({
-      goalRun: enrichGoalRunRecord(goalRun),
+      goalRun: enrichGoalRunRecordWithHarnessEvidence(store, goalRun),
       timeline: store.listGoalRunTimelineEvents(goalRun.id, limit)
+    });
+  });
+
+  app.get("/api/goal-runs/:goalRunId/trace", (request, response) => {
+    const goalRun = store.getGoalRun(request.params.goalRunId);
+    if (!goalRun) {
+      response.status(404).json({ error: "goal_run_not_found" });
+      return;
+    }
+    const limitRaw = Number(request.query.limit);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(1000, Math.round(limitRaw))) : 200;
+    const traces = store.listGoalRunTraces(goalRun.id, limit);
+    response.json({
+      goalRun: enrichGoalRunRecordWithHarnessEvidence(store, goalRun, {
+        traceCount: traces.length
+      }),
+      traces
+    });
+  });
+
+  app.get("/api/goal-runs/:goalRunId/handoff", (request, response) => {
+    const goalRun = store.getGoalRun(request.params.goalRunId);
+    if (!goalRun) {
+      response.status(404).json({ error: "goal_run_not_found" });
+      return;
+    }
+    const stage =
+      typeof request.query.stage === "string" && request.query.stage.trim()
+        ? (request.query.stage.trim() as GoalRunStage)
+        : undefined;
+    const latest = typeof request.query.latest === "string" ? request.query.latest === "1" || request.query.latest === "true" : true;
+    if (latest) {
+      const handoff = store.getLatestGoalRunHandoff(goalRun.id, stage);
+      if (!handoff) {
+        response.status(404).json({ error: "goal_run_handoff_not_found" });
+        return;
+      }
+      response.json({
+        goalRun: enrichGoalRunRecordWithHarnessEvidence(store, goalRun, {
+          handoffStage: stage
+        }),
+        handoff
+      });
+      return;
+    }
+    const handoffs = store.listGoalRunHandoffArtifacts(goalRun.id, 200, stage);
+    response.json({
+      goalRun: enrichGoalRunRecordWithHarnessEvidence(store, goalRun, {
+        handoffStage: stage
+      }),
+      handoffs
     });
   });
 
@@ -187,7 +244,7 @@ export function registerGoalRunRoutes(app: express.Express, deps: GoalRunRoutesD
       }
     });
     response.json({
-      goalRun: enrichGoalRunRecord(resumed),
+      goalRun: enrichGoalRunRecordWithHarnessEvidence(store, resumed),
       inputs: store.listGoalRunInputs(goalRun.id)
     });
   });
@@ -232,7 +289,7 @@ export function registerGoalRunRoutes(app: express.Express, deps: GoalRunRoutesD
         }
       });
       response.json({
-        goalRun: enrichGoalRunRecord(resumed),
+        goalRun: enrichGoalRunRecordWithHarnessEvidence(store, resumed),
         authorization: {
           scope: consumed.scope,
           status: consumed.status,
@@ -266,7 +323,7 @@ export function registerGoalRunRoutes(app: express.Express, deps: GoalRunRoutesD
       }
     });
     response.json({
-      goalRun: enrichGoalRunRecord(waiting ?? goalRun),
+      goalRun: enrichGoalRunRecordWithHarnessEvidence(store, waiting ?? goalRun),
       authorization: token
     });
   });
@@ -293,7 +350,7 @@ export function registerGoalRunRoutes(app: express.Express, deps: GoalRunRoutesD
         reason
       }
     });
-    response.json({ goalRun: enrichGoalRunRecord(cancelled) });
+    response.json({ goalRun: enrichGoalRunRecordWithHarnessEvidence(store, cancelled) });
   });
 
   app.post("/api/goal-runs/cancel-stale", (request, response) => {

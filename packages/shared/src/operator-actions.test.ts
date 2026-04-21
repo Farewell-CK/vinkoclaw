@@ -22,6 +22,14 @@ describe("parseOperatorActionFromText", () => {
     expect(parsed?.action.skillId).toBe("email-ops");
   });
 
+  it("parses prd skill installation in Chinese", () => {
+    const parsed = parseOperatorActionFromText("给 product 安装写prd skill", "owner");
+
+    expect(parsed?.action.kind).toBe("install_skill");
+    expect(parsed?.action.targetRoleId).toBe("product");
+    expect(parsed?.action.skillId).toBe("prd-writer");
+  });
+
   it("parses send email command in Chinese", () => {
     const parsed = parseOperatorActionFromText("发邮件给 ceo@example.com 项目今天已经上线", "owner");
 

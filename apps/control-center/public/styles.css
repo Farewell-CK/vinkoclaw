@@ -690,6 +690,21 @@ pre {
   overflow: hidden;
 }
 .trace-detail-panel.is-hidden { display: none; }
+
+.activity-feed {
+  display: grid;
+  gap: 10px;
+}
+
+.activity-feed .list-card {
+  border-left: 3px solid var(--accent);
+  background: linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(250,252,255,0.96) 100%);
+}
+
+.activity-feed .list-card .pill-row {
+  margin-top: 8px;
+}
+
 .trace-header {
   padding: 12px 16px;
   background: var(--accent-soft);

@@ -133,4 +133,130 @@ describe("self-check routes", () => {
       });
     });
   });
+
+  it("lists harness suites and returns latest payload", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "vinko-harness-"));
+    const latestFile = path.join(tempDir, "latest.json");
+    const historyFile = path.join(tempDir, "history.jsonl");
+    const harnessRootDir = path.join(tempDir, "harness");
+    const founderDir = path.join(harnessRootDir, "founder-delivery");
+    mkdirSync(founderDir, { recursive: true });
+    writeFileSync(
+      path.join(founderDir, "latest.json"),
+      JSON.stringify({
+        suite: "founder-delivery",
+        ok: true,
+        durationMs: 1234
+      }),
+      "utf8"
+    );
+    writeFileSync(
+      path.join(founderDir, "history.jsonl"),
+      [JSON.stringify({ suite: "founder-delivery", ok: false }), JSON.stringify({ suite: "founder-delivery", ok: true })].join("\n"),
+      "utf8"
+    );
+
+    const app = express();
+    registerSelfCheckRoutes(app, { latestFile, historyFile, harnessRootDir });
+
+    await withServer(app, async (baseUrl) => {
+      const listResponse = await fetch(`${baseUrl}/api/system/harness`);
+      expect(listResponse.status).toBe(200);
+      await expect(listResponse.json()).resolves.toEqual({
+        configured: true,
+        suites: [
+          {
+            suite: "founder-delivery",
+            latest: {
+              suite: "founder-delivery",
+              ok: true,
+              durationMs: 1234
+            }
+          }
+        ]
+      });
+
+      const latestResponse = await fetch(`${baseUrl}/api/system/harness/founder-delivery/latest`);
+      expect(latestResponse.status).toBe(200);
+      await expect(latestResponse.json()).resolves.toEqual({
+        suite: "founder-delivery",
+        ok: true,
+        durationMs: 1234
+      });
+
+      const historyResponse = await fetch(`${baseUrl}/api/system/harness/founder-delivery/history?limit=1`);
+      expect(historyResponse.status).toBe(200);
+      await expect(historyResponse.json()).resolves.toEqual({
+        count: 1,
+        rows: [{ suite: "founder-delivery", ok: true }]
+      });
+
+      const gradesResponse = await fetch(`${baseUrl}/api/system/harness/grades`);
+      expect(gradesResponse.status).toBe(200);
+      await expect(gradesResponse.json()).resolves.toEqual({
+        configured: true,
+        grades: [
+          {
+            suite: "founder-delivery",
+            grade: "unknown",
+            failedInvariant: undefined,
+            traceSummary: undefined,
+            handoffCoverage: undefined,
+            approvalCoverage: undefined,
+            resumeCoverage: undefined,
+            stateCompleteness: undefined,
+            generatedAt: "1970-01-01T00:00:00.000Z"
+          }
+        ]
+      });
+    });
+  });
+
+  it("returns harness grades from latest report fields", async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), "vinko-harness-"));
+    const latestFile = path.join(tempDir, "latest.json");
+    const historyFile = path.join(tempDir, "history.jsonl");
+    const harnessRootDir = path.join(tempDir, "harness");
+    const founderDir = path.join(harnessRootDir, "founder-delivery");
+    mkdirSync(founderDir, { recursive: true });
+    writeFileSync(
+      path.join(founderDir, "latest.json"),
+      JSON.stringify({
+        suite: "founder-delivery",
+        grade: "pass",
+        failedInvariant: undefined,
+        traceSummary: "4/4 stages completed",
+        handoffCoverage: 1,
+        approvalCoverage: 0.25,
+        resumeCoverage: 0.25,
+        stateCompleteness: true,
+        finishedAt: "2026-04-07T03:00:00.000Z"
+      }),
+      "utf8"
+    );
+
+    const app = express();
+    registerSelfCheckRoutes(app, { latestFile, historyFile, harnessRootDir });
+
+    await withServer(app, async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/system/harness/grades`);
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        configured: true,
+        grades: [
+          {
+            suite: "founder-delivery",
+            grade: "pass",
+            failedInvariant: undefined,
+            traceSummary: "4/4 stages completed",
+            handoffCoverage: 1,
+            approvalCoverage: 0.25,
+            resumeCoverage: 0.25,
+            stateCompleteness: true,
+            generatedAt: "2026-04-07T03:00:00.000Z"
+          }
+        ]
+      });
+    });
+  });
 });

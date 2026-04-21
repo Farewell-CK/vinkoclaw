@@ -7,6 +7,23 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HARNESS_ROOT = path.join(ROOT, ".run", "harness");
 const OUTPUT_DIR = path.join(ROOT, "docs", "04-delivery");
+const RELEASE_HARNESS_SUITES = [
+  "product",
+  "founder-delivery",
+  "founder-ops",
+  "founder-ops-recurring",
+  "founder-research",
+  "founder-research-recurring",
+  "founder-recap",
+  "founder-recap-recurring",
+  "founder-implementation",
+  "founder-bugfix",
+  "artifact-export",
+  "persona",
+  "collaboration",
+  "skill-lifecycle",
+  "crm-cadence"
+];
 
 function readJson(filePath) {
   return JSON.parse(readFileSync(filePath, "utf8"));
@@ -42,23 +59,7 @@ function suiteLabel(report) {
 }
 
 function collectLatestReports() {
-  const suites = [
-    "product",
-    "founder-delivery",
-    "founder-ops",
-    "founder-ops-recurring",
-    "founder-research",
-    "founder-research-recurring",
-    "founder-recap",
-    "founder-recap-recurring",
-    "founder-implementation",
-    "founder-bugfix",
-    "artifact-export",
-    "persona",
-    "collaboration",
-    "skill-lifecycle"
-  ];
-  return suites
+  return RELEASE_HARNESS_SUITES
     .map((suite) => {
       const filePath = path.join(HARNESS_ROOT, suite, "latest.json");
       try {

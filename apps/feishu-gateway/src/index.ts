@@ -3,6 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { loadEnv } from "@vinko/shared";
+export * from "./cards.js";
 
 export type FeishuConnectionMode = "webhook" | "websocket";
 
@@ -372,6 +373,9 @@ export function buildFeishuTextBody(text: string): { msg_type: "text"; content: 
     content: JSON.stringify({ text })
   };
 }
+
+// Re-export card builders
+export * from "./cards.js";
 
 export function buildFeishuCardBody(card: Record<string, unknown>): {
   msg_type: "interactive";

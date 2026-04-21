@@ -407,8 +407,16 @@ describe("VinkoStore operator actions", () => {
     expect(defaults.find((template) => template.id === "tpl-founder-prd")?.tasks[0]?.deliverableMode).toBe(
       "artifact_required"
     );
+    expect(defaults.find((template) => template.id === "tpl-founder-prd")?.tasks[0]?.successCriteria).toEqual([
+      "需求范围清晰",
+      "验收标准明确",
+      "下一步可直接执行"
+    ]);
     expect(defaults.find((template) => template.id === "tpl-founder-delivery-loop")?.tasks[0]?.deliverableMode).toBe(
       "artifact_required"
+    );
+    expect(defaults.find((template) => template.id === "tpl-founder-delivery-loop")?.tasks[0]?.completionSignal).toBe(
+      "规划能直接驱动实现阶段"
     );
     expect(defaults.find((template) => template.id === "tpl-skill-runtime-integration")?.tasks[0]?.deliverableSections).toEqual([
       "接入方案",
@@ -423,6 +431,9 @@ describe("VinkoStore operator actions", () => {
       "Skill 使用证据",
       "结论"
     ]);
+    expect(defaults.find((template) => template.id === "tpl-skill-smoke-verify")?.tasks[0]?.workflowLabel).toBe(
+      "Skill Verification"
+    );
     expect(defaults.find((template) => template.id === "tpl-founder-prd")?.tasks[0]?.deliverableSections).toEqual([
       "背景",
       "目标用户",

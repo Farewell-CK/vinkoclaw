@@ -47,6 +47,16 @@ function inferExportFormats(paths: string[]): string[] {
   return Array.from(formats.values());
 }
 
+function firstNonEmpty(...values: unknown[]): string {
+  for (const value of values) {
+    const normalized = clean(value);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return "";
+}
+
 export function buildWorkflowStatusSummary(
   task: Pick<TaskRecord, "title" | "status" | "metadata">,
   options: {
@@ -58,8 +68,20 @@ export function buildWorkflowStatusSummary(
   const progress = orchestration?.progress;
   const spec = orchestration?.spec;
   const artifactIndex = orchestration?.artifactIndex;
+  const workflowLabel = firstNonEmpty(task.metadata?.workflowLabel, task.metadata?.routeTemplateName);
+  const workflowSuccessCriteria = uniqueLines(
+    Array.isArray(task.metadata?.workflowSuccessCriteria)
+      ? (task.metadata.workflowSuccessCriteria as string[])
+      : spec?.successCriteria ?? [],
+    3
+  );
+  const workflowCompletionSignal = firstNonEmpty(task.metadata?.workflowCompletionSignal);
 
   const lines: string[] = [];
+
+  if (workflowLabel) {
+    lines.push(`**工作流**：${workflowLabel}`);
+  }
 
   if (options.includeGoal !== false) {
     const goal = spec?.goal || clean(task.title);
@@ -87,6 +109,14 @@ export function buildWorkflowStatusSummary(
   const blocked = uniqueLines(progress?.blocked ?? [], 2);
   if (blocked.length > 0) {
     lines.push(`**阻塞**：${blocked.join("；")}`);
+  }
+
+  if (workflowSuccessCriteria.length > 0) {
+    lines.push(`**成功标准**：${workflowSuccessCriteria.join("；")}`);
+  }
+
+  if (workflowCompletionSignal) {
+    lines.push(`**完成信号**：${workflowCompletionSignal}`);
   }
 
   if (options.includeArtifacts === true) {

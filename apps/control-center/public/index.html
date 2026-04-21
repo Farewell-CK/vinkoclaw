@@ -142,15 +142,15 @@
 
         <article class="panel view-panel" data-view="workbench">
           <header>
-            <h2 data-i18n="panel.workflows.title">Founder Workflows</h2>
-            <p data-i18n="panel.workflows.desc">One-click entry prompts for founder delivery, PRD, research, and recap flows.</p>
+            <h2 data-i18n="panel.workflows.title">Workflow Archetypes</h2>
+            <p data-i18n="panel.workflows.desc">One-click entry prompts for common workflow types.</p>
           </header>
           <div id="workflow-shortcuts" class="stack">
-            <button type="button" class="ghost" data-workflow-preset="founder_delivery">从想法到交付</button>
-            <button type="button" class="ghost" data-workflow-preset="founder_prd">写 PRD</button>
-            <button type="button" class="ghost" data-workflow-preset="founder_research">调研报告</button>
-            <button type="button" class="ghost" data-workflow-preset="founder_recap">每周复盘</button>
-            <button type="button" class="ghost" data-workflow-preset="founder_ops_followup">待办提醒</button>
+            <button type="button" class="ghost" data-workflow-preset="delivery_workflow">从目标到交付</button>
+            <button type="button" class="ghost" data-workflow-preset="planning_workflow">规划 / PRD</button>
+            <button type="button" class="ghost" data-workflow-preset="research_workflow">调研分析</button>
+            <button type="button" class="ghost" data-workflow-preset="recap_workflow">复盘总结</button>
+            <button type="button" class="ghost" data-workflow-preset="operations_workflow">运营跟进</button>
           </div>
         </article>
 
@@ -353,6 +353,14 @@
         </article>
 
         <!-- Telemetry: Traces -->
+        <article class="panel span-2 view-panel" data-view="telemetry">
+          <header>
+            <h2 data-i18n="panel.activity.title">实时活动流</h2>
+            <p data-i18n="panel.activity.desc">统一查看系统最近与正在发生的审计、执行、审批与追踪事件。</p>
+          </header>
+          <div id="activity-feed" class="list activity-feed"></div>
+        </article>
+
         <article class="panel span-2 view-panel" data-view="telemetry">
           <header>
             <h2 data-i18n="panel.traces.title">Agent Traces</h2>

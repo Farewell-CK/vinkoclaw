@@ -45,19 +45,34 @@ describe("notifyGoalRunProgressSafely", () => {
   });
 
   it("returns true when Feishu notification succeeds", async () => {
-    const run = createGoalRun();
+    const run = createGoalRun({
+      metadata: {
+        workflowLabel: "Founder Delivery / Build",
+        workflowSuccessCriteria: ["产出代码与验证结果"],
+        workflowCompletionSignal: "可进入 QA 验证"
+      }
+    });
     const notifier = vi.fn(async (_chatId: string, _message: string) => undefined);
+    const cardNotifier = vi.fn(async (_chatId: string, _card: Record<string, unknown>) => undefined);
     const appendAuditEvent = vi.fn();
 
     const sent = await notifyGoalRunProgressSafely({
       run,
       message: "progress",
       notifyFeishu: notifier,
+      notifyFeishuCard: cardNotifier,
       audit: { appendAuditEvent }
     });
 
     expect(sent).toBe(true);
-    expect(notifier).toHaveBeenCalledWith(run.chatId, "progress");
+    expect(notifier).not.toHaveBeenCalled();
+    expect(cardNotifier).toHaveBeenCalledWith(
+      run.chatId,
+      expect.objectContaining({
+        schema: "2.0"
+      })
+    );
+    expect(JSON.stringify(cardNotifier.mock.calls[0]?.[1] ?? {})).toContain("\"kind\":\"goal_run_action\"");
     expect(appendAuditEvent).not.toHaveBeenCalled();
   });
 
@@ -67,16 +82,25 @@ describe("notifyGoalRunProgressSafely", () => {
       throw new Error("Feishu send failed with 400: invalid receive_id");
     });
     const appendAuditEvent = vi.fn();
+    const cardNotifier = vi.fn(async () => {
+      throw new Error("Feishu send failed with 400: invalid receive_id");
+    });
 
     const sent = await notifyGoalRunProgressSafely({
       run,
       message: "verify in progress",
       notifyFeishu: notifier,
+      notifyFeishuCard: cardNotifier,
       audit: { appendAuditEvent }
     });
 
     expect(sent).toBe(false);
-    expect(notifier).toHaveBeenCalledWith(run.chatId, "verify in progress");
+    expect(cardNotifier).toHaveBeenCalledWith(
+      run.chatId,
+      expect.objectContaining({
+        schema: "2.0"
+      })
+    );
     expect(appendAuditEvent).toHaveBeenCalledTimes(1);
     expect(appendAuditEvent).toHaveBeenCalledWith(
       expect.objectContaining({

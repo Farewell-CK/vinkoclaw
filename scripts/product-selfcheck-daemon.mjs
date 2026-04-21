@@ -3,8 +3,9 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, openSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = "/home/xsuper/workspace/vinkoclaw";
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const reportDir = path.join(ROOT, ".run", "product-selfcheck");
 const pidFile = path.join(reportDir, "watch.pid");
 const logFile = path.join(reportDir, "watch.log");

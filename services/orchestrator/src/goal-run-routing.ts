@@ -33,8 +33,25 @@ const DELIVERY_KEYWORDS = [
 const COMPLEX_OBJECTIVE_HINTS = [
   "官网",
   "网站",
+  "系统",
+  "平台",
+  "产品",
+  "mvp",
+  "后台",
+  "管理端",
+  "管理系统",
+  "saas",
+  "应用",
+  "app",
   "landing page",
   "web site",
+  "system",
+  "platform",
+  "product",
+  "admin",
+  "dashboard",
+  "management",
+  "application",
   "pipeline",
   "工作流",
   "自动化"
@@ -59,9 +76,16 @@ export function shouldRouteToGoalRun(text: string): boolean {
 
   const hasDelivery = DELIVERY_KEYWORDS.some((keyword) => normalized.includes(keyword));
   const hasComplexHint = COMPLEX_OBJECTIVE_HINTS.some((keyword) => normalized.includes(keyword));
+  const hasBuildIntent =
+    /(?:做|构建|搭建|开发|实现|创建|设计|写一个|build|create|develop|implement)/i.test(normalized);
 
   // Build + deploy together: the user wants to create AND ship something — multi-stage by definition.
   if (hasDelivery && hasComplexHint) {
+    return true;
+  }
+
+  // Build a non-trivial system/platform/product from scratch: also a multi-stage goal.
+  if (hasBuildIntent && hasComplexHint && normalized.length >= 10) {
     return true;
   }
 

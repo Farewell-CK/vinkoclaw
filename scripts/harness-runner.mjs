@@ -4,83 +4,17 @@ import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  buildHarnessReportRecord,
+  deriveHarnessGrade,
+  getHarnessSuiteDefinition,
+  getHarnessSuiteCommandString,
+  listHarnessSuites
+} from "@vinko/shared";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HARNESS_ROOT = path.join(ROOT, ".run", "harness");
 const ORCH_BASE = process.env.ORCH_BASE_URL ?? "http://127.0.0.1:8098";
-
-const SUITES = {
-  product: {
-    label: "Product Self Check",
-    command: ["npm", "run", "self-check:product"],
-    budgetMs: 5 * 60_000
-  },
-  "founder-delivery": {
-    label: "Founder Delivery Loop",
-    command: ["npm", "run", "self-check:founder-delivery"],
-    budgetMs: 8 * 60_000
-  },
-  "founder-ops": {
-    label: "Founder Ops Follow-up",
-    command: ["npm", "run", "self-check:founder-ops"],
-    budgetMs: 5 * 60_000
-  },
-  "founder-ops-recurring": {
-    label: "Founder Ops Recurring",
-    command: ["npm", "run", "self-check:founder-ops-recurring"],
-    budgetMs: 5 * 60_000
-  },
-  "founder-research": {
-    label: "Founder Research Report",
-    command: ["npm", "run", "self-check:founder-research"],
-    budgetMs: 5 * 60_000
-  },
-  "founder-research-recurring": {
-    label: "Founder Research Recurring",
-    command: ["npm", "run", "self-check:founder-research-recurring"],
-    budgetMs: 5 * 60_000
-  },
-  "founder-recap": {
-    label: "Founder Weekly Recap",
-    command: ["npm", "run", "self-check:founder-recap"],
-    budgetMs: 5 * 60_000
-  },
-  "founder-recap-recurring": {
-    label: "Founder Recap Recurring",
-    command: ["npm", "run", "self-check:founder-recap-recurring"],
-    budgetMs: 5 * 60_000
-  },
-  "founder-implementation": {
-    label: "Founder Implementation Task",
-    command: ["npm", "run", "self-check:founder-implementation"],
-    budgetMs: 5 * 60_000
-  },
-  "founder-bugfix": {
-    label: "Founder Bugfix Follow-up",
-    command: ["npm", "run", "self-check:founder-bugfix"],
-    budgetMs: 5 * 60_000
-  },
-  "artifact-export": {
-    label: "Artifact Export Self Check",
-    command: ["npm", "run", "self-check:artifact-export"],
-    budgetMs: 6 * 60_000
-  },
-  persona: {
-    label: "Persona Test",
-    command: ["npm", "run", "persona-test"],
-    budgetMs: 5 * 60_000
-  },
-  collaboration: {
-    label: "Collaboration Self Check",
-    command: ["npm", "run", "self-check:collaboration"],
-    budgetMs: 6 * 60_000
-  },
-  "skill-lifecycle": {
-    label: "Skill Lifecycle Self Check",
-    command: ["npm", "run", "self-check:skill-lifecycle"],
-    budgetMs: 6 * 60_000
-  }
-};
 
 function fail(message) {
   process.stderr.write(`[harness-runner] ${message}\n`);
@@ -230,19 +164,6 @@ function classifyFounderTimeout(stageSummary, failedStage) {
   };
 }
 
-function normalizeGrade(input) {
-  if (input.stateCompleteness === false) {
-    return "fail";
-  }
-  if (input.ok === true && !input.timedOut && !input.exceededBudget) {
-    return "pass";
-  }
-  if (input.ok === true && input.exceededBudget) {
-    return "warn";
-  }
-  return "fail";
-}
-
 function buildFailedInvariant(input) {
   if (input.stateCompleteness === false) {
     return "orchestration_state_complete";
@@ -361,7 +282,7 @@ async function fetchFounderStageSummary(rootTaskId) {
 }
 
 async function runSuite(suite) {
-  const config = SUITES[suite];
+  const config = getHarnessSuiteDefinition(suite);
   if (!config) {
     fail(`unknown suite: ${suite}`);
   }
@@ -492,20 +413,17 @@ async function runSuite(suite) {
         )
       : undefined;
 
-  const record = {
+  const record = buildHarnessReportRecord({
     suite,
-    label: config.label,
     ok: exitCode === 0 && !hardTimedOut,
     exitCode,
     timedOut: hardTimedOut,
     timeoutMs: hardTimeoutMs,
     budgetMs,
-    exceededBudget,
-    overBudgetMs,
     startedAt,
     finishedAt,
     durationMs,
-    command: config.command.join(" "),
+    command: getHarnessSuiteCommandString(config),
     orchBase: ORCH_BASE,
     healthOk: health?.ok === true,
     projectBoardSummary: projectBoard?.summary ?? null,
@@ -526,7 +444,7 @@ async function runSuite(suite) {
     observeError,
     stdoutTail: stdout.slice(-8000),
     stderrTail: stderr.slice(-8000)
-  };
+  });
 
   const totalStages = stageSummary && typeof stageSummary === "object" ? Object.keys(stageSummary).length : 0;
   const completedStagesCount = countStageStatuses(stageSummary, (value) => value?.status === "completed");
@@ -538,7 +456,7 @@ async function runSuite(suite) {
     stageSummary,
     (value) => value?.status === "queued" || value?.status === "running" || value?.status === "awaiting_authorization"
   );
-  record.grade = normalizeGrade(record);
+  record.grade = deriveHarnessGrade(record);
   record.failedInvariant = buildFailedInvariant(record);
   record.traceSummary = totalStages > 0 ? `${completedStagesCount}/${totalStages} stages completed` : undefined;
   record.handoffCoverage = totalStages > 0 ? Number((completedStagesCount / totalStages).toFixed(2)) : undefined;
@@ -556,7 +474,7 @@ async function main() {
   const targetSuites = suites.length > 0 ? suites : ["product", "founder-delivery"];
   for (const suite of targetSuites) {
     if (suite === "all") {
-      for (const name of Object.keys(SUITES)) {
+      for (const name of listHarnessSuites().map((entry) => entry.id)) {
         const ok = await runSuite(name);
         if (!ok) {
           process.exitCode = 1;

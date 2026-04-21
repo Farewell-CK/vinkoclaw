@@ -1,8 +1,11 @@
 #!/usr/bin/env node
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const ORCH_BASE = process.env.ORCH_BASE_URL ?? "http://127.0.0.1:8098";
 const DB_PATH = process.env.VINKO_DB_PATH ?? ".data/vinkoclaw.sqlite";
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function fail(message) {
   console.error(`[self-check] FAIL: ${message}`);
@@ -14,7 +17,8 @@ function info(message) {
 }
 
 function sqlValue(query) {
-  const output = execSync(`cd /home/xsuper/workspace/vinkoclaw && sqlite3 ${DB_PATH} "${query}"`, {
+  const output = execFileSync("sqlite3", [DB_PATH, query], {
+    cwd: ROOT,
     encoding: "utf8"
   }).trim();
   return output;

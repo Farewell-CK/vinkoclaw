@@ -13,6 +13,7 @@ const toolRunsContainer = document.querySelector("#tool-runs");
 const auditContainer = document.querySelector("#audit");
 const telemetryBoardContainer = document.querySelector("#telemetry-board");
 const traceDetailContainer = document.querySelector("#trace-detail");
+const activityFeedContainer = document.querySelector("#activity-feed");
 const goalRunsContainer = document.querySelector("#goal-runs");
 const goalRunDetailContainer = document.querySelector("#goal-run-detail");
 const messageResult = document.querySelector("#message-result");
@@ -85,8 +86,8 @@ const I18N = {
     "panel.skillsMarket.desc": "搜索 skill、查看候选并安装到角色。",
     "panel.skillsMarket.queryPlaceholder": "搜索 skill，例如：写 PRD / 调研报告 / 测试回归",
     "panel.skillsMarket.search": "搜索",
-    "panel.workflows.title": "Founder 工作流入口",
-    "panel.workflows.desc": "给创始人常用工作流的快捷触发入口。",
+    "panel.workflows.title": "通用工作流入口",
+    "panel.workflows.desc": "给通用任务类型的快捷触发入口，支持从目标到交付。",
     "panel.harness.title": "Product Harness",
     "panel.harness.desc": "最近回归套件、通过状态和输出尾部。",
     "panel.crm.title": "CRM 跟进节奏",
@@ -128,6 +129,23 @@ const I18N = {
     "panel.audit.desc": "所有运维动作、审批与任务状态变更可追踪。",
     "panel.traces.title": "Agent 遥测轨迹",
     "panel.traces.desc": "LLM 决策时间线、工具调用、Token 用量和规则拦截。",
+    "panel.activity.title": "实时活动流",
+    "panel.activity.desc": "统一查看系统最近与正在发生的审计、执行、审批与追踪事件。",
+    "activity.noData": "暂无活动事件",
+    "activity.kind.audit": "审计",
+    "activity.kind.trace": "追踪",
+    "activity.kind.task": "任务",
+    "activity.kind.goal_run": "目标流程",
+    "activity.kind.approval": "审批",
+    "activity.source.audit": "审计",
+    "activity.source.telemetry": "遥测",
+    "activity.source.task": "任务",
+    "activity.source.goal_run": "目标流程",
+    "activity.source.approval": "审批",
+    "activity.metrics.rounds": "轮次 {count}",
+    "activity.metrics.tools": "工具 {count}",
+    "activity.metrics.tokens": "Tokens {count}",
+    "activity.metrics.blocked": "拦截 {count}",
     "trace.round": "轮次 {round}",
     "trace.backend": "后端: {backend}",
     "trace.model": "模型: {model}",
@@ -268,8 +286,8 @@ const I18N = {
     "panel.skillsMarket.desc": "Search skills, inspect matches, and install them to a role.",
     "panel.skillsMarket.queryPlaceholder": "Search skill, e.g. PRD writing / research report / regression testing",
     "panel.skillsMarket.search": "Search",
-    "panel.workflows.title": "Founder Workflows",
-    "panel.workflows.desc": "Shortcut prompts for founder delivery, PRD, research, and recap flows.",
+    "panel.workflows.title": "Workflow Archetypes",
+    "panel.workflows.desc": "Shortcut prompts for common workflow types: delivery, plan, research, recap, and operations.",
     "panel.harness.title": "Product Harness",
     "panel.harness.desc": "Latest regression suites, pass/fail status, and output tails.",
     "panel.crm.title": "CRM Cadences",
@@ -311,6 +329,23 @@ const I18N = {
     "panel.audit.desc": "Every operator action, approval, and task transition stays visible.",
     "panel.traces.title": "Agent Traces",
     "panel.traces.desc": "LLM decision timeline, tool calls, token usage, and rule blocks per task.",
+    "panel.activity.title": "Live Activity",
+    "panel.activity.desc": "Unified stream of recent and in-flight audit, execution, approval, and trace events.",
+    "activity.noData": "No activity events yet",
+    "activity.kind.audit": "Audit",
+    "activity.kind.trace": "Trace",
+    "activity.kind.task": "Task",
+    "activity.kind.goal_run": "Goal run",
+    "activity.kind.approval": "Approval",
+    "activity.source.audit": "audit",
+    "activity.source.telemetry": "telemetry",
+    "activity.source.task": "task",
+    "activity.source.goal_run": "goal run",
+    "activity.source.approval": "approval",
+    "activity.metrics.rounds": "rounds {count}",
+    "activity.metrics.tools": "tools {count}",
+    "activity.metrics.tokens": "tokens {count}",
+    "activity.metrics.blocked": "blocked {count}",
     "trace.round": "Round {round}",
     "trace.backend": "Backend: {backend}",
     "trace.model": "Model: {model}",
@@ -457,6 +492,14 @@ function formatDateTime(value) {
 
 function formatClock(value) {
   return new Date(value).toLocaleTimeString(localeCode());
+}
+
+function getActivityKindLabel(kind) {
+  return t(`activity.kind.${String(kind || "").toLowerCase()}`);
+}
+
+function getActivitySourceLabel(source) {
+  return t(`activity.source.${String(source || "").toLowerCase()}`);
 }
 
 function applyI18n() {
@@ -1330,28 +1373,28 @@ function applyWorkflowPreset(preset) {
     return;
   }
   const presets = {
-    founder_delivery:
+    delivery_workflow:
       currentLang === "zh"
-        ? "请按从想法到交付的方式推进这个需求：做一个登录页 MVP"
-        : "Run this request through idea-to-delivery workflow: build a login page MVP",
-    founder_prd:
+        ? "请从0到1推进这个目标，自动完成需求澄清、方案设计、实现、验证和交付：做一个登录页 MVP"
+        : "Take this goal from idea to delivery with automatic discovery, planning, implementation, verification, and handoff: build a login page MVP",
+    planning_workflow:
       currentLang === "zh"
         ? "请帮我写一个 PRD：面向独立开发者的 AI 团队控制台"
         : "Write a PRD for an AI team console for solo builders",
-    founder_research:
+    research_workflow:
       currentLang === "zh"
         ? "请做一份调研报告：AI 个人创业团队产品的竞品分析"
         : "Create a research report on competitors in AI execution teams for solo founders",
-    founder_recap:
+    recap_workflow:
       currentLang === "zh"
         ? "请帮我整理本周复盘：已完成、阻塞、下周计划和待决策项"
         : "Create a weekly recap with completed work, blockers, next plan, and open decisions",
-    founder_ops_followup:
+    operations_workflow:
       currentLang === "zh"
         ? "请整理一份运营跟进清单：待办事项、提醒时间、责任归属、风险和下一步"
         : "Create an ops follow-up checklist with todos, reminder timing, ownership, risks, and next actions"
   };
-  messageInput.value = presets[preset] || presets.founder_delivery;
+  messageInput.value = presets[preset] || presets.delivery_workflow;
   if (requestedByInput && !requestedByInput.value.trim()) {
     requestedByInput.value = "owner";
   }
@@ -2165,6 +2208,51 @@ function renderAudit(audit) {
         </article>
       `
     )
+    .join("");
+}
+
+function renderActivityFeed(payload) {
+  if (!activityFeedContainer) {
+    return;
+  }
+
+  const events = Array.isArray(payload?.events) ? payload.events : [];
+  if (events.length === 0) {
+    activityFeedContainer.innerHTML = `<p class="muted" style="text-align:center;padding:24px 0;">${t("activity.noData")}</p>`;
+    return;
+  }
+
+  activityFeedContainer.innerHTML = events
+    .map((event) => {
+      const pills = [
+        `<span class="pill">${escapeHtml(getActivityKindLabel(event.kind))}</span>`,
+        event.status ? statusBadge(event.status) : "",
+        event.roleId ? `<span class="pill">${escapeHtml(event.roleId)}</span>` : "",
+        event.stage ? `<span class="pill">${escapeHtml(event.stage)}</span>` : "",
+        Number(event.metrics?.rounds || 0) > 0 ? `<span class="pill">${escapeHtml(t("activity.metrics.rounds", { count: event.metrics.rounds }))}</span>` : "",
+        Number(event.metrics?.toolCalls || 0) > 0 ? `<span class="pill">${escapeHtml(t("activity.metrics.tools", { count: event.metrics.toolCalls }))}</span>` : "",
+        Number(event.metrics?.totalTokens || 0) > 0 ? `<span class="pill">${escapeHtml(t("activity.metrics.tokens", { count: event.metrics.totalTokens }))}</span>` : "",
+        Number(event.metrics?.blocked || 0) > 0 ? `<span class="pill" style="background:var(--red-soft);color:var(--red)">${escapeHtml(
+          t("activity.metrics.blocked", { count: event.metrics.blocked })
+        )}</span>` : ""
+      ]
+        .filter(Boolean)
+        .join("");
+
+      return `
+        <article class="list-card compact">
+          <div class="list-head">
+            <strong>${escapeHtml(event.title || getActivityKindLabel(event.kind))}</strong>
+            <span>${formatDateTime(event.ts)}</span>
+          </div>
+          <p>${escapeHtml(event.summary || "")}</p>
+          <p class="muted">${escapeHtml(getActivitySourceLabel(event.source))} · ${escapeHtml(event.entityType)} · ${escapeHtml(
+            String(event.entityId || "")
+          )}</p>
+          <div class="pill-row">${pills}</div>
+        </article>
+      `;
+    })
     .join("");
 }
 
@@ -3125,7 +3213,7 @@ function renderCrmBoard(board) {
 }
 
 async function refresh() {
-  const [dashboard, rolesPayload, channelsPayload, providersPayload, operatingSystemPayload, goalRunsPayload, harnessPayload, telemetryPayload, runtimeHarnessPayload, harnessGradesPayload, crmBoardPayload] = await Promise.all([
+  const [dashboard, rolesPayload, channelsPayload, providersPayload, operatingSystemPayload, goalRunsPayload, harnessPayload, telemetryPayload, runtimeHarnessPayload, harnessGradesPayload, crmBoardPayload, activityFeedPayload] = await Promise.all([
     request("/api/dashboard"),
     request("/api/roles"),
     request("/api/channels/status").catch(() => null),
@@ -3136,7 +3224,8 @@ async function refresh() {
     request("/api/system/telemetry").catch(() => null),
     request("/api/system/runtime-harness").catch(() => null),
     request("/api/system/harness/grades").catch(() => null),
-    request("/api/recurring/status").catch(() => request("/api/crm/dashboard").catch(() => null))
+    request("/api/recurring/status").catch(() => request("/api/crm/dashboard").catch(() => null)),
+    request("/api/system/activity-feed?limit=20").catch(() => null)
   ]);
 
   renderRoles(rolesPayload);
@@ -3156,6 +3245,7 @@ async function refresh() {
   renderHarnessBoard(harnessPayload, harnessGradesPayload, runtimeHarnessPayload);
   renderCrmBoard(crmBoardPayload);
   renderSkillsMarketResults(lastSkillsMarketResults);
+  renderActivityFeed(activityFeedPayload);
   renderTelemetryBoard(telemetryPayload, runtimeHarnessPayload);
   if (selectedGoalRunId) {
     openGoalRunDetail(selectedGoalRunId, { background: true }).catch(() => null);

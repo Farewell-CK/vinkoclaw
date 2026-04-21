@@ -39,8 +39,17 @@ function button(label: string, value: Record<string, unknown>, type: "primary" |
   return { tag: "button", text: { tag: "plain_text", content: label }, type, value };
 }
 
-function actions(...btns: ReturnType<typeof button>[]) {
+function actions(...btns: Array<Record<string, unknown>>) {
   return { tag: "action", actions: btns };
+}
+
+function linkButton(label: string, url: string, type: "primary" | "default" = "default") {
+  return {
+    tag: "button",
+    text: { tag: "plain_text", content: label },
+    type,
+    multi_url: { url }
+  };
 }
 
 function card(
@@ -174,6 +183,110 @@ export function buildTaskQueuedCard(input: TaskQueuedCardInput): Record<string, 
       hr(),
       note("你是 CEO。需要决策或补充信息时我会暂停并明确提问；完成后会回报产物、验证状态和下一步。"),
     ],
+  );
+}
+
+// ── GoalRun progress cards ───────────────────────────────────────────────────
+
+export interface GoalRunProgressCardInput {
+  title: string;
+  statusLabel: string;
+  summary: string;
+  workflowSummary?: string;
+  actions?: Array<{ label: string; value?: Record<string, unknown>; url?: string; type?: "primary" | "default" | "danger" }>;
+}
+
+export function buildGoalRunProgressCard(input: GoalRunProgressCardInput): Record<string, unknown> {
+  const actionButtons: Array<Record<string, unknown>> = [];
+  if (Array.isArray(input.actions)) {
+    for (const item of input.actions) {
+      if (item.url) {
+        actionButtons.push(linkButton(item.label, item.url, item.type === "primary" ? "primary" : "default"));
+        continue;
+      }
+      if (item.value) {
+        actionButtons.push(button(item.label, item.value, item.type ?? "default"));
+      }
+    }
+  }
+  return card(
+    header(input.title, "blue"),
+    [
+      md(`**状态**：${input.statusLabel}\n\n${input.summary}`),
+      ...(input.workflowSummary?.trim() ? [hr(), md(input.workflowSummary.trim())] : []),
+      ...(actionButtons.length > 0 ? [hr(), actions(...actionButtons)] : []),
+      hr(),
+      note("GoalRun 会继续自动推进，并在关键节点同步")
+    ]
+  );
+}
+
+export interface GoalRunBlockedCardInput {
+  title: string;
+  statusLabel: string;
+  reason: string;
+  workflowSummary?: string;
+  actions?: Array<{ label: string; value?: Record<string, unknown>; url?: string; type?: "primary" | "default" | "danger" }>;
+}
+
+export function buildGoalRunBlockedCard(input: GoalRunBlockedCardInput): Record<string, unknown> {
+  const actionButtons: Array<Record<string, unknown>> = [];
+  if (Array.isArray(input.actions)) {
+    for (const item of input.actions) {
+      if (item.url) {
+        actionButtons.push(linkButton(item.label, item.url, item.type === "primary" ? "primary" : "default"));
+        continue;
+      }
+      if (item.value) {
+        actionButtons.push(button(item.label, item.value, item.type ?? "default"));
+      }
+    }
+  }
+  return card(
+    header(input.title, "orange"),
+    [
+      md(`**状态**：${input.statusLabel}\n\n${input.reason}`),
+      ...(input.workflowSummary?.trim() ? [hr(), md(input.workflowSummary.trim())] : []),
+      ...(actionButtons.length > 0 ? [hr(), actions(...actionButtons)] : []),
+      hr(),
+      note("请直接回复补充信息，或在控制台继续授权/恢复")
+    ]
+  );
+}
+
+export interface GoalRunCompletedCardInput {
+  title: string;
+  summary: string;
+  workflowSummary?: string;
+}
+
+export function buildGoalRunCompletedCard(input: GoalRunCompletedCardInput): Record<string, unknown> {
+  return card(
+    header(input.title, "green"),
+    [
+      md(input.summary),
+      ...(input.workflowSummary?.trim() ? [hr(), md(input.workflowSummary.trim())] : []),
+      hr(),
+      note("如需继续下一轮目标，直接在当前会话下发新指令即可")
+    ]
+  );
+}
+
+export interface GoalRunFailedCardInput {
+  title: string;
+  reason: string;
+  workflowSummary?: string;
+}
+
+export function buildGoalRunFailedCard(input: GoalRunFailedCardInput): Record<string, unknown> {
+  return card(
+    header(input.title, "red"),
+    [
+      md(input.reason),
+      ...(input.workflowSummary?.trim() ? [hr(), md(input.workflowSummary.trim())] : []),
+      hr(),
+      note("建议补充缺失信息、缩小范围或重新发起一条更清晰的目标")
+    ]
   );
 }
 

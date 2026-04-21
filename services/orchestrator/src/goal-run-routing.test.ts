@@ -10,6 +10,9 @@ describe("goal-run-routing", () => {
   it("routes complex delivery objectives to goal run", () => {
     expect(shouldRouteToGoalRun("帮我给公司写一个官网并部署")).toBe(true);
     expect(shouldRouteToGoalRun("做一个网站，然后上线到生产")).toBe(true);
+    expect(shouldRouteToGoalRun("从0到1做一个教务系统")).toBe(true);
+    expect(shouldRouteToGoalRun("做一个管理后台并上线")).toBe(true);
+    expect(shouldRouteToGoalRun("做一个 SaaS 管理平台")).toBe(true);
   });
 
   it("does not route simple one-shot tasks to goal run", () => {

@@ -1,77 +1,65 @@
 # VinkoClaw Workspace Conventions
 
-工作区根目录：`/home/xsuper/workspace`（即 `VINKOCLAW_WORKSPACE_ROOT`）
+工作区根目录：本系统目录 `vinkoclaw/`
 
 ---
 
-## 目录规范
+## 目录规范 (Project-Centric Organization)
 
-### 新项目开发
+为了应对多项目并发开发，防止文件混乱，VinkoClaw 采用**以项目为中心**的目录隔离规范。所有生成的项目内容统一存放在 `./projects/` 目录下。
 
-Agent 执行的新项目统一放在工作区根目录下，以**项目名称**作为目录名：
+### 1. 项目主目录 (Project Root)
 
-```
-/home/xsuper/workspace/
-  <project-name>/          ← agent 创建的新项目
-  <project-name>/
-  ...
-```
-
-命名规则：
-- 全小写，单词用短横线分隔：`my-project`、`landing-page`、`data-pipeline`
-- 禁止使用空格、中文、下划线前缀
-
-### 输出文档 / 交付物
-
-- **Markdown 报告**、**分析文档**、**PRD** 等文本交付物放在工作区根目录下，按任务内容命名：
-  ```
-  /home/xsuper/workspace/
-    embodied-ai-report/
-    kdd/
-  ```
-- **PDF / Excel / 图表等二进制产物** 由 `run_code` 工具生成，存放于任务临时目录，执行完成后 agent 应通过 `write_file` 把最终产物复制到工作区根目录下适当位置。
-
-### 任务临时文件
-
-Agent 执行期间的临时脚本、中间文件存放于任务专属目录，**不应手动修改**：
+AI 执行创建的所有独立项目（包括源码、交付物、资产等）必须按项目名称隔离，存放在 `./projects/<project-name>/` 下：
 
 ```
-/home/xsuper/workspace/.vinkoclaw/tasks/<task-id>/
-  _run_<timestamp>.py      ← run_code 执行的临时脚本
-  _run_<timestamp>.sh
-  output.txt               ← 中间输出
-  report.pdf               ← 最终产物（应同时 write_file 到工作区）
+./projects/
+  chain-hotel-system/      ← 酒店管理系统
+    code/                  ← 源码工程
+    docs/                  ← PRD、架构设计、报价单、合同
+    assets/                ← Logo、UI 原型、架构图、效果图
+    reports/               ← 测试报告、竞品分析调研
+  coffee-shop-app/         ← 咖啡店小程序
+    code/
+    docs/
+    assets/
 ```
 
-### 系统数据
+命名规则：项目名称全小写，单词用短横线分隔。禁止使用空格、中文。
+
+### 2. 全局模板 (Templates)
+
+跨项目通用的标准化文档模板：
 
 ```
-/home/xsuper/workspace/vinkoclaw/.data/
-  vinkoclaw.sqlite         ← 任务/配置数据库，禁止直接修改
+./templates/
+  prd-template.md          ← 标准产品需求文档模板
+  quote-template.md        ← 标准外包报价单模板
+```
+
+### 3. 任务临时文件 (Temporary Sandbox)
+
+Agent 执行期间的临时脚本、中间产物，严格限制在沙箱内，系统会自动清理：
+
+```
+./.vinkoclaw/tasks/<task-id>/
+```
+
+### 4. 系统数据 (System Data)
+
+```
+./.data/
+  vinkoclaw.sqlite         ← 核心数据库，禁止直接修改
 ```
 
 ---
 
 ## Agent 行为规范
 
-### 创建项目时
-
-1. 在工作区根目录下创建项目目录：`/home/xsuper/workspace/<project-name>/`
-2. 初始化必要文件（README.md、package.json 等）
-3. 通过 `write_file` 写入源码文件
-4. 返回项目目录路径作为交付物
-
-### 生成文档/报告时
-
-1. 优先使用 `write_file` 写入 Markdown 到工作区根目录
-2. 需要 PDF 时用 `run_code` 执行 Python（`reportlab` / `weasyprint`）生成，然后把路径写入 deliverable
-3. 文件命名语义化：`<topic>-report.md`、`<topic>-prd.md`
-
-### 执行代码时
-
-1. 使用 `run_code` 工具，不要只输出代码文本
-2. 如需安装依赖：`run_code(bash, "pip install xxx -q")`
-3. 生成的文件路径在 tool result 中会自动记录
+1. **确立项目代号**：在多角色协作 (GoalRun) 开始时，PM 或 CTO 必须先明确当前项目的英文代号（如 `chain-hotel`）。
+2. **源码落地**：前端/后端在生成独立系统时，必须写入 `./projects/<project-name>/code/` 目录。
+3. **文档归档**：所有文本和图片输出，必须严格写入 `./projects/<project-name>/` 下的对应子目录（`docs/`, `assets/`, `reports/`）。
+4. **禁止越权**：严禁修改 `vinkoclaw` 自身的 `src/` 或 `packages/` 核心代码。
 
 ---
 
@@ -83,4 +71,4 @@ Agent 执行期间的临时脚本、中间文件存放于任务专属目录，**
 | task-runner | `npm run dev:task-runner` | `vinko-runner` |
 | 全部 | `npm run dev` | - |
 
-task-runner **必须**随 orchestrator 同时启动，否则所有任务将停留在 `queued` 状态。
+task-runner **必须**随 orchestrator 同时启动。

@@ -3,6 +3,7 @@ import { LocalModelClient } from "@vinko/agent-runtime";
 import {
   AgentCollaborationService,
   ROLE_IDS,
+  buildWorkflowStatusSummary,
   createLogger,
   type AgentCollaboration,
   type AgentInstance,
@@ -726,11 +727,17 @@ export class CollaborationManager {
     // 通知用户协作开始
     if (collaboration.chatId && this.deps.feishuClient && isLikelyFeishuChatId(collaboration.chatId)) {
       try {
+        const workflowSummary = buildWorkflowStatusSummary(parentTask, { includeGoal: true });
         await this.deps.feishuClient.sendTextToChat(
           collaboration.chatId,
-          `🤝 已启动团队协作（${collaboration.id.slice(0, 8)}）\n参与角色：${collaboration.participants
-            .map((roleId) => ROLE_LABELS[roleId] ?? roleId)
-            .join("、")}\n我会按里程碑同步结果，不展示内部思考过程。`
+          [
+            `🤝 已启动团队协作（${collaboration.id.slice(0, 8)}）`,
+            `参与角色：${collaboration.participants.map((roleId) => ROLE_LABELS[roleId] ?? roleId).join("、")}`,
+            workflowSummary,
+            "我会按里程碑同步结果，不展示内部思考过程。"
+          ]
+            .filter(Boolean)
+            .join("\n")
         );
       } catch (error) {
         logger.error("Failed to notify collaboration start to Feishu", error, {
@@ -1117,12 +1124,17 @@ export class CollaborationManager {
           : aggregationMode === "partial"
             ? "当前已输出可用部分结果，剩余阻塞项已在结论中说明。"
             : aggregationMode === "blocked"
-              ? "当前无法继续自动推进，阻塞原因已写入结论。"
+            ? "当前无法继续自动推进，阻塞原因已写入结论。"
               : "完整交付可在控制台查看。";
       const message = [head, `结论：${summary}`, tail].join("\n");
+      const workflowTask = parentTask ?? task;
+      const workflowSummary = buildWorkflowStatusSummary(workflowTask, { includeGoal: true, includeArtifacts: true });
 
       try {
-        await this.deps.feishuClient.sendTextToChat(collaboration.chatId, message);
+        await this.deps.feishuClient.sendTextToChat(
+          collaboration.chatId,
+          [message, workflowSummary].filter(Boolean).join("\n\n")
+        );
       } catch (error) {
         logger.error("Failed to send collaboration completion to Feishu", error, {
           chatId: collaboration.chatId,
@@ -1158,12 +1170,17 @@ export class CollaborationManager {
     const deliverableDigest = this.buildTaskDeliverableDigest(task);
     const progress = this.getCollaborationProgress(collaboration);
     const roleDigest = this.buildRoleProgressDigest(collaboration);
+    const workflowSummary = buildWorkflowStatusSummary(
+      this.deps.store.getTask(collaboration.parentTaskId) ?? task,
+      { includeGoal: true }
+    );
     const message = [
       `📍团队播报 | ${roleLabel}${instanceLabel} ${statusLabel}`,
       `结论：${summary}`,
       deliverableDigest ? `产出：${deliverableDigest}` : "",
       `进度：${progress.completedCount}/${progress.totalCount} 已完成${progress.failedCount > 0 ? `，受阻 ${progress.failedCount}` : ""}`,
-      roleDigest ? `成员动态：${roleDigest}` : ""
+      roleDigest ? `成员动态：${roleDigest}` : "",
+      workflowSummary
     ].join("\n");
 
     try {

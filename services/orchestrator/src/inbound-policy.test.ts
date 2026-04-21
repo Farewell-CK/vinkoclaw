@@ -139,11 +139,11 @@ describe("inbound-policy", () => {
     ).toBe(false);
   });
 
-  it("uses ceo as default collaboration entry role without explicit role", () => {
-    expect(resolveCollaborationEntryRole("团队协作执行，交付上线方案")).toBe("ceo");
+  it("uses cto as default collaboration entry role without explicit role (user is CEO)", () => {
+    expect(resolveCollaborationEntryRole("团队协作执行，交付上线方案")).toBe("cto");
     expect(resolveCollaborationEntryRole("团队协作执行，让产品同学先拆需求")).toBe("product");
-    expect(resolveCollaborationEntryRole("团队协作执行，做一个活动报名系统，含前后端与测试")).toBe("ceo");
-    expect(resolveCollaborationEntryRole("团队协作执行，请写一份具身智能产品PRD")).toBe("ceo");
+    expect(resolveCollaborationEntryRole("团队协作执行，做一个活动报名系统，含前后端与测试")).toBe("cto");
+    expect(resolveCollaborationEntryRole("团队协作执行，请写一份具身智能产品PRD")).toBe("cto");
     expect(resolveCollaborationEntryRole("团队协作执行，请产品同学先拆需求")).toBe("product");
   });
 

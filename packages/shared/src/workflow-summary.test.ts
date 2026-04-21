@@ -7,6 +7,9 @@ describe("buildWorkflowStatusSummary", () => {
       title: "实现登录页",
       status: "running",
       metadata: {
+        workflowLabel: "Founder Delivery / PRD",
+        workflowSuccessCriteria: ["产出结构化需求与验收标准", "生成可见 artifact"],
+        workflowCompletionSignal: "PRD 能直接驱动实现阶段",
         orchestrationState: {
           ownerRoleId: "product",
           spec: {
@@ -41,11 +44,14 @@ describe("buildWorkflowStatusSummary", () => {
       }
     }, { includeArtifacts: true });
 
+    expect(summary).toContain("**工作流**：Founder Delivery / PRD");
     expect(summary).toContain("**目标**：交付登录页 MVP");
     expect(summary).toContain("**当前阶段**：implementation · active");
     expect(summary).toContain("**下一步**：完成表单校验；补错误提示");
     expect(summary).toContain("**待补充**：确认是否要第三方登录");
     expect(summary).toContain("**阻塞**：等待设计确认");
+    expect(summary).toContain("**成功标准**：产出结构化需求与验收标准；生成可见 artifact");
+    expect(summary).toContain("**完成信号**：PRD 能直接驱动实现阶段");
     expect(summary).toContain("**产物**：登录页说明；登录页导出");
     expect(summary).toContain("**导出**：Markdown / HTML / CSV");
   });

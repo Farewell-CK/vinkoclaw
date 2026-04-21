@@ -132,10 +132,96 @@ export function buildToolDefinitions(ctx: ToolContext): ToolDefinition[] {
     }
   });
 
+  tools.push({
+    type: "function",
+    function: {
+      name: "generate_image",
+      description:
+        "Generate high-quality images from text prompts using Stable-Diffusion-XL. Use this to create visual assets for project proposals, PPTs, or UI designs. Images are saved as PNG files in the task workspace.",
+      parameters: {
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description: "The text prompt describing the image to generate"
+          },
+          filename: {
+            type: "string",
+            description: "Target filename (e.g. 'hero-section.png'). Default is 'generated_image.png'"
+          },
+          project_name: {
+            type: "string",
+            description: "The name of the project this image belongs to. Used to organize output folders (e.g. 'coffee-shop', 'hotel-system')."
+          }
+        },
+        required: ["prompt"]
+      }
+    }
+  });
+
   return tools;
 }
 
 // ─── Tool execution ───────────────────────────────────────────────────────────
+
+export async function executeGenerateImage(
+  ctx: ToolContext,
+  args: { prompt: string; filename?: string; project_name?: string }
+): Promise<{ output: string; artifactPaths: string[] }> {
+  const apiKey = ctx.secrets["AI_STUDIO_API_KEY"];
+  const baseUrl = ctx.secrets["AI_STUDIO_BASE_URL"] || "https://aistudio.baidu.com/llm/lmapi/v3";
+
+  if (!apiKey) {
+    return { output: "AI Studio API Key not configured.", artifactPaths: [] };
+  }
+
+  const filename = args.filename || `image_${Date.now()}.png`;
+  const projectName = args.project_name || "default-project";
+  const vinkoclawRoot = path.resolve(ctx.workDir, "..", "..", "..");
+  const fullPath = path.resolve(vinkoclawRoot, "deliveries", projectName, "assets", filename);
+
+  try {
+    const resp = await fetch(`${baseUrl}/images/generate`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        prompt: args.prompt,
+        model: "Stable-Diffusion-XL",
+        response_format: "b64_json"
+      }),
+      signal: AbortSignal.timeout(60_000)
+    });
+
+    if (!resp.ok) {
+      const errorText = await resp.text();
+      return { output: `Image generation failed: HTTP ${resp.status} - ${errorText}`, artifactPaths: [] };
+    }
+
+    const data = (await resp.json()) as {
+      data?: Array<{ b64_json: string }>;
+    };
+
+    if (!data.data || data.data.length === 0 || !data.data[0]) {
+      return { output: "No image data returned from AI Studio.", artifactPaths: [] };
+    }
+
+    const b64 = data.data[0].b64_json;
+    const buffer = Buffer.from(b64, "base64");
+    await mkdir(path.dirname(fullPath), { recursive: true });
+    await writeFile(fullPath, buffer);
+
+    return {
+      output: `Image generated and saved to ${filename}`,
+      artifactPaths: [fullPath]
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { output: `Image generation error: ${msg}`, artifactPaths: [] };
+  }
+}
 
 function getSearchApiKey(ctx: ToolContext): string {
   if (ctx.searchProvider === "tavily") {
@@ -147,7 +233,7 @@ function getSearchApiKey(ctx: ToolContext): string {
   return "";
 }
 
-async function executeWebSearch(
+export async function executeWebSearch(
   ctx: ToolContext,
   args: { query: string; max_results?: number }
 ): Promise<{ output: string; artifactPaths: string[] }> {
@@ -198,7 +284,7 @@ async function executeWebSearch(
   return { output: "No search provider configured.", artifactPaths: [] };
 }
 
-async function executeRunCode(
+export async function executeRunCode(
   ctx: ToolContext,
   args: { language: "python" | "bash"; code: string; description?: string }
 ): Promise<{ output: string; artifactPaths: string[] }> {
@@ -276,7 +362,7 @@ async function executeRunCode(
   };
 }
 
-async function executeWriteFile(
+export async function executeWriteFile(
   ctx: ToolContext,
   args: { path: string; content: string }
 ): Promise<{ output: string; artifactPaths: string[] }> {
@@ -285,7 +371,8 @@ async function executeWriteFile(
     throw new Error("write_file requires a non-empty path");
   }
 
-  const workspaceRoot = path.resolve(ctx.workDir, "..", "..", "..");
+  const vinkoclawRoot = path.resolve(ctx.workDir, "..", "..", "..");
+
   const isWithin = (candidate: string, root: string): boolean => {
     const rel = path.relative(root, candidate);
     return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
@@ -296,18 +383,35 @@ async function executeWriteFile(
 
   if (path.isAbsolute(rawPath)) {
     const normalizedAbsolute = path.resolve(rawPath);
-    if (!isWithin(normalizedAbsolute, workspaceRoot)) {
-      throw new Error(`absolute path outside workspace is not allowed: ${rawPath}`);
+    if (!isWithin(normalizedAbsolute, vinkoclawRoot)) {
+      throw new Error(`absolute path outside allowed workspace is not allowed: ${rawPath}`);
     }
     fullPath = normalizedAbsolute;
-    displayPath = path.relative(workspaceRoot, fullPath).replaceAll(path.sep, "/");
+    displayPath = path.relative(vinkoclawRoot, fullPath).replaceAll(path.sep, "/");
   } else {
-    const resolved = path.resolve(ctx.workDir, rawPath);
-    if (!isWithin(resolved, ctx.workDir)) {
-      throw new Error(`path escapes task workspace: ${rawPath}`);
+    if (rawPath.startsWith("./projects/") || rawPath.startsWith("projects/") || rawPath.startsWith("./templates/") || rawPath.startsWith("templates/")) {
+      const resolved = path.resolve(vinkoclawRoot, rawPath);
+      const relToVinko = path.relative(vinkoclawRoot, resolved);
+
+      const isAllowedVinkoSubdir = relToVinko.startsWith("projects") || relToVinko.startsWith("templates") || relToVinko.startsWith(".data") || relToVinko.startsWith(".vinkoclaw");
+      const isOutsideVinko = relToVinko.startsWith("..");
+
+      if (!isOutsideVinko && !isAllowedVinkoSubdir) {
+        throw new Error(`path is not allowed to modify vinkoclaw source code: ${rawPath}`);
+      }
+      if (!isWithin(resolved, vinkoclawRoot)) {
+        throw new Error(`path escapes top-level workspace: ${rawPath}`);
+      }
+      fullPath = resolved;
+      displayPath = path.relative(vinkoclawRoot, fullPath).replaceAll(path.sep, "/");
+    } else {
+      const resolved = path.resolve(ctx.workDir, rawPath);
+      if (!isWithin(resolved, ctx.workDir)) {
+        throw new Error(`path escapes task workspace: ${rawPath}. If you want to create a project or deliver a document, use './projects/<project-name>/...'.`);
+      }
+      fullPath = resolved;
+      displayPath = path.relative(ctx.workDir, fullPath).replaceAll(path.sep, "/");
     }
-    fullPath = resolved;
-    displayPath = path.relative(ctx.workDir, fullPath).replaceAll(path.sep, "/");
   }
 
   await mkdir(path.dirname(fullPath), { recursive: true });
@@ -344,6 +448,10 @@ export async function executeTool(
     }
     if (name === "write_file") {
       const r = await executeWriteFile(ctx, args as Parameters<typeof executeWriteFile>[1]);
+      return { toolCallId, name, output: r.output, artifactPaths: r.artifactPaths };
+    }
+    if (name === "generate_image") {
+      const r = await executeGenerateImage(ctx, args as Parameters<typeof executeGenerateImage>[1]);
       return { toolCallId, name, output: r.output, artifactPaths: r.artifactPaths };
     }
     return { toolCallId, name, output: "", error: `Unknown tool: ${name}`, artifactPaths: [] };

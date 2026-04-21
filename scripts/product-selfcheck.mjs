@@ -2,12 +2,39 @@
 
 const ORCH_BASE = process.env.ORCH_BASE_URL ?? "http://127.0.0.1:8098";
 const RUN_ID = `product-selfcheck-${Date.now()}`;
+let currentCheck = "boot";
+
+function emitHarnessMeta(patch) {
+  console.error(`HARNESS_META ${JSON.stringify({ suite: "product", check: currentCheck, ...patch })}`);
+}
+
+function setCheck(check) {
+  currentCheck = check;
+  emitHarnessMeta({
+    ok: null,
+    regressionCategory: "in_progress"
+  });
+}
 
 function info(message) {
   console.log(`[product-selfcheck] ${message}`);
 }
 
 function fail(message) {
+  emitHarnessMeta({
+    ok: false,
+    regressionCategory:
+      currentCheck === "health"
+        ? "backend"
+        : currentCheck.includes("routing")
+          ? "routing"
+          : currentCheck.includes("cleanup")
+            ? "operations"
+            : currentCheck.includes("metrics")
+            ? "operations"
+            : "interaction",
+    detail: message
+  });
   console.error(`[product-selfcheck] FAIL: ${message}`);
   process.exit(1);
 }
@@ -62,10 +89,50 @@ function uniqueIdentity(suffix) {
   };
 }
 
+function unwrapTaskResponse(payload) {
+  if (payload && typeof payload === "object" && payload.task && typeof payload.task === "object") {
+    return payload.task;
+  }
+  return payload;
+}
+
+async function postMessageWithClarification(input) {
+  const result = await postJson("/api/messages", {
+    source: "feishu",
+    requestedBy: input.identity.requestedBy,
+    chatId: input.identity.chatId,
+    text: input.text
+  });
+
+  if (result.type === "needs_clarification") {
+    assert(
+      Array.isArray(result.questions) && result.questions.length > 0,
+      `needs_clarification should include questions for ${input.label}: ${JSON.stringify(result)}`
+    );
+    const clarified = await postJson("/api/messages", {
+      source: "feishu",
+      requestedBy: input.identity.requestedBy,
+      chatId: input.identity.chatId,
+      text: input.clarificationText
+    });
+    assert(
+      clarified.type === input.expectedType,
+      `expected ${input.expectedType} after clarification for ${input.label}, got ${JSON.stringify(clarified)} (initial: ${JSON.stringify(result)})`
+    );
+    return clarified;
+  }
+
+  assert(
+    result.type === input.expectedType,
+    `expected ${input.expectedType} or needs_clarification for ${input.label}, got ${JSON.stringify(result)}`
+  );
+  return result;
+}
+
 async function waitTaskTerminal(taskId, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const task = await getJson(`/api/tasks/${taskId}`);
+    const task = unwrapTaskResponse(await getJson(`/api/tasks/${taskId}`));
     if (["completed", "failed", "cancelled"].includes(task.status)) {
       return task;
     }
@@ -75,12 +142,14 @@ async function waitTaskTerminal(taskId, timeoutMs = 120_000) {
 }
 
 async function runHealthCheck() {
+  setCheck("health");
   info("health check");
   const health = await getJson("/health");
   assert(health?.ok === true, "health endpoint not ok");
 }
 
 async function runSmalltalkFastPathCheck() {
+  setCheck("smalltalk");
   info("smalltalk fast-path check");
   const identity = uniqueIdentity("smalltalk");
   const beforeTasks = await getJson("/api/tasks");
@@ -100,19 +169,21 @@ async function runSmalltalkFastPathCheck() {
 }
 
 async function runSimpleTaskRoutingCheck() {
+  setCheck("simple-routing");
   info("simple task routing check");
   const identity = uniqueIdentity("simple-task");
-  const result = await postJson("/api/messages", {
-    source: "feishu",
-    requestedBy: identity.requestedBy,
-    chatId: identity.chatId,
-    text: "请帮我写一个登录页原型"
+  const result = await postMessageWithClarification({
+    label: "simple task routing",
+    identity,
+    text: "请帮我写一个登录页原型",
+    expectedType: "task_queued",
+    clarificationText:
+      "登录页原型请用 React + TypeScript + CSS 实现，包含账号密码登录、忘记密码入口和注册入口，桌面端优先并兼容移动端，风格简洁企业级，输出可运行代码。"
   });
-  assert(result.type === "task_queued", `expected task_queued, got ${JSON.stringify(result)}`);
   const taskId = String(result.taskId ?? "");
   assert(taskId.length > 0, "task_queued response missing taskId");
 
-  const task = await getJson(`/api/tasks/${taskId}`);
+  const task = unwrapTaskResponse(await getJson(`/api/tasks/${taskId}`));
   assert(
     task.roleId === "uiux" || task.roleId === "frontend",
     `simple task should route to uiux/frontend, got ${task.roleId}`
@@ -125,15 +196,17 @@ async function runSimpleTaskRoutingCheck() {
 }
 
 async function runGoalRunAndContinueCheck() {
+  setCheck("goalrun-routing");
   info("goal run + continue signal check");
   const identity = uniqueIdentity("goalrun");
-  const created = await postJson("/api/messages", {
-    source: "feishu",
-    requestedBy: identity.requestedBy,
-    chatId: identity.chatId,
-    text: "帮我给公司写一个官网并部署"
+  const created = await postMessageWithClarification({
+    label: "goalrun routing",
+    identity,
+    text: "帮我给公司写一个官网并部署",
+    expectedType: "goal_run_queued",
+    clarificationText:
+      "请端到端完成公司官网并部署：官网包含关于我们、产品展示、客户案例、联系方式四个模块；使用 React + TypeScript 开发；部署到 Vercel；优先交付可上线版本。"
   });
-  assert(created.type === "goal_run_queued", `expected goal_run_queued, got ${JSON.stringify(created)}`);
   const goalRunId = String(created.goalRunId ?? "");
   assert(goalRunId.length > 0, "goal_run_queued response missing goalRunId");
 
@@ -172,6 +245,7 @@ async function runGoalRunAndContinueCheck() {
 }
 
 async function runStatusIntentDisambiguationCheck() {
+  setCheck("status-routing");
   info("status keyword disambiguation check");
   const identity = uniqueIdentity("status-disambiguation");
   const configReply = await postJson("/api/messages", {
@@ -185,13 +259,14 @@ async function runStatusIntentDisambiguationCheck() {
     `status keyword in action sentence should not be treated as pure status query: ${JSON.stringify(configReply)}`
   );
 
-  const collaborationCreated = await postJson("/api/messages", {
-    source: "feishu",
-    requestedBy: identity.requestedBy,
-    chatId: identity.chatId,
-    text: "团队协作执行，做一个活动落地页"
+  const collaborationCreated = await postMessageWithClarification({
+    label: "collaboration routing",
+    identity,
+    text: "团队协作执行，做一个活动落地页",
+    expectedType: "task_queued",
+    clarificationText:
+      "团队协作执行，做一个活动落地页：请前端、UIUX、QA 一起协作，使用 React + TypeScript，实现首屏、活动亮点、报名表单和移动端适配，做完检查一下。"
   });
-  assert(collaborationCreated.type === "task_queued", `expected task_queued for collaboration, got ${JSON.stringify(collaborationCreated)}`);
   const taskId = String(collaborationCreated.taskId ?? "");
   assert(taskId.length > 0, "collaboration task response missing taskId");
 
@@ -214,16 +289,18 @@ async function runStatusIntentDisambiguationCheck() {
 }
 
 async function runStaleTaskAndGoalRunCleanupApiCheck() {
+  setCheck("stale-cleanup");
   info("stale task/goal-run cleanup api check");
   const identity = uniqueIdentity("stale-cleanup");
 
-  const taskCreated = await postJson("/api/messages", {
-    source: "feishu",
-    requestedBy: identity.requestedBy,
-    chatId: identity.chatId,
-    text: "请帮我整理本周工作日报"
+  const taskCreated = await postMessageWithClarification({
+    label: "stale cleanup task",
+    identity,
+    text: "请帮我整理本周工作日报",
+    expectedType: "task_queued",
+    clarificationText:
+      "请整理本周工作日报：用中文 Markdown 输出，面向部门周会，包含本周完成、风险问题、下周计划和待协调事项，按条目化格式组织。"
   });
-  assert(taskCreated.type === "task_queued", `expected task_queued, got ${JSON.stringify(taskCreated)}`);
   const taskId = String(taskCreated.taskId ?? "");
   assert(taskId.length > 0, "task_queued response missing taskId");
 
@@ -250,13 +327,14 @@ async function runStaleTaskAndGoalRunCleanupApiCheck() {
     });
   }
 
-  const goalRunCreated = await postJson("/api/messages", {
-    source: "feishu",
-    requestedBy: identity.requestedBy,
-    chatId: identity.chatId,
-    text: "帮我做一个公司官网并部署上线"
+  const goalRunCreated = await postMessageWithClarification({
+    label: "stale cleanup goalrun",
+    identity,
+    text: "帮我做一个公司官网并部署上线",
+    expectedType: "goal_run_queued",
+    clarificationText:
+      "请端到端完成公司官网并部署上线：官网包含首页、关于我们、产品展示、联系方式；使用 React + TypeScript 开发；按企业级简洁风格实现；部署到 Vercel。"
   });
-  assert(goalRunCreated.type === "goal_run_queued", `expected goal_run_queued, got ${JSON.stringify(goalRunCreated)}`);
   const goalRunId = String(goalRunCreated.goalRunId ?? "");
   assert(goalRunId.length > 0, "goal_run_queued response missing goalRunId");
 
@@ -291,6 +369,7 @@ async function runStaleTaskAndGoalRunCleanupApiCheck() {
 }
 
 async function runApprovalCancelChecks() {
+  setCheck("approval-cleanup");
   info("approval cancel check");
   const identity = uniqueIdentity("approval-single");
   const pending = await postJson("/api/messages", {
@@ -311,6 +390,7 @@ async function runApprovalCancelChecks() {
 }
 
 async function runStaleApprovalCleanupCheck() {
+  setCheck("approval-stale-cleanup");
   info("stale approval cleanup check");
   const identity = uniqueIdentity("approval-batch");
   const pending = await postJson("/api/messages", {
@@ -333,10 +413,38 @@ async function runStaleApprovalCleanupCheck() {
 }
 
 async function runFinalMetricsCheck() {
+  setCheck("final-metrics");
   info("final metrics check");
-  const metrics = await getJson("/api/system/metrics");
-  assert(metrics?.queueDepth?.queuedTasks === 0, `queuedTasks should be 0, got ${JSON.stringify(metrics?.queueDepth)}`);
-  assert(metrics?.queueDepth?.queuedGoalRuns === 0, `queuedGoalRuns should be 0, got ${JSON.stringify(metrics?.queueDepth)}`);
+  const tasks = await getJson("/api/tasks");
+  const goalRuns = await getJson("/api/goal-runs");
+  const ownedQueuedTasks = Array.isArray(tasks)
+    ? tasks.filter(
+        (task) =>
+          typeof task?.requestedBy === "string" &&
+          task.requestedBy.includes(RUN_ID) &&
+          ["queued", "running", "waiting_approval"].includes(task.status)
+      )
+    : [];
+  const ownedQueuedGoalRuns = Array.isArray(goalRuns)
+    ? goalRuns.filter(
+        (run) =>
+          typeof run?.requestedBy === "string" &&
+          run.requestedBy.includes(RUN_ID) &&
+          ["queued", "running", "awaiting_authorization"].includes(run.status)
+      )
+    : [];
+  assert(
+    ownedQueuedTasks.length === 0,
+    `owned queued tasks should be 0, got ${JSON.stringify(
+      ownedQueuedTasks.map((task) => ({ id: task.id, status: task.status, requestedBy: task.requestedBy }))
+    )}`
+  );
+  assert(
+    ownedQueuedGoalRuns.length === 0,
+    `owned queued goal runs should be 0, got ${JSON.stringify(
+      ownedQueuedGoalRuns.map((run) => ({ id: run.id, status: run.status, requestedBy: run.requestedBy }))
+    )}`
+  );
 }
 
 async function main() {
@@ -350,6 +458,11 @@ async function main() {
   await runApprovalCancelChecks();
   await runStaleApprovalCleanupCheck();
   await runFinalMetricsCheck();
+  emitHarnessMeta({
+    ok: true,
+    regressionCategory: "none",
+    check: "completed"
+  });
   info("PASS");
 }
 

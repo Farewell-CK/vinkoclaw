@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import {
   createLogger,
   createRuntimeValueResolver,
+  buildTaskWorkflowBlueprintMetadata,
+  buildGoalRunStatusMessage,
   buildWorkflowStatusSummary,
   getEmojiSelector,
   listRoles,
@@ -114,6 +116,7 @@ import {
   parseFeishuCardDecisionPayload,
   validateFeishuCardDecision
 } from "./feishu-approval.js";
+import { buildGoalRunCardActionFeedback, parseGoalRunCardActionPayload } from "./goal-run-card-actions.js";
 
 const env = loadEnv();
 const store = VinkoStore.fromEnv(env);
@@ -1546,6 +1549,11 @@ function createSkillRuntimeIntegrationTask(input: {
         "",
         originalInfo
       ].join("\n");
+  const blueprintMetadata = buildTaskWorkflowBlueprintMetadata({
+    templateId: "tpl-skill-runtime-integration",
+    taskRoleId: "engineering",
+    fallbackTemplateName: template?.name
+  });
   return createTask({
     sessionId: input.sessionId,
     source: input.source,
@@ -1556,7 +1564,7 @@ function createSkillRuntimeIntegrationTask(input: {
     title,
     instruction,
     metadata: {
-      ...(template ? { routeTemplateId: template.id, routeTemplateName: template.name } : {}),
+      ...blueprintMetadata,
       ...(templateTask?.deliverableMode ? { deliverableMode: templateTask.deliverableMode } : { deliverableMode: "artifact_required" }),
       ...(Array.isArray(templateTask?.deliverableSections) && templateTask.deliverableSections.length > 0
         ? { deliverableSections: templateTask.deliverableSections }
@@ -1606,6 +1614,11 @@ function createSkillSmokeVerifyTask(input: {
   const instruction = templateTask
     ? renderTemplate(templateTask.instructionTemplate, originalInfo)
     : `请使用已安装的 skill 做一个最小验证，并说明 skill 如何影响输出。\n\n${originalInfo}`;
+  const blueprintMetadata = buildTaskWorkflowBlueprintMetadata({
+    templateId: "tpl-skill-smoke-verify",
+    taskRoleId: input.targetRoleId,
+    fallbackTemplateName: template?.name
+  });
   return createTask({
     sessionId: input.sessionId,
     source: input.source,
@@ -1616,7 +1629,7 @@ function createSkillSmokeVerifyTask(input: {
     title,
     instruction,
     metadata: {
-      ...(template ? { routeTemplateId: template.id, routeTemplateName: template.name } : {}),
+      ...blueprintMetadata,
       ...(templateTask?.deliverableMode ? { deliverableMode: templateTask.deliverableMode } : { deliverableMode: "artifact_preferred" }),
       ...(Array.isArray(templateTask?.deliverableSections) && templateTask.deliverableSections.length > 0
         ? { deliverableSections: templateTask.deliverableSections }
@@ -1660,8 +1673,11 @@ function createTemplateTasks(input: {
         ...(Array.isArray(taskTemplate.deliverableSections) && taskTemplate.deliverableSections.length > 0
           ? { deliverableSections: taskTemplate.deliverableSections }
           : {}),
-        routeTemplateId: input.template.id,
-        routeTemplateName: input.template.name,
+        ...buildTaskWorkflowBlueprintMetadata({
+          templateId: input.template.id,
+          taskRoleId: taskTemplate.roleId,
+          fallbackTemplateName: input.template.name
+        }),
         routeTaskIndex: index + 1,
         routeTaskTotal: total,
         originalInstruction: input.text
@@ -1702,12 +1718,16 @@ function createFounderDeliveryWorkflow(input: {
       ...(Array.isArray(prdTaskTemplate.deliverableSections) && prdTaskTemplate.deliverableSections.length > 0
         ? { deliverableSections: prdTaskTemplate.deliverableSections }
         : {}),
-      routeTemplateId: input.template.id,
-      routeTemplateName: input.template.name,
+      ...buildTaskWorkflowBlueprintMetadata({
+        templateId: input.template.id,
+        taskRoleId: prdTaskTemplate.roleId,
+        fallbackTemplateName: input.template.name
+      }),
       routeTaskIndex: 1,
       routeTaskTotal: 4,
       originalInstruction: input.text,
       founderWorkflowKind: "founder_delivery",
+      deliveryWorkflowKind: "general_delivery",
       founderWorkflowId: workflowId,
       founderWorkflowStage: "prd",
       founderWorkflowStepIndex: 1,
@@ -1718,11 +1738,13 @@ function createFounderDeliveryWorkflow(input: {
         ownerRoleId: prdTaskTemplate.roleId,
         goal: input.text,
         stage: "spec",
-        successCriteria: [
-          "产出结构化需求与验收标准",
-          "生成可见 artifact",
-          "为实现与验证阶段提供明确输入"
-        ],
+        successCriteria: Array.isArray(prdTaskTemplate.successCriteria) && prdTaskTemplate.successCriteria.length > 0
+          ? prdTaskTemplate.successCriteria
+          : [
+              "产出结构化需求与验收标准",
+              "生成可见 artifact",
+              "为实现与验证阶段提供明确输入"
+            ],
         constraints: ["用户作为 CEO，不引入 AI CEO 默认接力", "所有后续阶段必须回流到主流程状态"],
         scope: ["spec", "implementation", "verification", "delivery_recap"],
         nextActions: ["完成 spec 并决定是否需要并行执行"],
@@ -1957,9 +1979,9 @@ function formatTemplateTasksQueuedMessage(
 
 function formatFounderWorkflowQueuedMessage(source: CreateTaskInput["source"], templateName: string): string {
   if (source === "feishu") {
-    return `收到，我会按「${templateName}」顺序推进：先产出 PRD，再接实现、验证和 recap，并持续同步进展。`;
+    return `收到，我会按「${templateName}」顺序推进：先产出规划，再接实现、验证和总结，并持续同步进展。`;
   }
-  return `已启动「${templateName}」：系统会按 PRD → 实现 → QA → Recap 顺序自动推进。`;
+  return `已启动「${templateName}」：系统会按规划 → 实现 → QA → 总结顺序自动推进。`;
 }
 
 function formatGoalRunQueuedMessage(source: CreateTaskInput["source"], goalRunId: string): string {
@@ -2433,19 +2455,18 @@ function resolveGoalInputFieldKey(rawKey: string, expectedFields: string[]): str
 }
 
 function formatGoalRunStatusMessage(goalRun: GoalRunRecord): string {
-  if (goalRun.status === "completed") {
-    return `你上一个目标（${goalRun.id.slice(0, 8)}）已完成。若要继续下一步（优化/上线/复盘），直接告诉我目标即可。`;
-  }
-  if (goalRun.status === "awaiting_input") {
-    const fields = formatGoalInputFields(goalRun.awaitingInputFields);
-    return `当前在补充信息阶段（${goalRun.id.slice(0, 8)}），还需要：${fields}。你直接回复这些信息即可，我会继续推进。`;
-  }
-  if (goalRun.status === "awaiting_authorization") {
-    return `当前在授权阶段（${goalRun.id.slice(0, 8)}），授权后我会继续执行部署。`;
-  }
   const currentTask = goalRun.currentTaskId ? store.getTask(goalRun.currentTaskId) : undefined;
+  const projectMemory =
+    goalRun.sessionId && typeof store.getSession === "function"
+      ? (store.getSession(goalRun.sessionId)?.metadata?.projectMemory as Record<string, unknown> | undefined)
+      : undefined;
+  const latestHandoff = store.getLatestGoalRunHandoff(goalRun.id);
   const collaborationProgress = currentTask ? formatCollaborationProgress(currentTask) : undefined;
-  const base = `当前目标（${goalRun.id.slice(0, 8)}）正在${formatGoalRunStageLabel(goalRun.currentStage)}，我会持续同步关键进展。`;
+  const base = buildGoalRunStatusMessage(goalRun, {
+    currentTask,
+    latestHandoff,
+    projectMemory
+  });
   return collaborationProgress ? `${base}\n${collaborationProgress}` : base;
 }
 
@@ -4320,6 +4341,24 @@ async function handleFeishuCardAction(cardAction: FeishuCardActionEvent): Promis
     return;
   }
 
+  const goalRunAction = parseGoalRunCardActionPayload(cardAction.actionValue);
+  if (goalRunAction) {
+    const run = store.getGoalRun(goalRunAction.goalRunId);
+    if (!run) {
+      await sendFeishuPrivateFeedback(cardAction.operatorOpenId, "GoalRun 不存在或已失效。");
+      return;
+    }
+    await sendFeishuPrivateFeedback(
+      cardAction.operatorOpenId,
+      buildGoalRunCardActionFeedback({
+        store,
+        run,
+        action: goalRunAction.action
+      })
+    );
+    return;
+  }
+
   const payload = parseFeishuCardDecisionPayload(cardAction.actionValue);
   const approval = payload ? store.getApproval(payload.approvalId) : undefined;
   const pendingStep = payload ? store.getPendingApprovalWorkflowStep(payload.approvalId) : undefined;
@@ -4555,6 +4594,10 @@ registerPluginRoutes(app, {
   store
 });
 
+registerCrmRoutes(app, {
+  store
+});
+
 registerRecurringRoutes(app, {
   store
 });
@@ -4606,10 +4649,6 @@ registerSelfCheckRoutes(app, {
   latestFile: productSelfcheckLatestFile,
   historyFile: productSelfcheckHistoryFile,
   harnessRootDir: harnessReportDir,
-registerCrmRoutes(app, {
-  store
-});
-
   watcherPidFile: productSelfcheckWatcherPidFile
 });
 

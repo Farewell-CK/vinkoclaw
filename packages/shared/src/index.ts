@@ -4,6 +4,8 @@ export * from "./emoji.js";
 export * from "./errors.js";
 export * from "./env.js";
 export * from "./feishu-policy.js";
+export * from "./goal-run-summary.js";
+export * from "./harness.js";
 export * from "./inbound-commands.js";
 export * from "./logger.js";
 export * from "./model-providers.js";
@@ -21,6 +23,7 @@ export * from "./skills-marketplace.js";
 export * from "./store.js";
 export * from "./tool-exec.js";
 export * from "./types.js";
+export * from "./workflow-blueprints.js";
 export * from "./workflow-summary.js";
 export * from "./workspace-memory.js";
 

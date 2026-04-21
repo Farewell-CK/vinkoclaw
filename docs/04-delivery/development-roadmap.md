@@ -1,5 +1,12 @@
 # Development Roadmap
 
+当前文档保留“原型交付阶段”的开发记录。
+
+如果要看从 `0.0.1` 走向“个人创业者随身携带的 AI 执行团队”的产品路线，请优先参考：
+
+- `docs/01-product/opc-ai-team-roadmap-v0.1.0.md`
+- `docs/01-product/opc-ai-team-roadmap-v0.2.0.md`
+
 ## Phase 0: Running MVP
 
 目标：先做出可运行主链。
@@ -47,12 +54,11 @@
 
 ## This Week Execution Priority
 
-1. 已完成：vLLM + Qwen 3.5 (FP8) 接入与多模态/thinking 验证
-2. 已完成：Developer 工具执行链（tool_runs + 风险审批 + dashboard）
-3. 已完成：opencode + `zhipuai/glm-5` 接入与错误事件 fail-fast 处理
-4. 已完成：渠道可观测性（`/api/channels/status` + 控制台 readiness 面板）
-5. 进行中：飞书真实群联调（多角色群内协同）
-6. 待完成：项目说明文档与功能讲解视频定稿
+1. 已完成：CEO 项目面板（目标 / 阶段 / 阻塞 / 下一步 / 团队 skill 就绪度）
+2. 已完成：skill marketplace 生命周期（搜索 / 接入 / 安装 / 验证 / 推荐）
+3. 已完成：协作恢复闭环（`await_user -> resume -> deliver`）
+4. 进行中：Founder delivery loop 端到端冒烟验证
+5. 待完成：workflow 快捷入口与更强的结果验收
 
 ## Next Sprint (Tooling)
 

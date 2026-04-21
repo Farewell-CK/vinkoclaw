@@ -14,9 +14,18 @@ import {
   TelemetryCollector
 } from "@vinko/agent-runtime";
 import { buildWorkDir } from "@vinko/agent-runtime/tool-executor";
-import { FeishuClient, buildTaskCompletedCard, buildTaskFailedCard, buildTaskPausedCard, buildLightReviewQueuedCard, buildLightIterationQueuedCard, buildEscalationCard } from "@vinko/feishu-gateway";
+import {
+  FeishuClient,
+  buildTaskCompletedCard,
+  buildTaskFailedCard,
+  buildTaskPausedCard,
+  buildLightReviewQueuedCard,
+  buildLightIterationQueuedCard,
+  buildEscalationCard
+} from "@vinko/feishu-gateway";
 import { WorkspaceKnowledgeBase } from "@vinko/knowledge-base";
 import {
+  buildTaskWorkflowBlueprintMetadata,
   buildToolCommand,
   buildWorkflowStatusSummary,
   createLogger,
@@ -48,6 +57,7 @@ import {
   syncSessionProjectMemoryFromTask,
   AgentCollaborationService,
   VinkoStore,
+  getWorkflowBlueprint,
   type GoalRunRecord,
   type GoalRunResult,
   type ReflectionNote,
@@ -680,12 +690,45 @@ function buildVerifierOnlyContract(task: TaskRecord): string {
   ].join("\n");
 }
 
+function buildWorkflowContract(task: TaskRecord): string {
+  const metadata = task.metadata as {
+    workflowLabel?: unknown;
+    workflowSuccessCriteria?: unknown;
+    workflowCompletionSignal?: unknown;
+  };
+  const workflowLabel = typeof metadata.workflowLabel === "string" ? metadata.workflowLabel.trim() : "";
+  const successCriteria = Array.isArray(metadata.workflowSuccessCriteria)
+    ? metadata.workflowSuccessCriteria
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+        .slice(0, 6)
+    : [];
+  const completionSignal =
+    typeof metadata.workflowCompletionSignal === "string" ? metadata.workflowCompletionSignal.trim() : "";
+  if (!workflowLabel && successCriteria.length === 0 && !completionSignal) {
+    return "";
+  }
+  const lines: string[] = ["工作流交付契约:"];
+  if (workflowLabel) {
+    lines.push(`- 当前工作流：${workflowLabel}`);
+  }
+  for (const criterion of successCriteria) {
+    lines.push(`- 成功标准：${criterion}`);
+  }
+  if (completionSignal) {
+    lines.push(`- 完成信号：${completionSignal}`);
+  }
+  return lines.join("\n");
+}
+
 export function buildRoleAwareInstruction(task: TaskRecord, skillIds: string[] = []): string {
   const deliverableInstruction = injectDeliverableStructure(task).trim();
+  const workflowContract = buildWorkflowContract(task).trim();
   const roleContract = buildRoleExecutionContract(task).trim();
   const skillContract = buildSkillExecutionContract(task, skillIds).trim();
   const verifierContract = buildVerifierOnlyContract(task).trim();
-  const contracts = [roleContract, skillContract, verifierContract].filter(Boolean);
+  const contracts = [workflowContract, roleContract, skillContract, verifierContract].filter(Boolean);
   if (contracts.length === 0) {
     return deliverableInstruction;
   }
@@ -3234,9 +3277,13 @@ function resolveFounderBuildRole(text: string): RoleId {
   return "engineering";
 }
 
+function isGeneralDeliveryWorkflow(metadata: Record<string, unknown>): boolean {
+  return metadata.founderWorkflowKind === "founder_delivery" || metadata.deliveryWorkflowKind === "general_delivery";
+}
+
 function shouldFounderWorkflowBypassNeedsInput(task: TaskRecord): boolean {
   const metadata = task.metadata as Record<string, unknown>;
-  if (metadata.founderWorkflowKind !== "founder_delivery") {
+  if (!isGeneralDeliveryWorkflow(metadata)) {
     return false;
   }
   const stage = normalizeFounderWorkflowStage(metadata.founderWorkflowStage);
@@ -3250,11 +3297,14 @@ export function resolveFounderWorkflowNextSpec(task: TaskRecord): {
   instruction: string;
   deliverableMode: "artifact_required";
   deliverableSections: string[];
+  workflowLabel?: string | undefined;
+  successCriteria?: string[] | undefined;
+  completionSignal?: string | undefined;
   verifierOnly: boolean;
   stepIndex: number;
 } | undefined {
   const metadata = task.metadata as Record<string, unknown>;
-  if (metadata.founderWorkflowKind !== "founder_delivery" || task.status !== "completed") {
+  if (!isGeneralDeliveryWorkflow(metadata) || task.status !== "completed") {
     return undefined;
   }
   const stage = normalizeFounderWorkflowStage(metadata.founderWorkflowStage);
@@ -3270,15 +3320,14 @@ export function resolveFounderWorkflowNextSpec(task: TaskRecord): {
   const artifacts = collectTaskArtifactFiles(task).slice(0, 4);
   const artifactSection = artifacts.length > 0 ? `\n相关产物：\n- ${artifacts.join("\n- ")}` : "";
   const titleSource = shortenFounderText(originalInstruction, 48) || shortenFounderText(task.title, 48);
-
   if (stage === "prd") {
     const roleId = resolveFounderBuildRole(originalInstruction);
     return {
       nextStage: "implementation",
       roleId,
-      title: `Founder Delivery / Build: ${titleSource}`,
+      title: `Delivery Workflow / Build: ${titleSource}`,
       instruction: [
-        "你正在执行 Founder Delivery Loop 的实现阶段。",
+        "你正在执行通用交付工作流的实现阶段。",
         "请基于以下原始目标和上一阶段产物，直接在 workspace 中完成最小可用实现，并产出真实变更文件。",
         "如果缺少技术细节，请使用合理默认假设继续推进，不要因为技术栈、认证方案、UI 组件库未明确而暂停等待用户输入。",
         "默认假设优先级：React + TypeScript + Vite；认证先用本地 mock / 假登录流程占位，并在交付中明确记录这些假设与后续替换点。",
@@ -3292,6 +3341,13 @@ export function resolveFounderWorkflowNextSpec(task: TaskRecord): {
         .join("\n"),
       deliverableMode: "artifact_required",
       deliverableSections: ["变更文件", "实现说明", "启动命令", "验证结果", "剩余风险"],
+      workflowLabel: "Delivery Workflow / Build",
+      successCriteria: [
+        "存在真实代码或配置改动",
+        "说明启动或验证方式",
+        "记录默认假设与剩余风险"
+      ],
+      completionSignal: "实现交付可进入 QA 验证",
       verifierOnly: false,
       stepIndex: 2
     };
@@ -3301,9 +3357,9 @@ export function resolveFounderWorkflowNextSpec(task: TaskRecord): {
     return {
       nextStage: "qa",
       roleId: "qa",
-      title: `Founder Delivery / QA: ${titleSource}`,
+      title: `Delivery Workflow / QA: ${titleSource}`,
       instruction: [
-        "你正在执行 Founder Delivery Loop 的验证阶段。",
+        "你正在执行通用交付工作流的验证阶段。",
         "请基于以下原始目标与实现交付，输出测试步骤、通过标准、失败场景和最终验证结论。",
         "",
         `原始目标：${originalInstruction}`,
@@ -3315,6 +3371,13 @@ export function resolveFounderWorkflowNextSpec(task: TaskRecord): {
         .join("\n"),
       deliverableMode: "artifact_required",
       deliverableSections: ["测试步骤", "通过标准", "失败场景", "验证结论", "待修复项"],
+      workflowLabel: "Delivery Workflow / QA",
+      successCriteria: [
+        "测试步骤可复验",
+        "通过标准明确",
+        "验证结论可信且不掩盖问题"
+      ],
+      completionSignal: "QA 结论可供创始人决策是否继续发布",
       verifierOnly: true,
       stepIndex: 3
     };
@@ -3324,9 +3387,9 @@ export function resolveFounderWorkflowNextSpec(task: TaskRecord): {
     return {
       nextStage: "recap",
       roleId: "operations",
-      title: `Founder Delivery / Recap: ${titleSource}`,
+      title: `Delivery Workflow / Recap: ${titleSource}`,
       instruction: [
-        "你正在执行 Founder Delivery Loop 的 recap 阶段。",
+        "你正在执行通用交付工作流的 recap 阶段。",
         "请把本次交付过程沉淀成创始人可直接阅读的 recap，说明完成事项、关键进展、阻塞、下一步和待决策项。",
         "",
         `原始目标：${originalInstruction}`,
@@ -3338,6 +3401,13 @@ export function resolveFounderWorkflowNextSpec(task: TaskRecord): {
         .join("\n"),
       deliverableMode: "artifact_required",
       deliverableSections: ["阶段结论", "已完成事项", "关键进展", "阻塞问题", "下一步", "待决策项"],
+      workflowLabel: "Delivery Workflow / Recap",
+      successCriteria: [
+        "交付结论清晰",
+        "阻塞与待决策项明确",
+        "下一步可直接执行"
+      ],
+      completionSignal: "创始人可直接消费 recap 并推进下一轮动作",
       verifierOnly: false,
       stepIndex: 4
     };
@@ -3348,7 +3418,7 @@ export function resolveFounderWorkflowNextSpec(task: TaskRecord): {
 
 function syncFounderWorkflowFailure(task: TaskRecord): void {
   const metadata = task.metadata as Record<string, unknown>;
-  if (metadata.founderWorkflowKind !== "founder_delivery") {
+  if (!isGeneralDeliveryWorkflow(metadata)) {
     return;
   }
   const stage = normalizeFounderWorkflowStage(metadata.founderWorkflowStage) ?? "prd";
@@ -3383,7 +3453,7 @@ function syncFounderWorkflowFailure(task: TaskRecord): void {
       actorType: "system",
       actorId: "task-runner",
       messageType: "event",
-      content: `Founder Delivery Loop 在 ${stage} 阶段受阻：${task.title}`,
+      content: `Delivery Workflow 在 ${stage} 阶段受阻：${task.title}`,
       metadata: {
         type: "founder_workflow_blocked",
         taskId: task.id,
@@ -3400,7 +3470,7 @@ function syncFounderWorkflowFailure(task: TaskRecord): void {
 
 function syncFounderWorkflowProgress(task: TaskRecord): void {
   const metadata = task.metadata as Record<string, unknown>;
-  if (metadata.founderWorkflowKind !== "founder_delivery" || task.status !== "completed") {
+  if (!isGeneralDeliveryWorkflow(metadata) || task.status !== "completed") {
     return;
   }
   const stage = normalizeFounderWorkflowStage(metadata.founderWorkflowStage);
@@ -3453,7 +3523,7 @@ function syncFounderWorkflowProgress(task: TaskRecord): void {
         actorType: "system",
         actorId: "task-runner",
         messageType: "event",
-        content: `Founder Delivery Loop 已完成：${task.title}`,
+        content: `Delivery Workflow 已完成：${task.title}`,
         metadata: {
           type: "founder_workflow_completed",
           taskId: task.id,
@@ -3500,8 +3570,9 @@ function syncFounderWorkflowProgress(task: TaskRecord): void {
     priority: Math.max(80, task.priority - 1),
     requestedBy: task.requestedBy,
     chatId: task.chatId,
-    metadata: {
+      metadata: {
       founderWorkflowKind: "founder_delivery",
+      deliveryWorkflowKind: "general_delivery",
       founderWorkflowId: workflowId,
       founderWorkflowRootTaskId: rootTask.id,
       founderWorkflowStage: nextSpec.nextStage,
@@ -3509,10 +3580,18 @@ function syncFounderWorkflowProgress(task: TaskRecord): void {
       founderWorkflowStepTotal: 4,
       founderWorkflowOriginalInstruction: originalInstruction,
       founderWorkflowPreviousTaskId: task.id,
-      routeTemplateId: "tpl-founder-delivery-loop",
-      routeTemplateName: "Founder Delivery Loop",
+      ...buildTaskWorkflowBlueprintMetadata({
+        templateId: "tpl-founder-delivery-loop",
+        taskRoleId: nextSpec.roleId,
+        fallbackTemplateName: "Delivery Workflow"
+      }),
       deliverableMode: nextSpec.deliverableMode,
       deliverableSections: nextSpec.deliverableSections,
+      ...(typeof nextSpec.workflowLabel === "string" ? { workflowLabel: nextSpec.workflowLabel } : {}),
+      ...(Array.isArray(nextSpec.successCriteria) ? { workflowSuccessCriteria: nextSpec.successCriteria } : {}),
+      ...(typeof nextSpec.completionSignal === "string"
+        ? { workflowCompletionSignal: nextSpec.completionSignal }
+        : {}),
       verifierOnly: nextSpec.verifierOnly,
       originalInstruction,
       orchestrationMode: "main_agent",
@@ -3530,7 +3609,7 @@ function syncFounderWorkflowProgress(task: TaskRecord): void {
       actorType: "system",
       actorId: "task-runner",
       messageType: "event",
-      content: `Founder Delivery Loop 已推进到 ${nextSpec.nextStage} 阶段：${child.title}`,
+      content: `Delivery Workflow 已推进到 ${nextSpec.nextStage} 阶段：${child.title}`,
       metadata: {
         type: "founder_workflow_advanced",
         taskId: task.id,
@@ -4036,11 +4115,23 @@ function resolveDeployCredentialSpec(target: string): { providerId: string; keys
 }
 
 async function notifyGoalRunProgress(run: GoalRunRecord, message: string): Promise<void> {
+  const currentTask = run.currentTaskId ? store.getTask(run.currentTaskId) : undefined;
+  const latestHandoff = store.getLatestGoalRunHandoff(run.id);
+  const projectMemory =
+    run.sessionId && typeof store.getSession === "function"
+      ? (store.getSession(run.sessionId)?.metadata?.projectMemory as Record<string, unknown> | undefined)
+      : undefined;
   await notifyGoalRunProgressSafely({
     run,
     message,
     notifyFeishu,
-    audit: store
+    notifyFeishuCard,
+    audit: store,
+    artifacts: {
+      currentTask,
+      latestHandoff,
+      projectMemory
+    }
   });
 }
 

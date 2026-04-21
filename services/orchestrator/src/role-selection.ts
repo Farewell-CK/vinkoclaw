@@ -5,8 +5,8 @@ function includesAny(text: string, keywords: readonly string[]): boolean {
   return keywords.some((keyword) => text.includes(keyword));
 }
 
-const PRODUCT_KEYWORDS = ["产品", "需求", "prd", "pm"] as const;
-const PRODUCT_DOCUMENT_KEYWORDS = ["需求文档", "产品文档", "roadmap", "里程碑", "验收标准", "prd"] as const;
+const PRODUCT_KEYWORDS = ["产品", "需求", "prd", "pm", "方案", "报价", "项目", "外包", "交付", "闭环"] as const;
+const PRODUCT_DOCUMENT_KEYWORDS = ["需求文档", "产品文档", "roadmap", "里程碑", "验收标准", "prd", "报价单"] as const;
 const UIUX_KEYWORDS = ["ui", "ux", "视觉", "交互", "原型", "wireframe", "prototype"] as const;
 const FRONTEND_KEYWORDS = [
   "前端",
