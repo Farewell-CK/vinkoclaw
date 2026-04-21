@@ -251,6 +251,73 @@ function buildGoalRunTrace(patch: Partial<Record<string, unknown>> = {}) {
 }
 
 describe("project routes", () => {
+  it("returns a solo founder operating-system snapshot", async () => {
+    const store = {
+      listSessions: vi.fn(() => [
+        buildSession({
+          metadata: {
+            projectMemory: {
+              currentGoal: "增长项目",
+              currentStage: "implementation",
+              latestSummary: "首页开发中",
+              latestArtifacts: ["apps/site/index.html"],
+              updatedAt: "2026-04-20T01:00:00.000Z",
+              updatedBy: "frontend"
+            }
+          }
+        })
+      ]),
+      listTasks: vi.fn(() => [buildTask()]),
+      resolveSkillsForRole: vi.fn(() => [buildSkillBinding()]),
+      getWorkspaceMemory: vi.fn(() => ({
+        userPreferences: {
+          preferredLanguage: "zh",
+          preferredTechStack: [],
+          communicationStyle: "concise"
+        },
+        keyDecisions: [],
+        projectContext: {
+          currentGoals: ["增长项目"],
+          activeProjects: [
+            {
+              id: "project:增长项目",
+              name: "增长项目",
+              stage: "implementation",
+              status: "active",
+              lastUpdate: "2026-04-20T01:10:00.000Z",
+              latestSummary: "首页开发中"
+            }
+          ]
+        },
+        updatedAt: "2026-04-20T01:10:00.000Z"
+      })),
+      listCrmLeads: vi.fn(() => [buildLead()]),
+      listCrmCadences: vi.fn(() => [buildCadence({ nextRunAt: "2026-04-19T01:00:00.000Z" })]),
+      listCrmContacts: vi.fn(() => [buildContact()]),
+      listGoalRuns: vi.fn(() => [buildGoalRun()]),
+      listGoalRunHandoffArtifacts: vi.fn(() => [buildGoalRunHandoff()]),
+      listGoalRunTraces: vi.fn(() => [buildGoalRunTrace()]),
+      listToolRunsByTask: vi.fn(() => []),
+      listTaskChildren: vi.fn(() => [])
+    } as unknown as VinkoStore;
+    const app = createTaskRoutesApp(store);
+
+    await withServer(app, async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/operating-system`);
+      expect(response.status).toBe(200);
+      const payload = (await response.json()) as Record<string, unknown>;
+      expect(payload.mode).toBe("solo_founder_os");
+      expect(payload.health).toBe("attention_required");
+      expect((payload.summary as Record<string, unknown>).totalProjects).toBe(1);
+      expect((payload.summary as Record<string, unknown>).recurringNextAction).toBe("run_due_cadences");
+      expect(payload.focusProjects).toBeInstanceOf(Array);
+      expect(payload.attentionQueue).toBeInstanceOf(Array);
+      expect(payload.nextActions).toBeInstanceOf(Array);
+      expect((payload.recurring as Record<string, unknown>).health).toBe("attention_required");
+      expect(((payload.crm as Record<string, unknown>).summary as Record<string, unknown>).activeLeads).toBe(1);
+    });
+  });
+
   it("lists active and archived projects", async () => {
     const sessions = [
       buildSession({

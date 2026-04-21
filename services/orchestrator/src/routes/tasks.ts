@@ -13,6 +13,7 @@ import {
 } from "@vinko/shared";
 import type { RoleId, TaskAttachment, TaskMetadata, TaskRecord, VinkoStore } from "@vinko/shared";
 import { enrichTaskRecord } from "./response-utils.js";
+import { buildRecurringStatusSnapshot } from "./recurring.js";
 
 type InboundResult = {
   message: string;
@@ -151,6 +152,54 @@ export function registerTaskRoutes(app: express.Express, deps: TaskRoutesDeps): 
       generatedAt: snapshot.generatedAt,
       summary: snapshot.summary,
       attentionQueue: listProjectBoardAttentionItems(snapshot, { level })
+    });
+  });
+
+  app.get("/api/operating-system", (_request, response) => {
+    const snapshot = buildProjectBoardSnapshot(buildProjectBoardInput());
+    const recurring = buildRecurringStatusSnapshot(store);
+    const projects = listProjectBoardProjects(snapshot, { includeArchived: true });
+    const attentionQueue = listProjectBoardAttentionItems(snapshot);
+    const criticalAttention = attentionQueue.filter((item) => item.level === "critical").length;
+    const watchAttention = attentionQueue.filter((item) => item.level === "watch").length;
+    const dueCadences = Number(recurring.summary.dueCadences ?? 0);
+    const health = criticalAttention > 0 || dueCadences > 0 ? "attention_required" : watchAttention > 0 ? "watch" : "healthy";
+    const nextActions = [
+      ...attentionQueue.map((item) => item.nextAction),
+      ...snapshot.nextActions,
+      recurring.nextAction
+    ].filter((item, index, items) => item && items.indexOf(item) === index);
+
+    response.json({
+      generatedAt: snapshot.generatedAt,
+      mode: "solo_founder_os",
+      health,
+      summary: {
+        ...snapshot.summary,
+        totalProjects: projects.length,
+        criticalAttention,
+        watchAttention,
+        recurringHealth: recurring.health,
+        recurringNextAction: recurring.nextAction,
+        recurringInFlightRuns: Number(recurring.summary.inFlightRuns ?? 0)
+      },
+      focusProjects: projects
+        .slice()
+        .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+        .slice(0, 6),
+      attentionQueue: attentionQueue.slice(0, 12),
+      nextActions: nextActions.slice(0, 12),
+      latestArtifacts: snapshot.latestArtifacts.slice(0, 12),
+      recurring: {
+        health: recurring.health,
+        nextAction: recurring.nextAction,
+        summary: recurring.summary
+      },
+      crm: {
+        summary: recurring.crm.summary,
+        overdueCadences: recurring.crm.overdueCadences.slice(0, 8),
+        activeLeads: recurring.crm.activeLeads.slice(0, 8)
+      }
     });
   });
 
