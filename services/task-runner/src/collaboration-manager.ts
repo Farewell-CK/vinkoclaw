@@ -1,10 +1,19 @@
-import { FeishuClient } from "@vinko/feishu-gateway";
+import {
+  FeishuClient,
+  buildCollaborationAwaitUserCard,
+  buildCollaborationBlockedCard,
+  buildCollaborationCompletedCard,
+  buildCollaborationPartialCard,
+  buildCollaborationStartedCard
+} from "@vinko/feishu-gateway";
 import { LocalModelClient } from "@vinko/agent-runtime";
 import {
   AgentCollaborationService,
   ROLE_IDS,
+  applyLowRiskEvolutionProposals,
   buildWorkflowStatusSummary,
   createLogger,
+  getEvolutionState,
   type AgentCollaboration,
   type AgentInstance,
   type CollaborationConfig,
@@ -16,10 +25,15 @@ import {
   type VinkoStore,
   collectProjectMemoryArtifactsFromTask,
   createOrchestrationState,
+  extractEvolutionSignalFromAudit,
+  extractEvolutionSignalsFromTask,
   mergeOrchestrationState,
   normalizeOrchestrationState,
+  recordEvolutionSignals,
   syncSessionProjectMemoryFromTask
 } from "@vinko/shared";
+import { notifyEvolutionAppliedChanges } from "./evolution-notifier.js";
+import { notifySessionWorkbench } from "./session-workbench-notifier.js";
 
 const logger = createLogger("collaboration-manager");
 const COLLAB_FEISHU_INTERMEDIATE_MIN_INTERVAL_MS_RAW = Number(
@@ -96,6 +110,25 @@ function formatTaskStatusLabel(status: TaskRecord["status"]): string {
       return "受阻";
     default:
       return status;
+  }
+}
+
+function buildCollaborationCardTitle(collaborationId: string): string {
+  return `团队协作 · ${collaborationId.slice(0, 8)}`;
+}
+
+function formatCollaborationStatusLabel(value: "active" | "await_user" | "partial" | "completed" | "blocked"): string {
+  switch (value) {
+    case "await_user":
+      return "等待补充";
+    case "partial":
+      return "部分交付";
+    case "completed":
+      return "已完成";
+    case "blocked":
+      return "已阻塞";
+    default:
+      return "进行中";
   }
 }
 
@@ -378,6 +411,36 @@ function shouldPushIntermediateNow(key: string): boolean {
   return true;
 }
 
+async function notifyCollaborationEvolutionChanges(input: {
+  store: VinkoStore;
+  feishuClient: FeishuClient | undefined;
+  chatId: string | undefined;
+  beforeState: ReturnType<typeof getEvolutionState>;
+}): Promise<void> {
+  await notifyEvolutionAppliedChanges({
+    store: input.store,
+    feishuClient: input.feishuClient,
+    chatId: input.chatId,
+    beforeState: input.beforeState,
+    afterState: getEvolutionState(input.store)
+  });
+}
+
+async function notifyCollaborationWorkbench(input: {
+  store: VinkoStore;
+  feishuClient: FeishuClient | undefined;
+  collaboration: AgentCollaboration;
+  reason: string;
+}): Promise<void> {
+  await notifySessionWorkbench({
+    store: input.store,
+    feishuClient: input.feishuClient,
+    sessionId: input.collaboration.sessionId,
+    chatId: input.collaboration.chatId,
+    reason: input.reason
+  });
+}
+
 // ============ Collaboration Manager ============
 
 type CollaborationManagerDeps = {
@@ -399,6 +462,10 @@ export class CollaborationManager {
   private getCollaborationConfig(): CollaborationConfig {
     const config = this.deps.store.getRuntimeConfig().collaboration;
     return config.defaultConfig;
+  }
+
+  private getEvolutionCollaborationPolicy() {
+    return this.deps.store.getRuntimeConfig().evolution.collaboration;
   }
 
   private syncParentTaskCollaborationState(
@@ -475,13 +542,51 @@ export class CollaborationManager {
         supplementCount: supplements.length
       }
     });
+    const resumeAudit = this.deps.store.appendAuditEvent({
+      category: "collaboration",
+      entityType: "task",
+      entityId: parentTask.id,
+      message: "Collaboration resumed after user input",
+      payload: {
+        eventType: "collaboration_resumed",
+        reason: "resumed",
+        parentTaskId: parentTask.id,
+        supplementCount: supplements.length
+      }
+    });
+    const resumeSignal = extractEvolutionSignalFromAudit(resumeAudit);
+    if (resumeSignal) {
+      const beforeEvolution = structuredClone(getEvolutionState(this.deps.store));
+      recordEvolutionSignals(this.deps.store, [resumeSignal]);
+      applyLowRiskEvolutionProposals(this.deps.store);
+      await notifyCollaborationEvolutionChanges({
+        store: this.deps.store,
+        feishuClient: this.deps.feishuClient,
+        chatId: collaboration.chatId,
+        beforeState: beforeEvolution
+      });
+    }
 
     if (collaboration.chatId && this.deps.feishuClient && isLikelyFeishuChatId(collaboration.chatId)) {
       try {
-        await this.deps.feishuClient.sendTextToChat(
+        const workflowSummary = buildWorkflowStatusSummary(parentTask, { includeGoal: true });
+        await this.deps.feishuClient.sendCardToChat(
           collaboration.chatId,
-          `📥 已收到补充信息，正在继续收敛协作并更新结果（${collaboration.id.slice(0, 8)}）。`
+          buildCollaborationStartedCard({
+            title: buildCollaborationCardTitle(collaboration.id),
+            statusLabel: formatCollaborationStatusLabel("active"),
+            summary: "已收到你的补充信息，团队正在继续收敛结果。",
+            participants: collaboration.participants.map((roleId) => ROLE_LABELS[roleId] ?? roleId),
+            workflowSummary,
+            nextActions: ["继续汇总已有产出并补齐最终结论"]
+          })
         );
+        await notifyCollaborationWorkbench({
+          store: this.deps.store,
+          feishuClient: this.deps.feishuClient,
+          collaboration,
+          reason: "collaboration_resumed"
+        });
       } catch (error) {
         logger.error("Failed to notify collaboration resume to Feishu", error, {
           chatId: collaboration.chatId,
@@ -490,9 +595,10 @@ export class CollaborationManager {
       }
     }
 
+    const policy = this.getEvolutionCollaborationPolicy();
     await this.performFinalAggregation(collaboration.id, {
       shouldAggregate: true,
-      mode: "deliver",
+      mode: policy.manualResumeAggregationMode,
       reason: "manual_trigger"
     });
     return true;
@@ -728,17 +834,23 @@ export class CollaborationManager {
     if (collaboration.chatId && this.deps.feishuClient && isLikelyFeishuChatId(collaboration.chatId)) {
       try {
         const workflowSummary = buildWorkflowStatusSummary(parentTask, { includeGoal: true });
-        await this.deps.feishuClient.sendTextToChat(
+        await this.deps.feishuClient.sendCardToChat(
           collaboration.chatId,
-          [
-            `🤝 已启动团队协作（${collaboration.id.slice(0, 8)}）`,
-            `参与角色：${collaboration.participants.map((roleId) => ROLE_LABELS[roleId] ?? roleId).join("、")}`,
+          buildCollaborationStartedCard({
+            title: buildCollaborationCardTitle(collaboration.id),
+            statusLabel: formatCollaborationStatusLabel("active"),
+            summary: "已启动多角色协作，系统会分工执行、自动汇总，并在需要你决策时暂停。",
+            participants: collaboration.participants.map((roleId) => ROLE_LABELS[roleId] ?? roleId),
             workflowSummary,
-            "我会按里程碑同步结果，不展示内部思考过程。"
-          ]
-            .filter(Boolean)
-            .join("\n")
+            nextActions: ["等待各角色执行并收敛汇总"]
+          })
         );
+        await notifyCollaborationWorkbench({
+          store: this.deps.store,
+          feishuClient: this.deps.feishuClient,
+          collaboration,
+          reason: "collaboration_started"
+        });
       } catch (error) {
         logger.error("Failed to notify collaboration start to Feishu", error, {
           chatId: collaboration.chatId,
@@ -1028,6 +1140,16 @@ export class CollaborationManager {
           improvements: []
         };
         this.deps.store.completeTask(parentTask.id, task.result as TaskResult, reflection);
+        const completedParent = this.deps.store.getTask(parentTask.id) ?? parentTask;
+        const beforeEvolution = structuredClone(getEvolutionState(this.deps.store));
+        recordEvolutionSignals(this.deps.store, extractEvolutionSignalsFromTask(completedParent));
+        applyLowRiskEvolutionProposals(this.deps.store);
+        await notifyCollaborationEvolutionChanges({
+          store: this.deps.store,
+          feishuClient: this.deps.feishuClient,
+          chatId: collaboration.chatId,
+          beforeState: beforeEvolution
+        });
         this.syncParentTaskCollaborationState(parentTask.id, {
           phase: aggregationMode === "await_user" ? "await_user" : "completed",
           mode: aggregationMode,
@@ -1082,6 +1204,16 @@ export class CollaborationManager {
       } else {
         this.collaborationService.failCollaboration(collaboration.id);
         this.deps.store.failTask(parentTask.id, "Aggregation task completed without result");
+        const failedParent = this.deps.store.getTask(parentTask.id) ?? parentTask;
+        const beforeEvolution = structuredClone(getEvolutionState(this.deps.store));
+        recordEvolutionSignals(this.deps.store, extractEvolutionSignalsFromTask(failedParent));
+        applyLowRiskEvolutionProposals(this.deps.store);
+        await notifyCollaborationEvolutionChanges({
+          store: this.deps.store,
+          feishuClient: this.deps.feishuClient,
+          chatId: collaboration.chatId,
+          beforeState: beforeEvolution
+        });
         this.syncParentTaskCollaborationState(parentTask.id, {
           phase: "converge",
           mode: "blocked",
@@ -1108,33 +1240,63 @@ export class CollaborationManager {
     // 推送最终结果到飞书
     if (collaboration.chatId && this.deps.feishuClient && isLikelyFeishuChatId(collaboration.chatId)) {
       const summary = compactProgressText(task.result?.summary ?? "", 160) || "已产出最终协作结果。";
-      const head =
-        aggregationMode === "await_user"
-          ? `📝 协作等待你补充信息（${collaboration.id.slice(0, 8)}）`
-          : aggregationMode === "partial"
-            ? `⚠️ 协作已部分收敛（${collaboration.id.slice(0, 8)}）`
-            : aggregationMode === "blocked"
-              ? `⛔ 协作已阻塞（${collaboration.id.slice(0, 8)}）`
-              : `✅ 协作已完成（${collaboration.id.slice(0, 8)}）`;
-      const tail =
-        aggregationMode === "await_user"
-          ? `请直接回复以下补充项，我会继续推进：${
-              awaitUserPrompts.length > 0 ? `\n- ${awaitUserPrompts.join("\n- ")}` : "\n- 请查看结果中的待补充项"
-            }`
-          : aggregationMode === "partial"
-            ? "当前已输出可用部分结果，剩余阻塞项已在结论中说明。"
-            : aggregationMode === "blocked"
-            ? "当前无法继续自动推进，阻塞原因已写入结论。"
-              : "完整交付可在控制台查看。";
-      const message = [head, `结论：${summary}`, tail].join("\n");
       const workflowTask = parentTask ?? task;
       const workflowSummary = buildWorkflowStatusSummary(workflowTask, { includeGoal: true, includeArtifacts: true });
+      const nextActions =
+        aggregationMode === "await_user"
+          ? awaitUserPrompts.length > 0
+            ? awaitUserPrompts
+            : ["请补充结果中提到的待确认信息"]
+          : aggregationMode === "partial"
+            ? ["查看已交付部分并决定是否继续补齐剩余阻塞项"]
+            : aggregationMode === "blocked"
+              ? ["检查阻塞原因并补充关键上下文后重试"]
+              : ["查看完整交付，并下发下一步目标"];
+      const card =
+        aggregationMode === "await_user"
+          ? buildCollaborationAwaitUserCard({
+              title: buildCollaborationCardTitle(collaboration.id),
+              statusLabel: formatCollaborationStatusLabel("await_user"),
+              summary,
+              participants: collaboration.participants.map((roleId) => ROLE_LABELS[roleId] ?? roleId),
+              workflowSummary,
+              nextActions
+            })
+          : aggregationMode === "partial"
+            ? buildCollaborationPartialCard({
+                title: buildCollaborationCardTitle(collaboration.id),
+                statusLabel: formatCollaborationStatusLabel("partial"),
+                summary,
+                participants: collaboration.participants.map((roleId) => ROLE_LABELS[roleId] ?? roleId),
+                workflowSummary,
+                nextActions
+              })
+            : aggregationMode === "blocked"
+              ? buildCollaborationBlockedCard({
+                  title: buildCollaborationCardTitle(collaboration.id),
+                  statusLabel: formatCollaborationStatusLabel("blocked"),
+                  summary,
+                  participants: collaboration.participants.map((roleId) => ROLE_LABELS[roleId] ?? roleId),
+                  workflowSummary,
+                  nextActions
+                })
+              : buildCollaborationCompletedCard({
+                  title: buildCollaborationCardTitle(collaboration.id),
+                  statusLabel: formatCollaborationStatusLabel("completed"),
+                  summary,
+                  participants: collaboration.participants.map((roleId) => ROLE_LABELS[roleId] ?? roleId),
+                  workflowSummary,
+                  nextActions
+                });
 
       try {
-        await this.deps.feishuClient.sendTextToChat(
-          collaboration.chatId,
-          [message, workflowSummary].filter(Boolean).join("\n\n")
-        );
+        await this.deps.feishuClient.sendCardToChat(collaboration.chatId, card);
+        await notifyCollaborationWorkbench({
+          store: this.deps.store,
+          feishuClient: this.deps.feishuClient,
+          collaboration,
+          reason: `collaboration_${aggregationMode}`
+        });
       } catch (error) {
         logger.error("Failed to send collaboration completion to Feishu", error, {
           chatId: collaboration.chatId,
@@ -1281,6 +1443,7 @@ export class CollaborationManager {
     collaboration: AgentCollaboration,
     manual = false
   ): AggregationDecision {
+    const policy = this.getEvolutionCollaborationPolicy();
     if (collaboration.currentPhase === "aggregation" || collaboration.currentPhase === "completed") {
       return {
         shouldAggregate: false,
@@ -1293,7 +1456,10 @@ export class CollaborationManager {
     if (manual) {
       return {
         shouldAggregate: true,
-        mode: progress.completedCount > 0 ? "partial" : "await_user",
+        mode:
+          policy.manualResumeAggregationMode === "partial" && progress.completedCount > 0
+            ? "partial"
+            : policy.manualResumeAggregationMode,
         reason: "manual_trigger"
       };
     }
@@ -1310,7 +1476,10 @@ export class CollaborationManager {
         }
         return {
           shouldAggregate: true,
-          mode: progress.completedCount > 0 ? "partial" : "blocked",
+          mode:
+            progress.completedCount >= policy.partialDeliveryMinCompletedRoles
+              ? "partial"
+              : policy.terminalFailureNoProgressMode,
           reason: "all_tasks_terminal_with_failures"
         };
       }
@@ -1321,7 +1490,10 @@ export class CollaborationManager {
     if (collaboration.currentPhase === "discussion" && discussionElapsed > collaboration.config.discussionTimeoutMs) {
       return {
         shouldAggregate: true,
-        mode: progress.completedCount > 0 ? "partial" : "await_user",
+        mode:
+          progress.completedCount >= policy.partialDeliveryMinCompletedRoles
+            ? "partial"
+            : policy.timeoutNoProgressMode,
         reason: "discussion_timeout"
       };
     }
@@ -1331,7 +1503,10 @@ export class CollaborationManager {
     if (totalElapsed > collaboration.config.aggregateTimeoutMs) {
       return {
         shouldAggregate: true,
-        mode: progress.completedCount > 0 ? "partial" : "await_user",
+        mode:
+          progress.completedCount >= policy.partialDeliveryMinCompletedRoles
+            ? "partial"
+            : policy.timeoutNoProgressMode,
         reason: "aggregate_timeout"
       };
     }
@@ -1401,6 +1576,39 @@ export class CollaborationManager {
         triggerReason: aggregateDecision.reason
       }
     });
+    if (aggregateDecision.mode === "await_user" || aggregateDecision.mode === "partial") {
+      const progress = this.getCollaborationProgress(collaboration);
+      const audit = this.deps.store.appendAuditEvent({
+        category: "collaboration",
+        entityType: "task",
+        entityId: collaboration.parentTaskId,
+        message:
+          aggregateDecision.mode === "await_user"
+            ? "Collaboration paused for user input"
+            : "Collaboration moved into partial delivery",
+        payload: {
+          eventType:
+            aggregateDecision.mode === "await_user" ? "collaboration_await_user" : "collaboration_partial_delivery",
+          reason: aggregateDecision.mode === "await_user" ? "await_user" : "partial_delivery",
+          parentTaskId: collaboration.parentTaskId,
+          triggerReason: aggregateDecision.reason,
+          completedCount: progress.completedCount,
+          failedCount: progress.failedCount
+        }
+      });
+      const signal = extractEvolutionSignalFromAudit(audit);
+      if (signal) {
+        const beforeEvolution = structuredClone(getEvolutionState(this.deps.store));
+        recordEvolutionSignals(this.deps.store, [signal]);
+        applyLowRiskEvolutionProposals(this.deps.store);
+        await notifyCollaborationEvolutionChanges({
+          store: this.deps.store,
+          feishuClient: this.deps.feishuClient,
+          chatId: collaboration.chatId,
+          beforeState: beforeEvolution
+        });
+      }
+    }
 
     // 收集所有阶段结果
     const fresh = this.deps.store.getAgentCollaboration(collaborationId) ?? collaboration;

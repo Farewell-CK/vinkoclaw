@@ -100,6 +100,13 @@ export interface RuntimeExecutionInput {
     communicationStyle?: "concise" | "detailed" | "default";
     activeProjects?: Array<{ name: string; stage: string; lastUpdate: string }>;
     keyDecisions?: Array<{ decision: string; rationale: string; timestamp: string }>;
+    founderProfile?: {
+      businessDomains?: string[];
+      targetUsers?: string[];
+      deliverablePreferences?: string[];
+      decisionStyle?: "action_first" | "evidence_first" | "balanced";
+      feedbackSignals?: Array<{ signal: string; note: string; taskId?: string; createdAt: string }>;
+    };
   };
 }
 
@@ -570,6 +577,13 @@ function buildLayeredSystemPrompt(input: {
     communicationStyle?: "concise" | "detailed" | "default";
     activeProjects?: Array<{ name: string; stage: string; lastUpdate: string }>;
     keyDecisions?: Array<{ decision: string; rationale: string; timestamp: string }>;
+    founderProfile?: {
+      businessDomains?: string[];
+      targetUsers?: string[];
+      deliverablePreferences?: string[];
+      decisionStyle?: "action_first" | "evidence_first" | "balanced";
+      feedbackSignals?: Array<{ signal: string; note: string; taskId?: string; createdAt: string }>;
+    };
   };
   knowledgeBlock?: string;
 }): string {
@@ -613,6 +627,31 @@ function buildLayeredSystemPrompt(input: {
               "Recent key decisions:",
               ...input.workspaceContext.keyDecisions.slice(0, 3).map((d) => `- ${d.decision}: ${d.rationale}`)
             ]
+          : []),
+        ...(input.workspaceContext.founderProfile
+          ? [
+              "Founder memory:",
+              ...(input.workspaceContext.founderProfile.businessDomains?.length
+                ? [`- Business domains: ${input.workspaceContext.founderProfile.businessDomains.join(", ")}`]
+                : []),
+              ...(input.workspaceContext.founderProfile.targetUsers?.length
+                ? [`- Target users: ${input.workspaceContext.founderProfile.targetUsers.join(", ")}`]
+                : []),
+              ...(input.workspaceContext.founderProfile.deliverablePreferences?.length
+                ? [`- Preferred deliverables: ${input.workspaceContext.founderProfile.deliverablePreferences.join(", ")}`]
+                : []),
+              input.workspaceContext.founderProfile.decisionStyle
+                ? `- Decision style: ${input.workspaceContext.founderProfile.decisionStyle}`
+                : "",
+              ...(input.workspaceContext.founderProfile.feedbackSignals?.length
+                ? [
+                    "Recent feedback:",
+                    ...input.workspaceContext.founderProfile.feedbackSignals
+                      .slice(-3)
+                      .map((signal) => `- ${signal.signal}: ${signal.note}`)
+                  ]
+                : [])
+            ].filter(Boolean)
           : [])
       ].join("\n")
     : "";

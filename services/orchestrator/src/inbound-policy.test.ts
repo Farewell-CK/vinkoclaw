@@ -3,6 +3,7 @@ import type { OperatorActionRecord } from "@vinko/shared";
 import {
   buildSmalltalkReply,
   isContinueSignal,
+  isNonActionableChatMessage,
   isOwnerLowRiskOperatorAction,
   isOwnerRequester,
   isSmalltalkMessage,
@@ -44,6 +45,12 @@ describe("inbound-policy", () => {
     expect(isContinueSignal("请继续")).toBe(true);
     expect(isContinueSignal("continue")).toBe(true);
     expect(isContinueSignal("继续，帮我配置搜索工具")).toBe(false);
+  });
+
+  it("detects non-actionable chat without turning feedback into keyword rules", () => {
+    expect(isNonActionableChatMessage("？")).toBe(true);
+    expect(isNonActionableChatMessage("...")).toBe(true);
+    expect(isNonActionableChatMessage("写一个 PRD")).toBe(false);
   });
 
   it("detects owner requester by feishu open id and owner alias", () => {
@@ -165,5 +172,20 @@ describe("inbound-policy", () => {
       })
     ).toBe(true);
     expect(shouldUseTeamCollaboration("请团队协作，前后端和测试一起输出实现方案。")).toBe(true);
+  });
+
+  it("supports evolution-driven collaboration conservatism and optional length-based fallback", () => {
+    expect(
+      shouldUseTeamCollaboration("请帮我开发一个跨端管理系统，并串联后台、前台、测试验证、交付验收、部署上线。")
+    ).toBe(false);
+
+    expect(
+      shouldUseTeamCollaboration("请帮我开发一个跨端管理系统，并串联后台、前台、测试验证、交付验收、部署上线。", {
+        evolution: {
+          requireExplicitTeamSignal: false,
+          collaborationMinLength: 24
+        }
+      })
+    ).toBe(true);
   });
 });

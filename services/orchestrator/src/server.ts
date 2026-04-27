@@ -9,6 +9,7 @@ import {
   buildTaskWorkflowBlueprintMetadata,
   buildGoalRunStatusMessage,
   buildWorkflowStatusSummary,
+  buildSessionWorkbenchSnapshotFromStore,
   getEmojiSelector,
   listRoles,
   listSkills,
@@ -17,8 +18,12 @@ import {
   getMarketplaceSkillDetail,
   getMarketplaceRecommendation,
   getSkillDefinition,
+  applyLowRiskEvolutionProposals,
+  extractEvolutionSignalFromAudit,
+  extractEvolutionSignalsFromTask,
   listToolProviderStatuses,
   loadEnv,
+  recordEvolutionSignals,
   renderPrometheusMetrics,
   normalizeToolExecPolicy,
   parseOperatorActionFromText,
@@ -62,6 +67,7 @@ import {
   FeishuWebSocketMonitor,
   parseFeishuEvent,
   buildNeedsClarificationCard,
+  buildSessionWorkbenchCard,
   buildTaskQueuedCard,
   buildApprovalResultCard,
   type FeishuConnectionMode,
@@ -82,9 +88,9 @@ import { registerRoutingTemplateRoutes } from "./routes/routing-templates.js";
 import { registerSkillsMarketplaceRoutes } from "./routes/skills-marketplace.js";
 import { summarizeLatencyMetrics } from "./routes/response-utils.js";
 import {
-  buildSmalltalkReply,
   resolveCollaborationEntryRole,
   isContinueSignal,
+  isNonActionableChatMessage,
   isOwnerLowRiskOperatorAction,
   isOwnerRequester,
   isSmalltalkMessage
@@ -104,20 +110,35 @@ import {
   mergeClarificationResponse,
   formatClarificationMessage
 } from "./intake-analyzer.js";
-import { classifyInboundIntent, analyzeCollaborationNeed } from "./intent-classifier.js";
+import { classifyInboundIntentDecision, analyzeCollaborationNeed } from "./intent-classifier.js";
+import { selectRoutingTemplateDecision } from "./routing-template-policy.js";
+import { appendInboundIntentAuditEvent, appendRouterV2AuditEvent, appendTemplateRoutingAuditEvent } from "./routing-audit.js";
 import { selectRoleFromText } from "./role-selection.js";
+import { resolveRouterPrimaryRole, routeInboundWithRouterV2 } from "./inbound-router-v2.js";
 import {
   formatAwaitingCollaborationMessage,
   resolveAwaitingCollaborationTaskForInbound,
   resumeAwaitingCollaborationTask
 } from "./inbound-collaboration.js";
 import {
+  buildConversationReplyWithModel,
+  classifyAmbiguousConversationWithModel,
+  isDirectConversationTurn
+} from "./inbound-conversation.js";
+import { initInboundRuntime, type InboundResult } from "./inbound-runtime.js";
+import { handleInboundResumeStage } from "./inbound-resume.js";
+import { resolveLatestInFlightGoalRunForInbound, requestsNewIndependentGoal } from "./inbound-resume.js";
+import {
   ExpiringTokenDeduper,
   parseFeishuCardDecisionPayload,
   validateFeishuCardDecision
 } from "./feishu-approval.js";
 import { buildGoalRunCardActionFeedback, parseGoalRunCardActionPayload } from "./goal-run-card-actions.js";
-
+import {
+  buildGoalRunStatusCard,
+  buildTaskStatusCard,
+  parseSessionWorkbenchCardActionPayload
+} from "./session-workbench-card-actions.js";
 const env = loadEnv();
 const store = VinkoStore.fromEnv(env);
 const telemetryDb = resolveDataPath(env, "telemetry.db");
@@ -132,6 +153,7 @@ const app = express();
 const controlCenterRoot = path.resolve(fileURLToPath(new URL("../../../apps/control-center/public", import.meta.url)));
 const productSelfcheckDir = path.resolve(fileURLToPath(new URL("../../../.run/product-selfcheck", import.meta.url)));
 const harnessReportDir = path.resolve(fileURLToPath(new URL("../../../.run/harness", import.meta.url)));
+store.setConfigEntry("self-check:harness-root-dir", harnessReportDir);
 const productSelfcheckLatestFile = path.join(productSelfcheckDir, "latest.json");
 const productSelfcheckHistoryFile = path.join(productSelfcheckDir, "history.jsonl");
 const productSelfcheckWatcherPidFile = path.join(productSelfcheckDir, "watch.pid");
@@ -403,6 +425,10 @@ function shouldResolveFeishuSenderNames(): boolean {
 
 function isLikelyFeishuOpenId(value: string): boolean {
   return /^ou_[a-z0-9]{8,}$/i.test(value.trim());
+}
+
+function isLikelyFeishuChatId(value: string): boolean {
+  return /^oc_[a-z0-9]{20,}$/i.test(value.trim());
 }
 
 function resolveApprovalRequesterOpenId(requestedBy?: string | undefined): string | undefined {
@@ -1327,12 +1353,6 @@ function parseSkillSelectionReply(
   return { selection, roleId };
 }
 
-function normalizeKeywords(values: string[]): string[] {
-  return values
-    .map((value) => value.trim().toLowerCase())
-    .filter(Boolean);
-}
-
 function renderTemplate(value: string, inputText: string): string {
   const trimmedInput = inputText.trim();
   const shortInput = shorten(trimmedInput.replace(/\s+/g, " "), 56);
@@ -1346,51 +1366,9 @@ function normalizeRoutingTemplateBody(
 ): Partial<CreateRoutingTemplateInput> | Partial<UpdateRoutingTemplateInput> {
   const normalized = { ...body };
   if (Array.isArray(body.triggerKeywords)) {
-    normalized.triggerKeywords = normalizeKeywords(body.triggerKeywords);
+    normalized.triggerKeywords = body.triggerKeywords.map((value) => value.trim().toLowerCase()).filter(Boolean);
   }
   return normalized;
-}
-
-function selectRoutingTemplate(text: string, templates: RoutingTemplate[]): RoutingTemplate | undefined {
-  const normalizedText = text.toLowerCase();
-  const ranked = templates
-    .filter((template) => template.enabled)
-    .map((template) => {
-      const keywords = normalizeKeywords(template.triggerKeywords);
-      if (keywords.length === 0) {
-        return undefined;
-      }
-      const matchedKeywords = keywords.filter((keyword) => normalizedText.includes(keyword));
-      const matched =
-        template.matchMode === "all"
-          ? matchedKeywords.length === keywords.length
-          : matchedKeywords.length > 0;
-      if (!matched) {
-        return undefined;
-      }
-      return {
-        template,
-        matchedCount: matchedKeywords.length,
-        longestKeywordLength: matchedKeywords.reduce((max, keyword) => Math.max(max, keyword.length), 0),
-        totalKeywordLength: matchedKeywords.reduce((sum, keyword) => sum + keyword.length, 0)
-      };
-    })
-    .filter((entry): entry is {
-      template: RoutingTemplate;
-      matchedCount: number;
-      longestKeywordLength: number;
-      totalKeywordLength: number;
-    } => Boolean(entry))
-    .sort((left, right) => {
-      if (right.matchedCount !== left.matchedCount) {
-        return right.matchedCount - left.matchedCount;
-      }
-      if (right.longestKeywordLength !== left.longestKeywordLength) {
-        return right.longestKeywordLength - left.longestKeywordLength;
-      }
-      return right.totalKeywordLength - left.totalKeywordLength;
-    });
-  return ranked[0]?.template;
 }
 
 function normalizeAttachments(value: unknown): TaskAttachment[] {
@@ -1932,9 +1910,23 @@ function buildSearchConfigFollowupMessage(action: OperatorActionRecord): string 
 
 function formatTaskQueuedMessage(source: CreateTaskInput["source"], taskId: string, roleId: RoleId): string {
   if (source !== "feishu") {
-    return `任务已入队（${taskId.slice(0, 8)}），执行角色：${FEISHU_ROLE_LABELS[roleId]}。`;
+    return `我已接收这个目标，并交给${FEISHU_ROLE_LABELS[roleId]}执行（${taskId.slice(0, 8)}）。完成后会回报交付物、验证状态和下一步。`;
   }
-  return `收到，我先让${FEISHU_ROLE_LABELS[roleId]}开工，关键进展会同步你。`;
+  return `收到。我会先让${FEISHU_ROLE_LABELS[roleId]}开始处理；如果信息不够会明确提问，完成后给你一份可决策的交付汇报。`;
+}
+
+function buildTaskQueuedNextActions(taskTitle: string, roleId: RoleId): string[] {
+  const normalized = taskTitle.trim();
+  if (roleId === "research" || /调研|研究|市场|竞品|分析报告|research|market/i.test(normalized)) {
+    return ["梳理关键结论和证据", "对比技术/市场/风险", "输出报告产物和下一步建议"];
+  }
+  if (roleId === "product" || /\bprd\b|需求|产品|验收/i.test(normalized)) {
+    return ["收敛目标和范围", "补齐用户场景与验收标准", "输出可进入执行的 PRD/拆解"];
+  }
+  if (roleId === "engineering" || roleId === "developer" || /开发|实现|修复|代码|build|implement/i.test(normalized)) {
+    return ["确认实现边界", "修改代码并保留验证证据", "回报变更文件、测试结果和风险"];
+  }
+  return ["确认目标和交付标准", "执行并保留过程证据", "回报结果、产物和下一步建议"];
 }
 
 function formatSkillIntegrationTaskQueuedMessage(input: {
@@ -1972,9 +1964,9 @@ function formatTemplateTasksQueuedMessage(
   taskCount: number
 ): string {
   if (source !== "feishu") {
-    return `已按模板「${templateName}」创建 ${taskCount} 个并行任务，任务已入队。`;
+    return `我已按「${templateName}」接管这个目标，创建 ${taskCount} 个执行任务。接下来会推进、验证并沉淀产物。`;
   }
-  return `已收到，已按模板「${templateName}」创建 ${taskCount} 个并行任务，完成后会继续回复你。`;
+  return `收到。我会按「${templateName}」推进：先整理目标和证据，再输出可决策交付物；完成后直接回报结论、产物和下一步。`;
 }
 
 function formatFounderWorkflowQueuedMessage(source: CreateTaskInput["source"], templateName: string): string {
@@ -2243,233 +2235,6 @@ async function applyApprovalDecisionFromCommand(input: {
   };
 }
 
-function resolveAwaitingGoalRunForInbound(input: {
-  source: CreateTaskInput["source"];
-  requestedBy?: string | undefined;
-  chatId?: string | undefined;
-}): GoalRunRecord | undefined {
-  const candidates = store.listGoalRuns({ limit: 200 }).filter((run) => {
-    if (run.source !== input.source) {
-      return false;
-    }
-    if (run.status !== "awaiting_input") {
-      return false;
-    }
-    if (input.chatId && run.chatId !== input.chatId) {
-      return false;
-    }
-    if (!input.chatId && input.requestedBy && run.requestedBy !== input.requestedBy) {
-      return false;
-    }
-    return true;
-  });
-  return candidates.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
-}
-
-function resolveLatestGoalRunForInbound(input: {
-  source: CreateTaskInput["source"];
-  requestedBy?: string | undefined;
-  chatId?: string | undefined;
-}): GoalRunRecord | undefined {
-  const candidates = store.listGoalRuns({ limit: 500 }).filter((run) => {
-    if (run.source !== input.source) {
-      return false;
-    }
-    if (input.chatId && run.chatId !== input.chatId) {
-      return false;
-    }
-    if (!input.chatId && input.requestedBy && run.requestedBy !== input.requestedBy) {
-      return false;
-    }
-    return true;
-  });
-  return candidates.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
-}
-
-function resolveLatestInFlightGoalRunForInbound(input: {
-  source: CreateTaskInput["source"];
-  requestedBy?: string | undefined;
-  chatId?: string | undefined;
-}): GoalRunRecord | undefined {
-  const inFlightStatuses = new Set(["queued", "running", "awaiting_authorization"]);
-  const candidates = store.listGoalRuns({ limit: 500 }).filter((run) => {
-    if (run.source !== input.source) {
-      return false;
-    }
-    if (!inFlightStatuses.has(run.status)) {
-      return false;
-    }
-    if (input.chatId) {
-      return run.chatId === input.chatId;
-    }
-    if (input.requestedBy) {
-      return run.requestedBy === input.requestedBy;
-    }
-    return true;
-  });
-  return candidates.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
-}
-
-function isGoalRunStatusQuery(text: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  if (!normalized) {
-    return false;
-  }
-  if (hasActionIntent(normalized)) {
-    return false;
-  }
-  const patterns = [
-    "进度",
-    "状态",
-    "做到哪",
-    "完成了吗",
-    "开发好了吗",
-    "写好了吗",
-    "现在怎么样",
-    "情况如何"
-  ];
-  const hasKeyword = patterns.some((keyword) => normalized.includes(keyword));
-  if (!hasKeyword) {
-    return false;
-  }
-  const querySignals = ["吗", "？", "?", "如何", "怎么样", "做到哪", "完成没", "完成了没"];
-  return querySignals.some((token) => normalized.includes(token));
-}
-
-function isTaskStatusQuery(text: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  if (!normalized) {
-    return false;
-  }
-  if (hasActionIntent(normalized)) {
-    return false;
-  }
-  const patterns = ["进度", "状态", "做到哪", "完成了吗", "好了吗", "现在怎么样", "情况如何", "卡住"];
-  const hasKeyword = patterns.some((keyword) => normalized.includes(keyword));
-  if (!hasKeyword) {
-    return false;
-  }
-  const querySignals = ["吗", "？", "?", "如何", "怎么样", "做到哪", "完成没", "完成了没", "卡住"];
-  return querySignals.some((token) => normalized.includes(token));
-}
-
-const GOAL_INPUT_FIELD_LABELS: Record<string, { label: string; aliases: string[] }> = {
-  company_name: {
-    label: "公司名称",
-    aliases: ["公司名称", "公司名", "企业名称", "品牌名", "companyname", "company"]
-  },
-  business_domain: {
-    label: "业务方向",
-    aliases: ["业务方向", "主营业务", "业务领域", "业务", "行业", "businessdomain", "domain"]
-  },
-  target_audience: {
-    label: "目标用户",
-    aliases: ["目标用户", "目标客群", "用户群体", "受众", "targetaudience", "audience"]
-  },
-  deploy_target: {
-    label: "部署目标",
-    aliases: ["部署目标", "部署平台", "上线平台", "deploytarget"]
-  }
-};
-
-function normalizeGoalFieldAlias(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[\s_()（）:：-]+/g, "");
-}
-
-function formatGoalInputField(field: string): string {
-  const configured = GOAL_INPUT_FIELD_LABELS[field];
-  if (!configured) {
-    return field;
-  }
-  return `${configured.label}(${field})`;
-}
-
-function formatGoalInputFields(fields: string[]): string {
-  const normalized = fields.map((field) => field.trim()).filter(Boolean);
-  if (normalized.length === 0) {
-    return "关键信息";
-  }
-  return normalized.map((field) => formatGoalInputField(field)).join("、");
-}
-
-function buildGoalInputExpectedCommand(fields: string[]): string {
-  const normalized = fields.map((field) => field.trim()).filter(Boolean);
-  if (normalized.length === 0) {
-    return "";
-  }
-  return normalized
-    .map((field) => {
-      const configured = GOAL_INPUT_FIELD_LABELS[field];
-      if (!configured) {
-        return `${field}: <value>`;
-      }
-      return `${configured.label}: <value>`;
-    })
-    .join("；");
-}
-
-function resolveGoalInputFieldKey(rawKey: string, expectedFields: string[]): string | undefined {
-  const key = rawKey.trim();
-  if (!key) {
-    return undefined;
-  }
-  if (expectedFields.includes(key)) {
-    return key;
-  }
-
-  const normalizedExpected = new Map<string, string>();
-  for (const field of expectedFields) {
-    normalizedExpected.set(normalizeGoalFieldAlias(field), field);
-  }
-
-  const strippedParenthetical = key.replace(/\(([^()]+)\)|（([^（）]+)）/g, " $1 $2 ").trim();
-  const candidates = [key, strippedParenthetical];
-  for (const candidate of candidates) {
-    const compact = normalizeGoalFieldAlias(candidate);
-    const direct = normalizedExpected.get(compact);
-    if (direct) {
-      return direct;
-    }
-    for (const field of expectedFields) {
-      const configured = GOAL_INPUT_FIELD_LABELS[field];
-      if (!configured) {
-        continue;
-      }
-      if (configured.aliases.some((alias) => normalizeGoalFieldAlias(alias) === compact)) {
-        return field;
-      }
-    }
-  }
-
-  const englishKeyMatch = key.match(/[a-zA-Z0-9_.-]{2,64}/);
-  if (englishKeyMatch?.[0]) {
-    const fallback = normalizedExpected.get(normalizeGoalFieldAlias(englishKeyMatch[0]));
-    if (fallback) {
-      return fallback;
-    }
-  }
-  return undefined;
-}
-
-function formatGoalRunStatusMessage(goalRun: GoalRunRecord): string {
-  const currentTask = goalRun.currentTaskId ? store.getTask(goalRun.currentTaskId) : undefined;
-  const projectMemory =
-    goalRun.sessionId && typeof store.getSession === "function"
-      ? (store.getSession(goalRun.sessionId)?.metadata?.projectMemory as Record<string, unknown> | undefined)
-      : undefined;
-  const latestHandoff = store.getLatestGoalRunHandoff(goalRun.id);
-  const collaborationProgress = currentTask ? formatCollaborationProgress(currentTask) : undefined;
-  const base = buildGoalRunStatusMessage(goalRun, {
-    currentTask,
-    latestHandoff,
-    projectMemory
-  });
-  return collaborationProgress ? `${base}\n${collaborationProgress}` : base;
-}
-
 function formatGoalRunStageLabel(stage: string): string {
   const normalized = stage.trim().toLowerCase();
   switch (normalized) {
@@ -2490,43 +2255,6 @@ function formatGoalRunStageLabel(stage: string): string {
   }
 }
 
-function resolveLatestActiveTaskForInbound(input: {
-  source: CreateTaskInput["source"];
-  requestedBy?: string | undefined;
-  chatId?: string | undefined;
-}): TaskRecord | undefined {
-  const candidates = store.listTasks(500).filter((task) => {
-    if (task.source !== input.source) {
-      return false;
-    }
-    if (!["queued", "running", "waiting_approval"].includes(task.status)) {
-      return false;
-    }
-    if (input.chatId) {
-      return task.chatId === input.chatId;
-    }
-    if (input.requestedBy) {
-      return task.requestedBy === input.requestedBy;
-    }
-    return true;
-  });
-  return candidates.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
-}
-
-function formatActiveTaskStatusMessage(task: TaskRecord): string {
-  const statusLabel =
-    task.status === "queued"
-      ? "排队中"
-      : task.status === "running"
-        ? "执行中"
-        : task.status === "waiting_approval"
-          ? "等待审批"
-          : task.status;
-  const base = `你当前有一条进行中的任务（${task.id.slice(0, 8)}），状态：${statusLabel}，执行角色：${formatRoleLabel(task.roleId)}。我会继续推进并同步结果。`;
-  const collaborationProgress = formatCollaborationProgress(task);
-  return collaborationProgress ? `${base}\n${collaborationProgress}` : base;
-}
-
 function normalizeConversationCandidate(text: string): string {
   let normalized = text.trim();
   if (!normalized) {
@@ -2543,6 +2271,22 @@ function normalizeConversationCandidate(text: string): string {
     }
   }
   return normalized;
+}
+
+function getInboundConversationConfig() {
+  const runtimeConfig = store.getRuntimeConfig();
+  return {
+    getDefaultParticipants: () => {
+      const defaults = runtimeConfig.collaboration.defaultParticipants;
+      return defaults.length > 0 ? defaults : (["product", "uiux", "frontend", "backend", "qa"] as RoleId[]);
+    },
+    formatRoleLabel,
+    shouldRouteToGoalRun,
+    hasActionIntent,
+    normalizeConversationCandidate,
+    shorten,
+    evolution: runtimeConfig.evolution.intake
+  };
 }
 
 const DIRECT_ACTION_INTENT_PATTERN =
@@ -2657,156 +2401,6 @@ function formatCollaborationProgress(task: TaskRecord): string | undefined {
   return parts.join("；");
 }
 
-function isDirectConversationTurn(text: string): boolean {
-  const normalized = normalizeConversationCandidate(text);
-  if (!normalized) {
-    return false;
-  }
-  if (shouldRouteToGoalRun(normalized)) {
-    return false;
-  }
-  if (hasActionIntent(normalized)) {
-    return false;
-  }
-  const compact = normalized.toLowerCase().replace(/\s+/g, "");
-  const conversationPatterns = [
-    "你是谁",
-    "你能做什么",
-    "你可以做什么",
-    "会做什么",
-    "介绍一下你们团队",
-    "介绍你们团队",
-    "团队都有谁",
-    "团队是谁",
-    "团队有多少人",
-    "为什么",
-    "啥意思",
-    "什么意思",
-    "你是个笨蛋",
-    "你好笨",
-    "太慢",
-    "不理我",
-    "在吗",
-    "在不在"
-  ];
-  if (conversationPatterns.some((keyword) => compact.includes(keyword))) {
-    return true;
-  }
-  return /(?:你|团队|我们|为什么|怎么|啥|什么|在吗|介绍)[^。！？!?]{0,30}[?？]?$/.test(normalized) && normalized.length <= 24;
-}
-
-function buildDirectConversationReply(text: string): string {
-  const compact = normalizeConversationCandidate(text).toLowerCase().replace(/\s+/g, "");
-  if (compact.includes("你是谁")) {
-    return "我是 VinkoClaw 的执行入口。你可以把我当成一个可调度多角色团队的总入口，能接任务、拆分角色、推进执行、同步进度。";
-  }
-  if (compact.includes("你能做什么") || compact.includes("你可以做什么") || compact.includes("会做什么")) {
-    return "我可以直接帮你推进真实工作：拆解需求、写代码、联调测试、配置工具、发审批并回报进度。你给一条明确目标，我就按同一工作流持续做完。";
-  }
-  if (
-    compact.includes("团队有多少人") ||
-    compact.includes("介绍你们团队") ||
-    compact.includes("介绍一下你们团队") ||
-    compact.includes("团队都有谁") ||
-    compact.includes("团队是谁")
-  ) {
-    const defaults = store.getRuntimeConfig().collaboration.defaultParticipants;
-    const participants = defaults.length > 0 ? defaults : ["product", "uiux", "frontend", "backend", "qa"];
-    return `当前默认协作角色有：${participants.map((roleId) => formatRoleLabel(roleId)).join("、")}。你给一条工作指令后，我会按团队协作方式推进并同步每个角色进展。`;
-  }
-  if (compact.includes("你是个笨蛋") || compact.includes("你好笨") || compact.includes("太慢") || compact.includes("不理我")) {
-    return "收到反馈。我不会和你抬杠，后面我会尽量少说空话，直接给结论、动作和结果。你要是愿意，可以直接给我一个具体任务试一下。";
-  }
-  if (compact.includes("在吗") || compact.includes("在不在")) {
-    return "在的。你直接给目标，我会连续推进直到完成。";
-  }
-  if (compact.includes("为什么") || compact.includes("啥意思") || compact.includes("什么意思")) {
-    return "你这个问题我理解了。请直接说你要的结果，我会给你简短结论，并把执行动作落地。";
-  }
-  return "我在。你直接说目标结果即可，我会按同一条工作流持续推进。";
-}
-
-function parseGoalRunInputFromText(rawText: string, expectedFields: string[]): Record<string, string> | undefined {
-  const text = rawText.trim();
-  if (!text) {
-    return undefined;
-  }
-  const normalizedFields = expectedFields.map((field) => field.trim()).filter(Boolean);
-  if (normalizedFields.length === 0) {
-    return undefined;
-  }
-
-  const segments = text
-    .split(/[\n,，;；]/g)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-  const keyed: Record<string, string> = {};
-  for (const segment of segments) {
-    const match = segment.match(/^([\w\u4e00-\u9fff().（）:-]{2,80})\s*[:：=]\s*(.+)$/u);
-    if (!match) {
-      continue;
-    }
-    const key = resolveGoalInputFieldKey(match[1] ?? "", normalizedFields);
-    const value = match[2]?.trim();
-    if (!key || !value) {
-      continue;
-    }
-    keyed[key] = value;
-  }
-  if (Object.keys(keyed).length > 0) {
-    return keyed;
-  }
-
-  const values = segments;
-  if (values.length < normalizedFields.length) {
-    return undefined;
-  }
-  const mapped: Record<string, string> = {};
-  for (let index = 0; index < normalizedFields.length; index += 1) {
-    const field = normalizedFields[index];
-    const value = values[index];
-    if (!field || !value) {
-      continue;
-    }
-    mapped[field] = value;
-  }
-  return Object.keys(mapped).length > 0 ? mapped : undefined;
-}
-
-function parseKeyValuePairsFromText(rawText: string): Record<string, string> | undefined {
-  const text = rawText.trim();
-  if (!text) {
-    return undefined;
-  }
-  const segments = text
-    .split(/[\n,，;；]/g)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-  const parsed: Record<string, string> = {};
-  for (const segment of segments) {
-    const match = segment.match(/^([a-zA-Z0-9_.-]{2,64})\s*[:：=]\s*(.+)$/);
-    if (!match) {
-      continue;
-    }
-    const key = match[1]?.trim();
-    const value = match[2]?.trim();
-    if (!key || !value) {
-      continue;
-    }
-    parsed[key] = value;
-  }
-  return Object.keys(parsed).length > 0 ? parsed : undefined;
-}
-
-function requestsNewIndependentGoal(text: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  if (!normalized) {
-    return false;
-  }
-  const patterns = ["新任务", "另一个任务", "另外一个任务", "重新开始", "开新", "new task", "another task", "start over"];
-  return patterns.some((keyword) => normalized.includes(keyword));
-}
-
 function resolveSessionSourceKey(input: {
   source: CreateTaskInput["source"];
   requestedBy?: string | undefined;
@@ -2855,13 +2449,112 @@ function ensureInboundSession(input: {
   }).id;
 }
 
+function buildProjectBoardInput() {
+  const sessions = store.listSessions(100);
+  const tasks = store.listTasks(500);
+  const goalRuns = store.listGoalRuns?.({ limit: 500 }) ?? [];
+  return {
+    sessions,
+    tasks,
+    approvals: store.listApprovals(500),
+    goalRuns,
+    roleBindingsByRole: {
+      ceo: store.resolveSkillsForRole("ceo"),
+      cto: store.resolveSkillsForRole("cto"),
+      product: store.resolveSkillsForRole("product"),
+      uiux: store.resolveSkillsForRole("uiux"),
+      frontend: store.resolveSkillsForRole("frontend"),
+      backend: store.resolveSkillsForRole("backend"),
+      algorithm: store.resolveSkillsForRole("algorithm"),
+      qa: store.resolveSkillsForRole("qa"),
+      developer: store.resolveSkillsForRole("developer"),
+      engineering: store.resolveSkillsForRole("engineering"),
+      research: store.resolveSkillsForRole("research"),
+      operations: store.resolveSkillsForRole("operations")
+    },
+    workspaceMemory: store.getWorkspaceMemory?.(),
+    crmLeads: store.listCrmLeads?.({ limit: 500 }) ?? [],
+    crmCadences: store.listCrmCadences?.({ limit: 500 }) ?? [],
+    crmContacts: store.listCrmContacts?.({ limit: 500 }) ?? [],
+    goalRunHandoffs: goalRuns.flatMap((run) =>
+      (store.listGoalRunHandoffArtifacts?.(run.id, 20) ?? []).map((entry) => ({
+        id: entry.id,
+        goalRunId: run.id,
+        artifact: entry.artifact
+      }))
+    ),
+    goalRunTraces: goalRuns.flatMap((run) => store.listGoalRunTraces?.(run.id, 20) ?? [])
+  };
+}
+
+function buildSessionWorkbenchCardBySessionId(sessionId: string): Record<string, unknown> | undefined {
+  const snapshot = buildSessionWorkbenchSnapshotFromStore({ store, sessionId });
+  if (!snapshot) return undefined;
+  return buildSessionWorkbenchCard({ snapshot });
+}
+
+async function notifyApprovalWorkbenchViaFeishu(input: {
+  approval: ReturnType<typeof store.getApproval>;
+  reason: string;
+}): Promise<boolean> {
+  const approval = input.approval;
+  if (!approval?.taskId) {
+    return false;
+  }
+  const task = store.getTask(approval.taskId);
+  if (!task?.sessionId || !task.chatId || !isLikelyFeishuChatId(task.chatId)) {
+    return false;
+  }
+  const card = buildSessionWorkbenchCardBySessionId(task.sessionId);
+  if (!card) {
+    return false;
+  }
+  try {
+    await createFeishuClient().sendCardToChat(task.chatId, card);
+    store.appendAuditEvent({
+      category: "feishu",
+      entityType: "approval",
+      entityId: approval.id,
+      message: "Sent approval session workbench card",
+      payload: {
+        eventType: "session_workbench_pushed",
+        reason: input.reason,
+        taskId: task.id,
+        sessionId: task.sessionId,
+        chatId: task.chatId,
+        approvalStatus: approval.status
+      }
+    });
+    return true;
+  } catch (error) {
+    store.appendAuditEvent({
+      category: "feishu",
+      entityType: "approval",
+      entityId: approval.id,
+      message: "Failed to send approval session workbench card",
+      payload: {
+        eventType: "session_workbench_push_failed",
+        reason: input.reason,
+        taskId: task.id,
+        sessionId: task.sessionId,
+        chatId: task.chatId,
+        approvalStatus: approval.status,
+        error: error instanceof Error ? error.message : String(error)
+      }
+    });
+    return false;
+  }
+}
+
 async function handleInboundMessage(input: {
+  sessionId?: string | undefined;
   text: string;
   taskText?: string | undefined;
   source: CreateTaskInput["source"];
   requestedBy?: string | undefined;
   requesterName?: string | undefined;
   chatId?: string | undefined;
+  clientActionId?: string | undefined;
   attachments?: TaskAttachment[] | undefined;
 }): Promise<
   | { type: "template_updated"; message: string; templateId: string; enabled: boolean }
@@ -2878,13 +2571,16 @@ async function handleInboundMessage(input: {
   const inboundText = input.text.trim();
   const taskText = (input.taskText ?? inboundText).trim() || inboundText;
   const requesterName = input.requesterName?.trim() ?? "";
+  const runtimeConfig = store.getRuntimeConfig();
+  const collaborationConfig = runtimeConfig.collaboration;
+  const intakeEvolution = runtimeConfig.evolution.intake;
 
   // Fire collaboration analysis immediately (fire-and-forget, not blocking).
   // The result will be used by whichever path actually creates a task.
-  const collaborationConfig = store.getRuntimeConfig().collaboration;
   const collabStartTime = Date.now();
   const collaborationPlanPromise = analyzeCollaborationNeed(inboundText, {
-    triggerKeywords: collaborationConfig.triggerKeywords
+    triggerKeywords: collaborationConfig.triggerKeywords,
+    evolution: intakeEvolution
   });
   collaborationPlanPromise.then((plan) => {
     logger.info("collaboration analysis completed", { elapsed: Date.now() - collabStartTime, plan });
@@ -2921,67 +2617,22 @@ async function handleInboundMessage(input: {
     }).catch(() => { /* ignore — keyword fallback will be used by worker */ });
   };
 
-  const sessionId = ensureInboundSession({
-    source: input.source,
-    requestedBy: input.requestedBy,
-    requesterName: requesterName || undefined,
-    chatId: input.chatId,
+  const { sessionId, session, finalize } = initInboundRuntime({
+    store,
+    ensureInboundSession,
+    updateSessionProjectMemoryFromInbound,
+    input: {
+      sessionId: input.sessionId,
+      source: input.source,
+      requestedBy: input.requestedBy,
+      requesterName: requesterName || undefined,
+      chatId: input.chatId,
+      clientActionId: input.clientActionId
+    },
+    inboundText,
+    taskText,
     titleHint: shorten(taskText.replace(/\s+/g, " ").trim() || inboundText)
   });
-  if (sessionId) {
-    store.appendSessionMessage({
-      sessionId,
-      actorType: "user",
-      actorId: input.requestedBy ?? "anonymous",
-      messageType: "text",
-      content: inboundText,
-      metadata: {
-        source: input.source,
-        chatId: input.chatId ?? "",
-        requesterName
-      }
-    });
-    updateSessionProjectMemoryFromInbound({
-      sessionId,
-      requesterName,
-      requestedBy: input.requestedBy,
-      source: input.source,
-      inboundText,
-      taskText,
-      stage: "intake"
-    });
-  }
-
-  type InboundResult =
-    | { type: "template_updated"; message: string; templateId: string; enabled: boolean }
-    | { type: "template_not_found"; message: string; query: string }
-    | { type: "smalltalk_replied"; message: string }
-    | { type: "needs_clarification"; message: string; questions: string[] }
-    | { type: "config_input_required"; message: string; missingField: string; expectedCommand: string }
-    | { type: "operator_action_pending"; message: string; approvalId: string }
-    | { type: "operator_action_applied"; message: string; actionId: string }
-    | { type: "template_tasks_queued"; message: string; templateId: string; taskIds: string[] }
-    | { type: "goal_run_queued"; message: string; goalRunId: string }
-    | { type: "task_queued"; message: string; taskId: string };
-
-  const finalize = (result: InboundResult): InboundResult => {
-    if (sessionId) {
-      store.appendSessionMessage({
-        sessionId,
-        actorType: "system",
-        actorId: "orchestrator",
-        messageType: "event",
-        content: result.message,
-        metadata: {
-          type: "inbound_ack",
-          source: input.source
-        }
-      });
-    }
-    return result;
-  };
-
-  const session = sessionId ? store.getSession(sessionId) : undefined;
   const pendingSkillSearch = (session?.metadata?.pendingSkillSearch ?? null) as
     | {
         query?: unknown;
@@ -3215,47 +2866,15 @@ async function handleInboundMessage(input: {
   if (isSmalltalkMessage(inboundText)) {
     return finalize({
       type: "smalltalk_replied",
-      message: buildSmalltalkReply(inboundText)
+      message: await buildConversationReplyWithModel(inboundText, getInboundConversationConfig())
     });
   }
 
-  if (isGoalRunStatusQuery(inboundText)) {
-    const latestGoalRun = resolveLatestGoalRunForInbound({
-      source: input.source,
-      requestedBy: input.requestedBy,
-      chatId: input.chatId
+  if (isNonActionableChatMessage(inboundText)) {
+    return finalize({
+      type: "smalltalk_replied",
+      message: await buildConversationReplyWithModel(inboundText, getInboundConversationConfig())
     });
-    if (latestGoalRun) {
-      return finalize({
-        type: "smalltalk_replied",
-        message: formatGoalRunStatusMessage(latestGoalRun)
-      });
-    }
-  }
-
-  if (isTaskStatusQuery(inboundText)) {
-    const awaitingCollaboration = resolveAwaitingCollaborationTaskForInbound({
-      source: input.source,
-      requestedBy: input.requestedBy,
-      chatId: input.chatId
-    }, store.listTasks(500));
-    if (awaitingCollaboration) {
-      return finalize({
-        type: "smalltalk_replied",
-        message: formatAwaitingCollaborationMessage(awaitingCollaboration)
-      });
-    }
-    const activeTask = resolveLatestActiveTaskForInbound({
-      source: input.source,
-      requestedBy: input.requestedBy,
-      chatId: input.chatId
-    });
-    if (activeTask) {
-      return finalize({
-        type: "smalltalk_replied",
-        message: formatActiveTaskStatusMessage(activeTask)
-      });
-    }
   }
 
   const approvalDecisionCommand = parseApprovalDecisionCommand(inboundText);
@@ -3282,152 +2901,246 @@ async function handleInboundMessage(input: {
     });
   }
 
-  const awaitingGoalRun = resolveAwaitingGoalRunForInbound({
+  const resumeStageResult = await handleInboundResumeStage({
+    store,
+    inboundText,
+    taskText,
+    source: input.source,
+    requestedBy: input.requestedBy,
+    requesterName,
+    chatId: input.chatId,
+    sessionId,
+    isDirectConversationTurn: (text) => isDirectConversationTurn(text, getInboundConversationConfig()),
+    isContinueSignal,
+    hasActionIntent,
+    formatRoleLabel,
+    formatCollaborationProgress,
+    updateSessionProjectMemoryFromInbound,
+    finalize
+  });
+  if (resumeStageResult) {
+    return resumeStageResult;
+  }
+
+  const inFlightGoalRun = resolveLatestInFlightGoalRunForInbound(store, {
     source: input.source,
     requestedBy: input.requestedBy,
     chatId: input.chatId
   });
-  if (awaitingGoalRun) {
-    const parsedInputs = parseGoalRunInputFromText(inboundText, awaitingGoalRun.awaitingInputFields);
-    if (!parsedInputs) {
-      if (isDirectConversationTurn(inboundText)) {
+
+  // User replies that satisfy an existing pause/clarification must resume that
+  // chain before Router V2 can interpret them as a fresh request.
+  const pausedTask = sessionId ? store.getPausedTask(input.source, input.requestedBy, input.chatId) : undefined;
+  if (sessionId && pausedTask && pausedTask.pendingInput) {
+    const originalInstruction = pausedTask.instruction;
+    const userAnswer = inboundText.trim();
+    const enrichedInstruction = `${originalInstruction}\n\n用户补充信息：${userAnswer}`;
+    store.resumeTask(pausedTask.id, enrichedInstruction);
+    updateSessionProjectMemoryFromInbound({
+      sessionId,
+      requesterName,
+      requestedBy: input.requestedBy,
+      source: input.source,
+      inboundText,
+      taskText: enrichedInstruction,
+      stage: "task_input_received",
+      nextActions: ["任务已恢复执行"]
+    });
+    store.appendSessionMessage({
+      sessionId,
+      actorType: "system",
+      actorId: "orchestrator",
+      roleId: pausedTask.roleId,
+      messageType: "event",
+      content: "任务已恢复执行",
+      metadata: {
+        type: "task_resumed",
+        taskId: pausedTask.id
+      }
+    });
+    return finalize({
+      type: "task_queued",
+      message: formatTaskQueuedMessage(input.source, pausedTask.id, pausedTask.roleId),
+      taskId: pausedTask.id
+    });
+  }
+
+  const pendingClarification = (session?.metadata?.pendingClarification ?? null) as
+    | {
+        originalText?: unknown;
+        questions?: unknown;
+        createdAt?: unknown;
+        roleId?: unknown;
+      }
+    | null;
+  if (sessionId && pendingClarification && typeof pendingClarification.originalText === "string") {
+    const originalText = pendingClarification.originalText;
+    const questions = Array.isArray(pendingClarification.questions)
+      ? pendingClarification.questions.filter((q): q is string => typeof q === "string")
+      : [];
+    const enrichedInstruction = mergeClarificationResponse(originalText, questions, inboundText);
+    store.patchSessionMetadata(sessionId, { pendingClarification: null });
+    updateSessionProjectMemoryFromInbound({
+      sessionId,
+      requesterName,
+      requestedBy: input.requestedBy,
+      source: input.source,
+      inboundText,
+      taskText: enrichedInstruction,
+      stage: "clarification_received",
+      nextActions: ["创建任务并开始执行"]
+    });
+    const clarifiedIntentStartTime = Date.now();
+    const clarifiedIntentDecision = await classifyInboundIntentDecision(enrichedInstruction, {
+      triggerKeywords: collaborationConfig.triggerKeywords,
+      evolution: intakeEvolution
+    });
+    logger.info("clarification intent classification done", {
+      elapsed: Date.now() - clarifiedIntentStartTime,
+      sinceFunctionStart: Date.now() - collabStartTime,
+      clarifiedIntent: clarifiedIntentDecision.intent,
+      clarifiedIntentReason: clarifiedIntentDecision.reason,
+      clarifiedIntentMatchedRules: clarifiedIntentDecision.matchedRules
+    });
+    appendInboundIntentAuditEvent(store, {
+      stage: "clarified",
+      text: enrichedInstruction,
+      intent: clarifiedIntentDecision.intent,
+      reason: clarifiedIntentDecision.reason,
+      matchedRules: clarifiedIntentDecision.matchedRules,
+      confidence: clarifiedIntentDecision.confidence,
+      sessionId
+    });
+    const clarifiedIntent = clarifiedIntentDecision.intent;
+
+    if (clarifiedIntent === "operator_config") {
+      const clarifiedInputRequirement = parseOperatorConfigInputRequirementFromText(enrichedInstruction);
+      if (clarifiedInputRequirement) {
         return finalize({
-          type: "smalltalk_replied",
-          message: `我可以继续帮你推进当前目标。现在还缺：${formatGoalInputFields(awaitingGoalRun.awaitingInputFields)}。你直接回复这些信息后，我会立刻继续。`
+          type: "config_input_required",
+          message: clarifiedInputRequirement.message,
+          missingField: clarifiedInputRequirement.missingField,
+          expectedCommand: clarifiedInputRequirement.expectedCommand
         });
       }
       return finalize({
         type: "config_input_required",
-        message: `当前任务（${awaitingGoalRun.id.slice(0, 8)}）还缺：${formatGoalInputFields(awaitingGoalRun.awaitingInputFields)}。你可以按顺序回复，或用 key:value 格式。`,
-        missingField: awaitingGoalRun.awaitingInputFields[0] ?? "input",
-        expectedCommand: buildGoalInputExpectedCommand(awaitingGoalRun.awaitingInputFields)
+        message: "我理解你想配置系统能力，请告诉我具体的操作，例如：「设置搜索工具为 tavily」、「切换模型到 glm-5」或「给 research 安装 web-search skill」。",
+        missingField: "action",
+        expectedCommand: "设置搜索工具为 tavily"
       });
     }
 
-    for (const [key, value] of Object.entries(parsedInputs)) {
-      store.upsertGoalRunInput({
-        goalRunId: awaitingGoalRun.id,
-        inputKey: key,
-        value,
-        createdBy: input.requestedBy
-      });
-    }
-    store.updateGoalRunContext(awaitingGoalRun.id, parsedInputs);
-    const resumedGoalRun = store.queueGoalRun(awaitingGoalRun.id, awaitingGoalRun.currentStage) ?? awaitingGoalRun;
-    store.appendGoalRunTimelineEvent({
-      goalRunId: awaitingGoalRun.id,
-      stage: resumedGoalRun.currentStage,
-      eventType: "input_received",
-      message: `Received ${Object.keys(parsedInputs).length} input item(s)`,
-      payload: {
-        keys: Object.keys(parsedInputs)
-      }
-    });
-    return finalize({
-      type: "operator_action_applied",
-      message: `收到，已补充 ${Object.keys(parsedInputs).join(", ")}，我先让流程继续推进，关键进展会同步你。`,
-      actionId: awaitingGoalRun.id
-    });
-  }
-
-  const inFlightGoalRun = resolveLatestInFlightGoalRunForInbound({
-    source: input.source,
-    requestedBy: input.requestedBy,
-    chatId: input.chatId
-  });
-  if (inFlightGoalRun) {
-    const prefilledInputs = parseKeyValuePairsFromText(inboundText);
-    if (prefilledInputs) {
-      for (const [key, value] of Object.entries(prefilledInputs)) {
-        store.upsertGoalRunInput({
-          goalRunId: inFlightGoalRun.id,
-          inputKey: key,
-          value,
-          createdBy: input.requestedBy
+    if (clarifiedIntent === "goalrun") {
+      if (inFlightGoalRun && !requestsNewIndependentGoal(enrichedInstruction)) {
+        return finalize({
+          type: "smalltalk_replied",
+          message: `当前已有进行中的目标（${inFlightGoalRun.id.slice(0, 8)}，${formatGoalRunStageLabel(inFlightGoalRun.currentStage)}）。我会先把这条主线推进完成。若你要并行开新目标，请发送”新任务：<你的目标>”。`
         });
       }
-      store.updateGoalRunContext(inFlightGoalRun.id, prefilledInputs);
-      store.appendGoalRunTimelineEvent({
-        goalRunId: inFlightGoalRun.id,
-        stage: inFlightGoalRun.currentStage,
-        eventType: "input_received",
-        message: `Prefilled ${Object.keys(prefilledInputs).length} input item(s) while run in-flight`,
-        payload: {
-          keys: Object.keys(prefilledInputs)
-        }
+      const goalRun = store.createGoalRun({
+        source: input.source,
+        objective: enrichedInstruction,
+        requestedBy: input.requestedBy,
+        chatId: input.chatId,
+        sessionId,
+        language: /[\u4e00-\u9fff]/.test(enrichedInstruction) ? "zh-CN" : "en-US",
+        metadata: {
+          inboundText: enrichedInstruction,
+          ...(requesterName ? { requesterName } : {}),
+          attachments: input.attachments ?? []
+        },
+        context: {}
       });
-      return finalize({
-        type: "operator_action_applied",
-        message: `收到，已记录补充信息 ${Object.keys(prefilledInputs).join(", ")}，我会继续推进当前目标流程。`,
-        actionId: inFlightGoalRun.id
-      });
-    }
-    if (isContinueSignal(inboundText)) {
       updateSessionProjectMemoryFromInbound({
         sessionId,
         requesterName,
         requestedBy: input.requestedBy,
         source: input.source,
-        inboundText,
-        taskText,
-        stage: "goal_run_in_progress"
+        inboundText: enrichedInstruction,
+        taskText: enrichedInstruction,
+        stage: "goal_run_discover",
+        nextActions: ["等待目标流程完成信息澄清、计划拆解与执行交付阶段"]
       });
       return finalize({
-        type: "smalltalk_replied",
-        message: `${formatGoalRunStatusMessage(inFlightGoalRun)} 你无需重复下发，我会持续推进并在关键节点同步。`
+        type: "goal_run_queued",
+        message: formatGoalRunQueuedMessage(input.source, goalRun.id),
+        goalRunId: goalRun.id
       });
     }
-  }
 
-  const awaitingCollaboration = resolveAwaitingCollaborationTaskForInbound({
-    source: input.source,
-    requestedBy: input.requestedBy,
-    chatId: input.chatId
-  }, store.listTasks(500));
-  if (awaitingCollaboration) {
-    const resumedTask = resumeAwaitingCollaborationTask(store, {
-      task: awaitingCollaboration,
-      text: inboundText,
-      requesterName
+    const clarifiedCollaborationMode = collaborationConfig.enabled && (clarifiedIntent === "collaboration");
+    const clarifiedLightCollaborationMode =
+      collaborationConfig.enabled && (clarifiedIntent === "light_collaboration") && !clarifiedCollaborationMode;
+    const clarifiedRoleId = clarifiedCollaborationMode ? resolveCollaborationEntryRole(enrichedInstruction) : undefined;
+    const clarifiedMetadata: Record<string, unknown> = requesterName ? { requesterName } : {};
+    if (input.attachments && input.attachments.length > 0) {
+      clarifiedMetadata.attachments = input.attachments;
+    }
+    if (clarifiedCollaborationMode) {
+      clarifiedMetadata.collaborationMode = true;
+      clarifiedMetadata.collaborationEntryRole = clarifiedRoleId;
+    }
+    if (clarifiedLightCollaborationMode) {
+      clarifiedMetadata.lightCollaboration = true;
+    }
+    const clarifiedTask = createTask({
+      sessionId,
+      instruction: enrichedInstruction,
+      source: input.source,
+      requestedBy: input.requestedBy,
+      chatId: input.chatId,
+      roleId: clarifiedRoleId,
+      metadata: clarifiedMetadata
     });
+    const clarifiedCollaborationPlanPromise = analyzeCollaborationNeed(enrichedInstruction, {
+      triggerKeywords: collaborationConfig.triggerKeywords,
+      evolution: intakeEvolution
+    });
+    applyCollaborationPlanToTask(clarifiedTask.id, clarifiedCollaborationPlanPromise);
     updateSessionProjectMemoryFromInbound({
-      sessionId: resumedTask.sessionId,
+      sessionId,
       requesterName,
       requestedBy: input.requestedBy,
       source: input.source,
-      inboundText,
-      taskText,
-      stage: "resuming_collaboration",
-      unresolvedQuestions: [],
-      nextActions: ["等待团队重新汇总并继续交付"]
+      inboundText: enrichedInstruction,
+      taskText: enrichedInstruction,
+      stage: clarifiedCollaborationMode
+        ? "collaboration_queued"
+        : clarifiedLightCollaborationMode
+        ? "light_collaboration_queued"
+        : "task_queued",
+      nextActions: [
+        clarifiedCollaborationMode
+          ? "等待团队分工执行并汇总"
+          : clarifiedLightCollaborationMode
+          ? "等待主执行者完成并审阅"
+          : "等待角色执行并返回结果"
+      ]
     });
-    if (resumedTask.sessionId) {
-      store.appendSessionMessage({
-        sessionId: resumedTask.sessionId,
-        actorType: "system",
-        actorId: "orchestrator",
-        messageType: "event",
-        content: `已续接协作任务：${resumedTask.title}`,
-        metadata: {
-          type: "collaboration_resumed",
-          taskId: resumedTask.id,
-          collaborationId:
-            typeof resumedTask.metadata?.collaborationId === "string" ? resumedTask.metadata.collaborationId : "",
-          source: input.source
-        }
-      });
-    }
+    const clarifiedMessage = clarifiedCollaborationMode
+      ? formatTaskQueuedMessage(input.source, clarifiedTask.id, clarifiedTask.roleId) + "（已启动多角色协作模式）"
+      : clarifiedLightCollaborationMode
+      ? formatTaskQueuedMessage(input.source, clarifiedTask.id, clarifiedTask.roleId) + "（已启动轻量协作模式：主执行 + 审阅）"
+      : formatTaskQueuedMessage(input.source, clarifiedTask.id, clarifiedTask.roleId);
     return finalize({
-      type: "operator_action_applied",
-      message: `收到，我已把这次补充信息续接到原协作任务（${awaitingCollaboration.id.slice(0, 8)}），现在继续汇总并推进交付。`,
-      actionId: awaitingCollaboration.id
+      type: "task_queued",
+      message: clarifiedMessage,
+      taskId: clarifiedTask.id
     });
   }
 
-  if (isDirectConversationTurn(inboundText)) {
+  if (isDirectConversationTurn(inboundText, getInboundConversationConfig())) {
     return finalize({
       type: "smalltalk_replied",
-      message: buildDirectConversationReply(inboundText)
+      message: await buildConversationReplyWithModel(inboundText, getInboundConversationConfig())
+    });
+  }
+
+  if (await classifyAmbiguousConversationWithModel(inboundText, getInboundConversationConfig())) {
+    return finalize({
+      type: "smalltalk_replied",
+      message: await buildConversationReplyWithModel(inboundText, getInboundConversationConfig())
     });
   }
 
@@ -3860,233 +3573,276 @@ async function handleInboundMessage(input: {
     });
   }
 
-  const template = selectRoutingTemplate(inboundText, store.listRoutingTemplates());
-  if (template) {
-    const tasks =
-      template.id === "tpl-founder-delivery-loop"
-        ? createFounderDeliveryWorkflow({
-            sessionId,
-            template,
-            text: taskText,
-            source: input.source,
-            requestedBy: input.requestedBy,
-            requesterName: requesterName || undefined,
-            chatId: input.chatId,
-            attachments: input.attachments
-          })
-        : createTemplateTasks({
-            sessionId,
-            template,
-            text: taskText,
-            source: input.source,
-            requestedBy: input.requestedBy,
-            requesterName: requesterName || undefined,
-            chatId: input.chatId,
-            attachments: input.attachments
-          });
+  const routerV2Result = await routeInboundWithRouterV2({
+    text: inboundText,
+    templates: store.listRoutingTemplates(),
+    runtimeConfig
+  });
+  const routerAudit = appendRouterV2AuditEvent(store, {
+    text: inboundText,
+    selectedMode: routerV2Result.decision.mode,
+    decisionSource: routerV2Result.decisionSource,
+    validatorStatus: routerV2Result.validatorStatus,
+    confidence: routerV2Result.decision.confidence,
+    reason: routerV2Result.decision.reason,
+    templateId: routerV2Result.decision.templateId,
+    primaryRole: routerV2Result.decision.primaryRole,
+    supportingRoles: routerV2Result.decision.supportingRoles,
+    fallbackReason: routerV2Result.fallbackReason,
+    sessionId
+  });
+  const routerSignal = extractEvolutionSignalFromAudit(routerAudit);
+  if (routerSignal) {
+    recordEvolutionSignals(store, [routerSignal]);
+    applyLowRiskEvolutionProposals(store);
+  }
+
+  if (routerV2Result.decision.needClarification && routerV2Result.decision.questions.length > 0 && sessionId) {
+    const clarificationAudit = store.appendAuditEvent({
+      category: "intake",
+      entityType: "session",
+      entityId: sessionId,
+      message: "Router V2 requested clarification before task creation",
+      payload: {
+        reason: "clarification_requested",
+        stage: "router_v2",
+        textPreview: shorten(inboundText, 180),
+        questions: routerV2Result.decision.questions
+      }
+    });
+    const clarificationSignal = extractEvolutionSignalFromAudit(clarificationAudit);
+    if (clarificationSignal) {
+      recordEvolutionSignals(store, [clarificationSignal]);
+      applyLowRiskEvolutionProposals(store);
+    }
+    store.patchSessionMetadata(sessionId, {
+      pendingClarification: {
+        originalText: inboundText,
+        questions: routerV2Result.decision.questions,
+        createdAt: new Date().toISOString()
+      }
+    });
+    updateSessionProjectMemoryFromInbound({
+      sessionId,
+      requesterName,
+      requestedBy: input.requestedBy,
+      source: input.source,
+      inboundText,
+      taskText,
+      stage: "awaiting_clarification",
+      unresolvedQuestions: routerV2Result.decision.questions,
+      nextActions: ["等待用户回复澄清问题"]
+    });
     return finalize({
-      type: "template_tasks_queued",
-      message:
+      type: "needs_clarification",
+      message: formatClarificationMessage(routerV2Result.decision.questions),
+      questions: routerV2Result.decision.questions
+    });
+  }
+
+  if (routerV2Result.decision.mode === "template" && routerV2Result.decision.templateId) {
+    const template = store.getRoutingTemplate(routerV2Result.decision.templateId);
+    if (template?.enabled) {
+      appendTemplateRoutingAuditEvent(store, {
+        text: inboundText,
+        templateId: template.id,
+        templateName: template.name,
+        matchedKeywords: routerV2Result.legacyTemplateId ? [routerV2Result.legacyTemplateId] : [],
+        matchedRules: [
+          routerV2Result.decisionSource === "llm" ? "router_v2_llm_selected_template" : "router_v2_fallback_template"
+        ],
+        reason: routerV2Result.decision.reason,
+        confidence: routerV2Result.decision.confidence.toFixed(2),
+        sessionId
+      });
+      const tasks =
         template.id === "tpl-founder-delivery-loop"
-          ? formatFounderWorkflowQueuedMessage(input.source, template.name)
-          : formatTemplateTasksQueuedMessage(input.source, template.name, tasks.length),
-      templateId: template.id,
-      taskIds: tasks.map((task) => task.id)
-    });
+          ? createFounderDeliveryWorkflow({
+              sessionId,
+              template,
+              text: taskText,
+              source: input.source,
+              requestedBy: input.requestedBy,
+              requesterName: requesterName || undefined,
+              chatId: input.chatId,
+              attachments: input.attachments
+            })
+          : createTemplateTasks({
+              sessionId,
+              template,
+              text: taskText,
+              source: input.source,
+              requestedBy: input.requestedBy,
+              requesterName: requesterName || undefined,
+              chatId: input.chatId,
+              attachments: input.attachments
+            });
+      return finalize({
+        type: "template_tasks_queued",
+        message:
+          template.id === "tpl-founder-delivery-loop"
+            ? formatFounderWorkflowQueuedMessage(input.source, template.name)
+            : formatTemplateTasksQueuedMessage(input.source, template.name, tasks.length),
+        templateId: template.id,
+        taskIds: tasks.map((task) => task.id)
+      });
+    }
   }
 
-  // --- Task-level user interaction: handle paused task response ---
-  const pausedTask = sessionId ? store.getPausedTask(input.source, input.requestedBy, input.chatId) : undefined;
-  if (sessionId && pausedTask && pausedTask.pendingInput) {
-    const originalInstruction = pausedTask.instruction;
-    const userAnswer = inboundText.trim();
-    const enrichedInstruction = `${originalInstruction}\n\n用户补充信息：${userAnswer}`;
-    store.resumeTask(pausedTask.id, enrichedInstruction);
+  if (routerV2Result.decision.mode === "goalrun") {
+    if (inFlightGoalRun && !requestsNewIndependentGoal(inboundText)) {
+      return finalize({
+        type: "smalltalk_replied",
+        message: `当前已有进行中的目标（${inFlightGoalRun.id.slice(0, 8)}，${formatGoalRunStageLabel(inFlightGoalRun.currentStage)}）。我会先把这条主线推进完成。若你要并行开新目标，请发送”新任务：<你的目标>”。`
+      });
+    }
+    const goalRun = store.createGoalRun({
+      source: input.source,
+      objective: taskText,
+      requestedBy: input.requestedBy,
+      chatId: input.chatId,
+      sessionId,
+      language: /[\u4e00-\u9fff]/.test(taskText) ? "zh-CN" : "en-US",
+      metadata: {
+        inboundText,
+        ...(requesterName ? { requesterName } : {}),
+        attachments: input.attachments ?? [],
+        routerDecision: routerV2Result.decision
+      },
+      context: {}
+    });
     updateSessionProjectMemoryFromInbound({
       sessionId,
       requesterName,
       requestedBy: input.requestedBy,
       source: input.source,
       inboundText,
-      taskText: enrichedInstruction,
-      stage: "task_input_received",
-      nextActions: ["任务已恢复执行"]
-    });
-    store.appendSessionMessage({
-      sessionId,
-      actorType: "system",
-      actorId: "orchestrator",
-      roleId: pausedTask.roleId,
-      messageType: "event",
-      content: "任务已恢复执行",
-      metadata: {
-        type: "task_resumed",
-        taskId: pausedTask.id
-      }
+      taskText,
+      stage: "goal_run_discover",
+      nextActions: ["等待目标流程完成信息澄清、计划拆解与执行交付阶段"]
     });
     return finalize({
-      type: "task_queued",
-      message: formatTaskQueuedMessage(input.source, pausedTask.id, pausedTask.roleId),
-      taskId: pausedTask.id
+      type: "goal_run_queued",
+      message: formatGoalRunQueuedMessage(input.source, goalRun.id),
+      goalRunId: goalRun.id
     });
   }
 
-  // --- Intake clarification: handle pending clarification response ---
-  const pendingClarification = (session?.metadata?.pendingClarification ?? null) as
-    | {
-        originalText?: unknown;
-        questions?: unknown;
-        createdAt?: unknown;
-        roleId?: unknown;
-      }
-    | null;
-  if (sessionId && pendingClarification && typeof pendingClarification.originalText === "string") {
-    const originalText = pendingClarification.originalText;
-    const questions = Array.isArray(pendingClarification.questions)
-      ? pendingClarification.questions.filter((q): q is string => typeof q === "string")
-      : [];
-    const enrichedInstruction = mergeClarificationResponse(originalText, questions, inboundText);
-    store.patchSessionMetadata(sessionId, { pendingClarification: null });
-    updateSessionProjectMemoryFromInbound({
-      sessionId,
-      requesterName,
-      requestedBy: input.requestedBy,
-      source: input.source,
-      inboundText,
-      taskText: enrichedInstruction,
-      stage: "clarification_received",
-      nextActions: ["创建任务并开始执行"]
+  if (routerV2Result.decision.mode === "conversation") {
+    return finalize({
+      type: "smalltalk_replied",
+      message: await buildConversationReplyWithModel(inboundText, getInboundConversationConfig())
     });
-    const clarifiedIntentStartTime = Date.now();
-    const clarifiedIntent = await classifyInboundIntent(enrichedInstruction, {
-      triggerKeywords: collaborationConfig.triggerKeywords
-    });
-    logger.info("clarification intent classification done", {
-      elapsed: Date.now() - clarifiedIntentStartTime,
-      sinceFunctionStart: Date.now() - collabStartTime,
-      clarifiedIntent
-    });
+  }
 
-    if (clarifiedIntent === "operator_config") {
-      const clarifiedInputRequirement = parseOperatorConfigInputRequirementFromText(enrichedInstruction);
-      if (clarifiedInputRequirement) {
-        return finalize({
-          type: "config_input_required",
-          message: clarifiedInputRequirement.message,
-          missingField: clarifiedInputRequirement.missingField,
-          expectedCommand: clarifiedInputRequirement.expectedCommand
-        });
-      }
+  if (routerV2Result.decision.mode === "operator_config") {
+    const inputRequirement = parseOperatorConfigInputRequirementFromText(inboundText);
+    if (inputRequirement) {
       return finalize({
         type: "config_input_required",
-        message: "我理解你想配置系统能力，请告诉我具体的操作，例如：「设置搜索工具为 tavily」、「切换模型到 glm-5」或「给 research 安装 web-search skill」。",
-        missingField: "action",
-        expectedCommand: "设置搜索工具为 tavily"
+        message: inputRequirement.message,
+        missingField: inputRequirement.missingField,
+        expectedCommand: inputRequirement.expectedCommand
       });
     }
+    return finalize({
+      type: "config_input_required",
+      message: "我理解你想配置系统能力，请告诉我具体的操作，例如：「设置搜索工具为 tavily」、「切换模型到 glm-5」或「给 research 安装 web-search skill」。",
+      missingField: "action",
+      expectedCommand: "设置搜索工具为 tavily"
+    });
+  }
 
-    if (clarifiedIntent === "goalrun") {
-      if (inFlightGoalRun && !requestsNewIndependentGoal(enrichedInstruction)) {
-        return finalize({
-          type: "smalltalk_replied",
-          message: `当前已有进行中的目标（${inFlightGoalRun.id.slice(0, 8)}，${formatGoalRunStageLabel(inFlightGoalRun.currentStage)}）。我会先把这条主线推进完成。若你要并行开新目标，请发送”新任务：<你的目标>”。`
-        });
-      }
-      const goalRun = store.createGoalRun({
-        source: input.source,
-        objective: enrichedInstruction,
-        requestedBy: input.requestedBy,
-        chatId: input.chatId,
-        sessionId,
-        language: /[\u4e00-\u9fff]/.test(enrichedInstruction) ? "zh-CN" : "en-US",
-        metadata: {
-          inboundText: enrichedInstruction,
-          ...(requesterName ? { requesterName } : {}),
-          attachments: input.attachments ?? []
-        },
-        context: {}
-      });
-      updateSessionProjectMemoryFromInbound({
-        sessionId,
-        requesterName,
-        requestedBy: input.requestedBy,
-        source: input.source,
-        inboundText: enrichedInstruction,
-        taskText: enrichedInstruction,
-        stage: "goal_run_discover",
-        nextActions: ["等待目标流程完成信息澄清、计划拆解与执行交付阶段"]
-      });
-      return finalize({
-        type: "goal_run_queued",
-        message: formatGoalRunQueuedMessage(input.source, goalRun.id),
-        goalRunId: goalRun.id
-      });
-    }
-
-    const clarifiedCollaborationMode = collaborationConfig.enabled && (clarifiedIntent === "collaboration");
-    const clarifiedLightCollaborationMode =
-      collaborationConfig.enabled && (clarifiedIntent === "light_collaboration") && !clarifiedCollaborationMode;
-    const clarifiedRoleId = clarifiedCollaborationMode ? resolveCollaborationEntryRole(enrichedInstruction) : undefined;
-    const clarifiedMetadata: Record<string, unknown> = requesterName ? { requesterName } : {};
+  if (routerV2Result.decision.mode === "task" || routerV2Result.decision.mode === "collaboration") {
+    const collaborationMode =
+      collaborationConfig.enabled &&
+      (routerV2Result.decision.mode === "collaboration" ||
+        routerV2Result.decision.collaborationLevel === "standard" ||
+        routerV2Result.decision.collaborationLevel === "full");
+    const lightCollaborationMode =
+      collaborationConfig.enabled &&
+      !collaborationMode &&
+      routerV2Result.decision.collaborationLevel === "light";
+    const roleId = collaborationMode
+      ? resolveCollaborationEntryRole(inboundText)
+      : resolveRouterPrimaryRole(routerV2Result.decision, inboundText);
+    const metadata: Record<string, unknown> = {
+      ...(requesterName ? { requesterName } : {}),
+      routerDecision: routerV2Result.decision
+    };
     if (input.attachments && input.attachments.length > 0) {
-      clarifiedMetadata.attachments = input.attachments;
+      metadata.attachments = input.attachments;
     }
-    if (clarifiedCollaborationMode) {
-      clarifiedMetadata.collaborationMode = true;
-      clarifiedMetadata.collaborationEntryRole = clarifiedRoleId;
+    if (collaborationMode) {
+      metadata.collaborationMode = true;
+      metadata.collaborationEntryRole = roleId;
     }
-    if (clarifiedLightCollaborationMode) {
-      clarifiedMetadata.lightCollaboration = true;
+    if (lightCollaborationMode) {
+      metadata.lightCollaboration = true;
     }
-    const clarifiedTask = createTask({
+    const task = createTask({
       sessionId,
-      instruction: enrichedInstruction,
+      instruction: taskText,
       source: input.source,
       requestedBy: input.requestedBy,
       chatId: input.chatId,
-      roleId: clarifiedRoleId,
-      metadata: clarifiedMetadata
+      roleId,
+      metadata
     });
-    const clarifiedCollaborationPlanPromise = analyzeCollaborationNeed(enrichedInstruction, {
-      triggerKeywords: collaborationConfig.triggerKeywords
-    });
-    applyCollaborationPlanToTask(clarifiedTask.id, clarifiedCollaborationPlanPromise);
+    applyCollaborationPlanToTask(task.id);
     updateSessionProjectMemoryFromInbound({
       sessionId,
       requesterName,
       requestedBy: input.requestedBy,
       source: input.source,
-      inboundText: enrichedInstruction,
-      taskText: enrichedInstruction,
-      stage: clarifiedCollaborationMode
+      inboundText,
+      taskText,
+      stage: collaborationMode
         ? "collaboration_queued"
-        : clarifiedLightCollaborationMode
+        : lightCollaborationMode
         ? "light_collaboration_queued"
         : "task_queued",
       nextActions: [
-        clarifiedCollaborationMode
+        collaborationMode
           ? "等待团队分工执行并汇总"
-          : clarifiedLightCollaborationMode
+          : lightCollaborationMode
           ? "等待主执行者完成并审阅"
           : "等待角色执行并返回结果"
       ]
     });
-    const clarifiedMessage = clarifiedCollaborationMode
-      ? formatTaskQueuedMessage(input.source, clarifiedTask.id, clarifiedTask.roleId) + "（已启动多角色协作模式）"
-      : clarifiedLightCollaborationMode
-      ? formatTaskQueuedMessage(input.source, clarifiedTask.id, clarifiedTask.roleId) + "（已启动轻量协作模式：主执行 + 审阅）"
-      : formatTaskQueuedMessage(input.source, clarifiedTask.id, clarifiedTask.roleId);
+    const message = collaborationMode
+      ? formatTaskQueuedMessage(input.source, task.id, task.roleId) + "（已启动多角色协作模式）"
+      : lightCollaborationMode
+      ? formatTaskQueuedMessage(input.source, task.id, task.roleId) + "（已启动轻量协作模式：主执行 + 审阅）"
+      : formatTaskQueuedMessage(input.source, task.id, task.roleId);
     return finalize({
       type: "task_queued",
-      message: clarifiedMessage,
-      taskId: clarifiedTask.id
+      message,
+      taskId: task.id
     });
   }
 
   // --- Intake clarification: analyze new requests for clarity ---
-  if (sessionId && !isObviouslyClear(inboundText)) {
-    const analysis = await analyzeIntakeClarity(inboundText);
+  if (sessionId && !isObviouslyClear(inboundText, { evolution: intakeEvolution })) {
+    const analysis = await analyzeIntakeClarity(inboundText, { evolution: intakeEvolution });
     if (!analysis.isClear && analysis.clarifyingQuestions.length > 0) {
+      const intakeAudit = store.appendAuditEvent({
+        category: "intake",
+        entityType: "session",
+        entityId: sessionId,
+        message: "Clarification requested before task creation",
+        payload: {
+          reason: "clarification_requested",
+          stage: "intake_analyzer",
+          textPreview: shorten(inboundText, 180),
+          questions: analysis.clarifyingQuestions
+        }
+      });
+      const intakeSignal = extractEvolutionSignalFromAudit(intakeAudit);
+      if (intakeSignal) {
+        recordEvolutionSignals(store, [intakeSignal]);
+        applyLowRiskEvolutionProposals(store);
+      }
       store.patchSessionMetadata(sessionId, {
         pendingClarification: {
           originalText: inboundText,
@@ -4113,132 +3869,11 @@ async function handleInboundMessage(input: {
     }
   }
 
-  // Classify intent (for routing: goalrun / operator_config / task).
-  // collaborationPlanPromise was already fired at the top of handleInboundMessage
-  // and has been running in parallel throughout all early-return checks above.
-  const intentStartTime = Date.now();
-  const intent = await classifyInboundIntent(inboundText, {
-    triggerKeywords: collaborationConfig.triggerKeywords
-  });
-  logger.info("intent classification done", { elapsed: Date.now() - intentStartTime, sinceFunctionStart: Date.now() - collabStartTime, intent });
-
-  if (intent === "operator_config") {
-    // The precise operator action path (parseOperatorActionFromText) already ran above and
-    // returned nothing — so the user expressed a config intent but without a complete command.
-    // Guide them toward the correct format.
-    const inputRequirement = parseOperatorConfigInputRequirementFromText(inboundText);
-    if (inputRequirement) {
-      return finalize({
-        type: "config_input_required",
-        message: inputRequirement.message,
-        missingField: inputRequirement.missingField,
-        expectedCommand: inputRequirement.expectedCommand
-      });
-    }
-    return finalize({
-      type: "config_input_required",
-      message: "我理解你想配置系统能力，请告诉我具体的操作，例如：「设置搜索工具为 tavily」、「切换模型到 glm-5」或「给 research 安装 web-search skill」。",
-      missingField: "action",
-      expectedCommand: "设置搜索工具为 tavily"
-    });
-  }
-
-  if (intent === "goalrun") {
-    if (inFlightGoalRun && !requestsNewIndependentGoal(inboundText)) {
-      return finalize({
-        type: "smalltalk_replied",
-        message: `当前已有进行中的目标（${inFlightGoalRun.id.slice(0, 8)}，${formatGoalRunStageLabel(inFlightGoalRun.currentStage)}）。我会先把这条主线推进完成。若你要并行开新目标，请发送”新任务：<你的目标>”。`
-      });
-    }
-    const goalRun = store.createGoalRun({
-      source: input.source,
-      objective: taskText,
-      requestedBy: input.requestedBy,
-      chatId: input.chatId,
-      sessionId,
-      language: /[\u4e00-\u9fff]/.test(taskText) ? "zh-CN" : "en-US",
-      metadata: {
-        inboundText,
-        ...(requesterName ? { requesterName } : {}),
-        attachments: input.attachments ?? []
-      },
-      context: {}
-    });
-    updateSessionProjectMemoryFromInbound({
-      sessionId,
-      requesterName,
-      requestedBy: input.requestedBy,
-      source: input.source,
-      inboundText,
-      taskText,
-      stage: "goal_run_discover",
-      nextActions: ["等待目标流程完成信息澄清、计划拆解与执行交付阶段"]
-    });
-    return finalize({
-      type: "goal_run_queued",
-      message: formatGoalRunQueuedMessage(input.source, goalRun.id),
-      goalRunId: goalRun.id
-    });
-  }
-
-  // For the main task path, we don't block on collaborationPlan — the LLM analysis can take
-  // 30-60s. Instead, use intent for initial routing and let applyCollaborationPlanToTask()
-  // async-patch the plan into task metadata before the worker processes it.
-  const collaborationMode = collaborationConfig.enabled && (intent === "collaboration");
-  const lightCollaborationMode = collaborationConfig.enabled && (intent === "light_collaboration") && !collaborationMode;
-  const roleId = collaborationMode ? resolveCollaborationEntryRole(inboundText) : undefined;
-  const metadata: Record<string, unknown> = requesterName ? { requesterName } : {};
-  if (input.attachments && input.attachments.length > 0) {
-    metadata.attachments = input.attachments;
-  }
-  if (collaborationMode) {
-    metadata.collaborationMode = true;
-    metadata.collaborationEntryRole = roleId;
-  }
-  if (lightCollaborationMode) {
-    metadata.lightCollaboration = true;
-  }
-
-  const task = createTask({
-    sessionId,
-    instruction: taskText,
-    source: input.source,
-    requestedBy: input.requestedBy,
-    chatId: input.chatId,
-    roleId,
-    metadata
-  });
-  // Async-patch collaboration plan into task metadata once the LLM analysis completes.
-  // The worker reads this lazily before creating review tasks, so it will see the final plan.
-  applyCollaborationPlanToTask(task.id);
-
-  updateSessionProjectMemoryFromInbound({
-    sessionId,
-    requesterName,
-    requestedBy: input.requestedBy,
-    source: input.source,
-    inboundText,
-    taskText,
-    stage: collaborationMode ? "collaboration_queued" : lightCollaborationMode ? "light_collaboration_queued" : "task_queued",
-    nextActions: [
-      collaborationMode
-        ? "等待团队分工执行并汇总"
-        : lightCollaborationMode
-        ? "等待主执行者完成并审阅"
-        : "等待角色执行并返回结果"
-    ]
-  });
-
-  const message = collaborationMode
-    ? formatTaskQueuedMessage(input.source, task.id, task.roleId) + "（已启动多角色协作模式）"
-    : lightCollaborationMode
-    ? formatTaskQueuedMessage(input.source, task.id, task.roleId) + "（已启动轻量协作模式：主执行 + 审阅）"
-    : formatTaskQueuedMessage(input.source, task.id, task.roleId);
-
   return finalize({
-    type: "task_queued",
-    message,
-    taskId: task.id
+    type: "config_input_required",
+    message: "路由结果未能落到可执行分支，请重新描述目标或稍后重试。",
+    missingField: "route",
+    expectedCommand: "请帮我完成 <具体目标>"
   });
 }
 
@@ -4341,6 +3976,40 @@ async function handleFeishuCardAction(cardAction: FeishuCardActionEvent): Promis
     return;
   }
 
+  const sessionWorkbenchAction = parseSessionWorkbenchCardActionPayload(cardAction.actionValue);
+  if (sessionWorkbenchAction) {
+    if (sessionWorkbenchAction.action === "continue") {
+      const result = await handleInboundMessage({
+        sessionId: sessionWorkbenchAction.sessionId,
+        text: "继续推进当前会话，并基于已有工作台状态给出下一步执行结果。",
+        taskText: "继续推进当前会话，并基于已有工作台状态给出下一步执行结果。",
+        source: "feishu",
+        requestedBy: cardAction.operatorOpenId,
+        chatId: cardAction.contextChatId
+      });
+      await sendFeishuPrivateFeedback(cardAction.operatorOpenId, sanitizeFeishuAckMessage(result.message));
+      return;
+    }
+    const card =
+      sessionWorkbenchAction.action === "task_status" && sessionWorkbenchAction.taskId
+        ? (() => {
+            const task = store.getTask(sessionWorkbenchAction.taskId);
+            return task ? buildTaskStatusCard(task) : undefined;
+          })()
+        : sessionWorkbenchAction.action === "goal_run_status" && sessionWorkbenchAction.goalRunId
+          ? (() => {
+              const run = store.getGoalRun(sessionWorkbenchAction.goalRunId);
+              return run ? buildGoalRunStatusCard(store, run) : undefined;
+            })()
+          : buildSessionWorkbenchCardBySessionId(sessionWorkbenchAction.sessionId);
+    if (!card) {
+      await sendFeishuPrivateFeedback(cardAction.operatorOpenId, "会话工作台不存在或已失效。");
+      return;
+    }
+    await sendFeishuPrivateFeedback(cardAction.operatorOpenId, card);
+    return;
+  }
+
   const goalRunAction = parseGoalRunCardActionPayload(cardAction.actionValue);
   if (goalRunAction) {
     const run = store.getGoalRun(goalRunAction.goalRunId);
@@ -4440,6 +4109,10 @@ async function handleFeishuCardAction(cardAction: FeishuCardActionEvent): Promis
   }
 
   await notifyApprovalStepViaFeishu(approval.id);
+  await notifyApprovalWorkbenchViaFeishu({
+    approval: decidedApproval,
+    reason: "approval_decision"
+  });
   const stillPending = store.getPendingApprovalWorkflowStep(approval.id);
   if (stillPending) {
     await sendFeishuPrivateFeedback(
@@ -4462,7 +4135,7 @@ async function handleFeishuCardAction(cardAction: FeishuCardActionEvent): Promis
 
 async function sendFeishuInboundAck(
   message: FeishuMessageEvent,
-  result: { type?: string; message: string; questions?: string[]; taskId?: string },
+  result: { type?: string; message: string; questions?: string[]; taskId?: string; taskIds?: string[] },
   scene?: EmojiScene,
   options?: { forceText?: boolean | undefined; skipReaction?: boolean | undefined }
 ): Promise<void> {
@@ -4512,9 +4185,39 @@ async function sendFeishuInboundAck(
           buildTaskQueuedCard({
             title: task.title,
             roleLabel,
-            workflowSummary: buildWorkflowStatusSummary(task, { includeGoal: true })
+            workflowSummary: buildWorkflowStatusSummary(task, { includeGoal: true }),
+            nextActions: buildTaskQueuedNextActions(task.title, task.roleId)
           })
         );
+        if (task.sessionId) {
+          const workbenchCard = buildSessionWorkbenchCardBySessionId(task.sessionId);
+          if (workbenchCard) {
+            await client.sendCardToChat(message.chatId, workbenchCard);
+          }
+        }
+      } else {
+        await client.sendTextToChat(message.chatId, sanitizeFeishuAckMessage(result.message));
+      }
+    } else if (result.type === "template_tasks_queued" && (result.taskIds?.length ?? 0) > 0) {
+      const firstTask = store.getTask(result.taskIds![0]!);
+      if (firstTask) {
+        const roleProfile = listRoles().find((r) => r.id === firstTask.roleId);
+        const roleLabel = roleProfile?.name ?? firstTask.roleId;
+        await client.sendCardToChat(
+          message.chatId,
+          buildTaskQueuedCard({
+            title: firstTask.title,
+            roleLabel,
+            workflowSummary: buildWorkflowStatusSummary(firstTask, { includeGoal: true }),
+            nextActions: buildTaskQueuedNextActions(firstTask.title, firstTask.roleId)
+          })
+        );
+        if (firstTask.sessionId) {
+          const workbenchCard = buildSessionWorkbenchCardBySessionId(firstTask.sessionId);
+          if (workbenchCard) {
+            await client.sendCardToChat(message.chatId, workbenchCard);
+          }
+        }
       } else {
         await client.sendTextToChat(message.chatId, sanitizeFeishuAckMessage(result.message));
       }
@@ -4640,8 +4343,14 @@ registerApprovalRoutes(app, {
   ensureApprovalWorkflowForRecord,
   safeEmitApprovalLifecycleEvent,
   applyApprovalDecisionEffects,
-  onApprovalWorkflowUpdated: async ({ approvalId, stepId }) => {
+  onApprovalWorkflowUpdated: async ({ approvalId, stepId, reason, approval }) => {
     await notifyApprovalStepViaFeishu(approvalId, stepId);
+    if (reason === "decision") {
+      await notifyApprovalWorkbenchViaFeishu({
+        approval: approval ?? store.getApproval(approvalId),
+        reason: "approval_decision"
+      });
+    }
   }
 });
 
@@ -4683,7 +4392,10 @@ async function processFeishuInboundMessage(message: FeishuMessageEvent) {
   });
 
   const normalizedText = normalizeFeishuInboundText(message.text);
-  const fastConversation = isSmalltalkMessage(normalizedText) || isDirectConversationTurn(normalizedText);
+  const fastConversation =
+    isSmalltalkMessage(normalizedText) ||
+    isNonActionableChatMessage(normalizedText) ||
+    isDirectConversationTurn(normalizedText, getInboundConversationConfig());
   let senderName: string | undefined;
   if (!fastConversation) {
     senderName = await resolveFeishuSenderName(message.senderId);

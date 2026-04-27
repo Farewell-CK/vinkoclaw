@@ -13,6 +13,7 @@ type ApprovalWorkflowUpdatedInput = {
   approvalId: string;
   stepId?: string | undefined;
   reason: "decision" | "escalation";
+  approval?: ApprovalRecord | undefined;
 };
 
 type ApprovalWorkflowUpdatedHandler = (input: ApprovalWorkflowUpdatedInput) => Promise<void> | void;
@@ -160,7 +161,11 @@ describe("approval routes", () => {
     const firstCallArg = onUpdated.mock.calls[0]?.[0];
     expect(firstCallArg).toMatchObject({
       approvalId: approval.id,
-      reason: "decision"
+      reason: "decision",
+      approval: expect.objectContaining({
+        id: approval.id,
+        status: "rejected"
+      })
     });
   });
 

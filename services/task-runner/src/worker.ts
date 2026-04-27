@@ -35,11 +35,15 @@ import {
   emitTaskLifecycle,
   extractToolOutput,
   getSkillDefinition,
+  applyLowRiskEvolutionProposals,
+  getEvolutionState,
   hasMeaningfulToolProgress,
   parseSearchMaxResults,
   extractArtifactFilesFromText as extractProjectMemoryArtifactFilesFromText,
   collectProjectMemoryArtifactsFromTask,
   createOrchestrationState,
+  extractEvolutionSignalFromSkillVerification,
+  extractEvolutionSignalsFromTask,
   mergeOrchestrationState,
   normalizeOrchestrationState,
   type OrchestrationArtifactItem,
@@ -51,6 +55,7 @@ import {
   listToolProviderStatuses,
   loadEnv,
   resolveDataPath,
+  recordEvolutionSignals,
   ROLE_IDS,
   selectAvailableProviders,
   shouldUseCodeExecutorTask,
@@ -71,7 +76,9 @@ import {
 import { CollaborationManager } from "./collaboration-manager.js";
 import { buildCompanionArtifacts } from "./artifact-export.js";
 import { resolveDeliverableMode, validateDeliverableArtifacts } from "./deliverable-contract.js";
+import { notifyEvolutionAppliedChanges } from "./evolution-notifier.js";
 import { notifyGoalRunProgressSafely } from "./goal-run-progress.js";
+import { notifySessionWorkbench } from "./session-workbench-notifier.js";
 
 const env = loadEnv();
 const store = VinkoStore.fromEnv(env);
@@ -142,6 +149,23 @@ function buildRuntimeSkillBindingSnapshot(skills: SkillBindingRecord[]): Array<R
 function persistTaskRuntimeSkillSnapshot(task: TaskRecord, skills: SkillBindingRecord[]): void {
   store.patchTaskMetadata(task.id, {
     runtimeSkillBindings: buildRuntimeSkillBindingSnapshot(skills)
+  });
+}
+
+async function recordEvolutionFromCompletedTask(task: TaskRecord): Promise<void> {
+  const signals = extractEvolutionSignalsFromTask(task);
+  if (signals.length === 0) {
+    return;
+  }
+  const beforeState = structuredClone(getEvolutionState(store));
+  recordEvolutionSignals(store, signals);
+  const afterState = applyLowRiskEvolutionProposals(store);
+  await notifyEvolutionAppliedChanges({
+    store,
+    feishuClient: createFeishuClient(),
+    chatId: task.chatId,
+    beforeState,
+    afterState
   });
 }
 
@@ -523,6 +547,7 @@ const FEISHU_SMALLTALK_ONLY_PATTERN =
   /^(?:你好|您好|嗨|哈喽|hello|hi|hey|在吗|在不在|早上好|中午好|下午好|晚上好|谢谢|多谢|thx|thanks|thankyou|辛苦了)(?:呀|啊|哈|呢|啦|嘛|哇)?$/i;
 const FEISHU_SMALLTALK_ACTION_PATTERN =
   /(?:帮我|请|配置|设置|安装|新增|添加|删除|移除|创建|调研|分析|写|做|处理|执行|安排|切换|启用|禁用|run|install|set|configure|add|remove|delete|create|search)/i;
+const FEISHU_NON_ACTIONABLE_CHAT_PATTERN = /^[？?!.。！…~～\s]+$/;
 const GOAL_RUN_ARTIFACT_OBJECTIVE_PATTERN =
   /(?:写|实现|开发|构建|创建|搭建|生成|小游戏|网站|官网|前端|后端|代码|测试用例|编写|build|implement|develop|create|generate|website|landing\s*page|game|app|frontend|backend|code|test\s*case|repository|repo)/i;
 const ARTIFACT_FILE_EXTENSIONS = new Set([
@@ -823,6 +848,7 @@ async function failDeliverableContract(task: TaskRecord, mode: string, errorText
       workflowSummary: buildWorkflowStatusSummary(failed, { includeGoal: true, includeArtifacts: true })
     });
     await notifyFeishuCard(failed.chatId, card);
+    await notifyTaskSessionWorkbench(failed, "task_failed");
   }
   syncFounderWorkflowFailure(failed);
 }
@@ -1133,37 +1159,19 @@ function buildFeishuApprovalDecisionCard(input: {
  * final delivery. Allows the user to rate the result 👍 or 👎.
  */
 function buildTaskFeedbackCard(task: TaskRecord, summary: string): Record<string, unknown> {
-  const feedbackValue = { kind: "task_feedback", taskId: task.id, chatId: task.chatId };
-  return {
-    config: { wide_screen_mode: true },
-    header: {
-      title: { tag: "plain_text", content: "任务完成 ✓" },
-      template: "green"
-    },
-    elements: [
-      {
-        tag: "markdown",
-        content: `**${task.title}**\n\n${summary.slice(0, 300)}`
-      },
-      {
-        tag: "action",
-        actions: [
-          {
-            tag: "button",
-            text: { tag: "plain_text", content: "👍 满意" },
-            type: "primary",
-            value: { ...feedbackValue, rating: "good" }
-          },
-          {
-            tag: "button",
-            text: { tag: "plain_text", content: "👎 需改进" },
-            type: "danger",
-            value: { ...feedbackValue, rating: "poor" }
-          }
-        ]
-      }
-    ]
-  };
+  return buildTaskCompletedCard({
+    title: task.title,
+    roleLabel: ROLE_LABELS[task.roleId] ?? task.roleId,
+    summary: summary.slice(0, 300),
+    workflowSummary: buildWorkflowStatusSummary(task, { includeGoal: true, includeArtifacts: true }),
+    nextActions: ["确认是否采纳当前交付", "如需调整，直接指出要改的部分", "继续推进下一步执行"],
+    feedback: task.chatId
+      ? {
+          taskId: task.id,
+          chatId: task.chatId
+        }
+      : undefined
+  });
 }
 
 /**
@@ -1184,6 +1192,117 @@ async function notifyFeishuCard(chatId: string, card: Record<string, unknown>): 
       payload: { error: error instanceof Error ? error.message : String(error) }
     });
   }
+}
+
+async function notifyTaskSessionWorkbench(task: TaskRecord, reason: string): Promise<void> {
+  await notifySessionWorkbench({
+    store,
+    feishuClient: createFeishuClient(),
+    sessionId: task.sessionId,
+    chatId: task.chatId,
+    reason
+  });
+}
+
+function resolveTaskProgressIntervalMs(): number {
+  const parsed = Number(process.env.RUNNER_PROGRESS_REPORT_MS ?? "45000");
+  if (!Number.isFinite(parsed)) {
+    return 45_000;
+  }
+  return Math.max(15_000, Math.min(5 * 60_000, Math.round(parsed)));
+}
+
+function buildCeoProgressMessage(task: TaskRecord, elapsedMs: number): string {
+  const elapsedSeconds = Math.max(1, Math.round(elapsedMs / 1000));
+  const roleLabel = ROLE_LABELS[task.roleId] ?? task.roleId;
+  const workflowLabel = typeof task.metadata?.workflowLabel === "string" ? task.metadata.workflowLabel.trim() : "";
+  const focus =
+    task.roleId === "research"
+      ? "正在整理证据、对比视角和可执行建议"
+      : task.roleId === "product"
+        ? "正在收敛范围、验收标准和下一步拆解"
+        : task.roleId === "engineering" || task.roleId === "developer"
+          ? "正在执行实现、验证和变更整理"
+          : "正在推进任务并整理交付结果";
+  return [
+    `CEO 进度汇报：${roleLabel}已执行约 ${elapsedSeconds}s。`,
+    workflowLabel ? `工作流：${workflowLabel}。` : "",
+    `${focus}；完成后会直接回报结论、产物和下一步。`
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function startTaskProgressHeartbeat(task: TaskRecord): () => void {
+  if (!task.sessionId && !(task.source === "feishu" && task.chatId)) {
+    return () => {};
+  }
+  const startedAt = Date.now();
+  let count = 0;
+  const emit = (reason: string): void => {
+    count += 1;
+    const content = buildCeoProgressMessage(task, Date.now() - startedAt);
+    if (task.sessionId) {
+      store.appendSessionMessage({
+        sessionId: task.sessionId,
+        actorType: "system",
+        actorId: "task-runner",
+        roleId: task.roleId,
+        messageType: "event",
+        content,
+        metadata: {
+          type: "ceo_progress_report",
+          taskId: task.id,
+          reason,
+          reportCount: count
+        }
+      });
+    }
+    store.appendAuditEvent({
+      category: "task",
+      entityType: "task",
+      entityId: task.id,
+      message: "CEO progress report emitted",
+      payload: {
+        eventType: "ceo_progress_report",
+        reason,
+        reportCount: count,
+        sessionId: task.sessionId ?? "",
+        chatId: task.chatId ?? ""
+      }
+    });
+    if (task.source === "feishu" && task.chatId) {
+      void notifyTaskSessionWorkbench(task, "ceo_progress_report");
+    }
+  };
+
+  emit("started");
+  const timer = setInterval(() => emit("heartbeat"), resolveTaskProgressIntervalMs());
+  return () => clearInterval(timer);
+}
+
+function extractCeoNextActions(result: TaskResult, artifactFiles: string[]): string[] {
+  const followUps = Array.isArray(result.followUps)
+    ? result.followUps.map((item) => item.trim()).filter(Boolean)
+    : [];
+  const artifactAction =
+    artifactFiles.length > 0 ? [`查看并确认产物：${artifactFiles.slice(0, 2).join("；")}`] : [];
+  return Array.from(new Set([...followUps, ...artifactAction])).slice(0, 4);
+}
+
+function buildCeoDeliverySummary(task: TaskRecord, result: TaskResult, artifactFiles: string[]): string {
+  const summary = result.summary.trim() || "任务已完成。";
+  const artifactLine =
+    artifactFiles.length > 0
+      ? `\n\n**产物**：${artifactFiles.slice(0, 3).join("；")}${artifactFiles.length > 3 ? ` 等 ${artifactFiles.length} 个` : ""}`
+      : "";
+  const nextActions = extractCeoNextActions(result, artifactFiles);
+  const nextLine =
+    nextActions.length > 0 ? `\n\n**建议下一步**：\n${nextActions.map((item) => `- ${item}`).join("\n")}` : "";
+  const roleLabel = ROLE_LABELS[task.roleId] ?? task.roleId;
+  return [`**CEO 交付汇报**`, `**执行角色**：${roleLabel}`, "", summary, artifactLine, nextLine]
+    .filter(Boolean)
+    .join("\n");
 }
 
 async function notifyFeishuApprovalStep(input: {
@@ -2169,6 +2288,7 @@ async function completeToolTask(
     syncSkillIntegrationOutcome(completed);
     syncInstalledSkillVerification(completed);
     syncFounderWorkflowProgress(completed);
+    await recordEvolutionFromCompletedTask(completed);
   }
   if (completed?.sessionId) {
     store.appendSessionMessage({
@@ -2177,7 +2297,7 @@ async function completeToolTask(
       actorId: completed.roleId,
       roleId: completed.roleId,
       messageType: "text",
-      content: `${completion.result.summary}\n\n${completion.result.deliverable.slice(0, 1200)}`,
+      content: buildCeoDeliverySummary(completed, completion.result, normalizedChangedFiles),
       metadata: {
         taskId: completed.id,
         providerId
@@ -2188,10 +2308,12 @@ async function completeToolTask(
     const card = buildTaskCompletedCard({
       title: completed.title,
       roleLabel: ROLE_LABELS[completed.roleId] ?? completed.roleId,
-      summary: `${completion.result.summary}\n\n${completion.result.deliverable.slice(0, 800)}`,
-      workflowSummary: buildWorkflowStatusSummary(completed, { includeGoal: true, includeArtifacts: true })
+      summary: buildCeoDeliverySummary(completed, completion.result, normalizedChangedFiles).slice(0, 800),
+      workflowSummary: buildWorkflowStatusSummary(completed, { includeGoal: true, includeArtifacts: true }),
+      nextActions: extractCeoNextActions(completion.result, normalizedChangedFiles)
     });
     await notifyFeishuCard(completed.chatId, card);
+    await notifyTaskSessionWorkbench(completed, "task_completed");
   }
 }
 
@@ -2372,6 +2494,13 @@ async function processNormalTask(
           communicationStyle?: "concise" | "detailed" | "default";
           activeProjects?: Array<{ name: string; stage: string; lastUpdate: string }>;
           keyDecisions?: Array<{ decision: string; rationale: string; timestamp: string }>;
+          founderProfile?: {
+            businessDomains?: string[];
+            targetUsers?: string[];
+            deliverablePreferences?: string[];
+            decisionStyle?: "action_first" | "evidence_first" | "balanced";
+            feedbackSignals?: Array<{ signal: string; note: string; taskId?: string; createdAt: string }>;
+          } | undefined;
         }
       | undefined;
     if (ctx) {
@@ -2380,13 +2509,20 @@ async function processNormalTask(
       if (ctx.communicationStyle) workspaceContext.communicationStyle = ctx.communicationStyle;
       if (ctx.activeProjects) workspaceContext.activeProjects = ctx.activeProjects;
       if (ctx.keyDecisions) workspaceContext.keyDecisions = ctx.keyDecisions;
+      if (ctx.founderProfile) workspaceContext.founderProfile = ctx.founderProfile;
       if (Object.keys(workspaceContext).length > 0) {
         runtimeExecuteInput.workspaceContext = workspaceContext;
       }
     }
   }
 
-  const output = await runtime.execute(runtimeExecuteInput);
+  const stopProgressHeartbeat = startTaskProgressHeartbeat(effectiveTask);
+  let output: Awaited<ReturnType<AgentRuntime["execute"]>>;
+  try {
+    output = await runtime.execute(runtimeExecuteInput);
+  } finally {
+    stopProgressHeartbeat();
+  }
 
   // Detect __NEEDS_INPUT__ marker in LLM output for task-level user interaction
   const needsInputMarker = output.result.deliverable.match(/__NEEDS_INPUT__\s*(?:\{[^}]*\})?/);
@@ -2438,6 +2574,7 @@ async function processNormalTask(
         workflowSummary: buildWorkflowStatusSummary(paused, { includeGoal: true })
       });
       await notifyFeishuCard(paused.chatId, card);
+      await notifyTaskSessionWorkbench(paused, "task_paused_input");
     }
     // Do not complete the task - leave it in paused_input state
     return true;
@@ -2456,7 +2593,7 @@ async function processNormalTask(
     return true;
   }
 
-  const rawMessage = `${output.result.summary}\n\n${output.result.deliverable.slice(0, 1200)}`;
+  const rawMessage = buildCeoDeliverySummary(effectiveTask, output.result, output.artifactFiles);
   const userFacingMessage =
     effectiveTask.source === "feishu"
       ? condenseFeishuReplyIfNeeded({
@@ -2495,6 +2632,7 @@ async function processNormalTask(
     syncSkillIntegrationOutcome(completed);
     syncInstalledSkillVerification(completed);
     syncFounderWorkflowProgress(completed);
+    await recordEvolutionFromCompletedTask(completed);
 
     // Workspace memory: extract tech decisions and project context from completed task
     syncWorkspaceMemoryFromTask(completed, output.result);
@@ -2651,7 +2789,7 @@ async function processNormalTask(
       actorId: completed.roleId,
       roleId: completed.roleId,
       messageType: "text",
-      content: userFacingMessage,
+      content: buildCeoDeliverySummary(completed, output.result, output.artifactFiles),
       metadata: {
         taskId: completed.id
       }
@@ -2689,7 +2827,8 @@ async function processNormalTask(
         title: completed.title,
         roleLabel: ROLE_LABELS[completed.roleId] ?? completed.roleId,
         summary: userFacingMessage.slice(0, 800),
-        workflowSummary: buildWorkflowStatusSummary(completed, { includeGoal: true, includeArtifacts: true })
+        workflowSummary: buildWorkflowStatusSummary(completed, { includeGoal: true, includeArtifacts: true }),
+        nextActions: extractCeoNextActions(output.result, output.artifactFiles)
       });
       await notifyFeishuCard(completed.chatId, card);
     }
@@ -2698,6 +2837,7 @@ async function processNormalTask(
       const allArtifacts = collectTaskArtifactFiles(completed);
       await sendArtifactsToFeishuChat(completed.chatId, allArtifacts);
     }
+    await notifyTaskSessionWorkbench(completed, "task_completed");
   }
 
   return true;
@@ -2817,8 +2957,22 @@ function isFeishuSmalltalkInstruction(text: string): boolean {
   return FEISHU_SMALLTALK_ONLY_PATTERN.test(compact);
 }
 
+function isFeishuNonActionableChatInstruction(text: string): boolean {
+  const normalized = normalizeSmalltalkInstruction(text);
+  if (!normalized) {
+    return true;
+  }
+  if (FEISHU_SMALLTALK_ACTION_PATTERN.test(normalized)) {
+    return false;
+  }
+  return FEISHU_NON_ACTIONABLE_CHAT_PATTERN.test(normalized);
+}
+
 function buildFeishuSmalltalkResponse(text: string): string {
   const compact = normalizeSmalltalkInstruction(text).toLowerCase().replace(/[，。！？!?,.~～\s]/g, "");
+  if (FEISHU_NON_ACTIONABLE_CHAT_PATTERN.test(normalizeSmalltalkInstruction(text))) {
+    return "我没拿到明确任务。你可以直接说目标，例如“写一个活动落地页 PRD”或“帮我检查当前任务进度”。";
+  }
   if (/^(?:谢谢|多谢|thx|thanks|thankyou|辛苦了)/i.test(compact)) {
     return "不客气，我在。你可以直接告诉我接下来要处理的任务。";
   }
@@ -3037,8 +3191,187 @@ function syncWorkspaceMemoryFromTask(task: TaskRecord, result: TaskResult): void
         store.updateWorkspaceProject(projectName, "active");
       }
     }
+
+    const current = store.getWorkspaceMemory();
+    const textForFounderMemory = `${task.title}\n${task.instruction}\n${result.summary}\n${result.followUps.join("\n")}`;
+    const businessDomains = inferFounderBusinessDomains(textForFounderMemory);
+    const targetUsers = inferFounderTargetUsers(textForFounderMemory);
+    const deliverablePreferences = inferFounderDeliverablePreferences(task, result);
+    const feedbackSignals = inferFounderFeedbackSignals(task, result);
+    const decisionStyle = inferFounderDecisionStyle(textForFounderMemory, current.founderProfile.decisionStyle);
+    const nextFounderProfile = {
+      businessDomains: mergeLimited(current.founderProfile.businessDomains, businessDomains, 12),
+      targetUsers: mergeLimited(current.founderProfile.targetUsers, targetUsers, 12),
+      deliverablePreferences: mergeLimited(current.founderProfile.deliverablePreferences, deliverablePreferences, 12),
+      decisionStyle,
+      feedbackSignals: [...current.founderProfile.feedbackSignals, ...feedbackSignals].slice(-20)
+    };
+    store.patchWorkspaceMemory({
+      founderProfile: nextFounderProfile
+    });
+    recordFounderMemoryFacts({
+      task,
+      businessDomains,
+      targetUsers,
+      deliverablePreferences,
+      decisionStyle,
+      feedbackSignals
+    });
   } catch {
     // Workspace memory sync is best-effort — never block task completion
+  }
+}
+
+function mergeLimited(existing: string[], incoming: string[], limit: number): string[] {
+  return Array.from(new Set([...existing, ...incoming].map((item) => item.trim()).filter(Boolean))).slice(0, limit);
+}
+
+function inferFounderBusinessDomains(text: string): string[] {
+  const normalized = text.toLowerCase();
+  const domains: string[] = [];
+  const candidates: Array<[string, RegExp]> = [
+    ["AI Agent", /ai\s*agent|智能体|多智能体|agent/i],
+    ["AI 玩具", /ai\s*玩具|智能玩具|toy/i],
+    ["SaaS", /\bsaas\b|软件服务/i],
+    ["开发工具", /开发工具|编程助手|代码助手|developer tool|coding assistant/i],
+    ["运营增长", /运营|增长|获客|crm|线索/i],
+    ["教育科技", /教育|学习机|edtech/i]
+  ];
+  for (const [name, pattern] of candidates) {
+    if (pattern.test(normalized)) {
+      domains.push(name);
+    }
+  }
+  return domains;
+}
+
+function inferFounderTargetUsers(text: string): string[] {
+  const users: string[] = [];
+  const candidates: Array<[string, RegExp]> = [
+    ["个人创业者", /个人创业者|opc|创始人|founder/i],
+    ["儿童与家长", /儿童|孩子|家长|亲子/i],
+    ["开发者", /开发者|程序员|工程师|developer/i],
+    ["运营团队", /运营团队|销售|crm|客户成功/i],
+    ["中小企业", /中小企业|小团队|smb/i]
+  ];
+  for (const [name, pattern] of candidates) {
+    if (pattern.test(text)) {
+      users.push(name);
+    }
+  }
+  return users;
+}
+
+function inferFounderDeliverablePreferences(task: TaskRecord, result: TaskResult): string[] {
+  const text = `${task.instruction}\n${result.summary}\n${result.deliverable.slice(0, 1000)}`;
+  const prefs: string[] = [];
+  const candidates: Array<[string, RegExp]> = [
+    ["结论先行", /结论|摘要|先给结论/i],
+    ["结构化报告", /报告|调研|分析|research/i],
+    ["PRD", /\bprd\b|产品需求|需求文档/i],
+    ["可执行下一步", /下一步|建议动作|行动|todo/i],
+    ["产物文件", /artifact|产物|文件|\.md|\.docx|\.pdf/i],
+    ["表格对比", /表格|对比|竞品|矩阵/i]
+  ];
+  for (const [name, pattern] of candidates) {
+    if (pattern.test(text)) {
+      prefs.push(name);
+    }
+  }
+  return prefs;
+}
+
+function inferFounderDecisionStyle(
+  text: string,
+  fallback: "action_first" | "evidence_first" | "balanced"
+): "action_first" | "evidence_first" | "balanced" {
+  if (/证据|数据|来源|引用|调研|市场/i.test(text)) {
+    return "evidence_first";
+  }
+  if (/直接做|开始开发|完成|交付|不要停|继续推进/i.test(text)) {
+    return "action_first";
+  }
+  return fallback;
+}
+
+function inferFounderFeedbackSignals(
+  task: TaskRecord,
+  result: TaskResult
+): Array<{ signal: "positive" | "negative" | "revision_requested"; note: string; taskId?: string; createdAt: string }> {
+  const text = `${task.instruction}\n${result.summary}\n${result.followUps.join("\n")}`;
+  const signals: Array<{ signal: "positive" | "negative" | "revision_requested"; note: string; taskId?: string; createdAt: string }> = [];
+  if (/修改|优化|改进|需改进|重新|补充/i.test(text)) {
+    signals.push({
+      signal: "revision_requested",
+      note: "用户或交付结果提示需要继续修改/补充",
+      taskId: task.id,
+      createdAt: new Date().toISOString()
+    });
+  }
+  return signals;
+}
+
+function recordFounderMemoryFacts(input: {
+  task: TaskRecord;
+  businessDomains: string[];
+  targetUsers: string[];
+  deliverablePreferences: string[];
+  decisionStyle: "action_first" | "evidence_first" | "balanced";
+  feedbackSignals: Array<{ signal: "positive" | "negative" | "revision_requested"; note: string; taskId?: string; createdAt: string }>;
+}): void {
+  const source = "task" as const;
+  for (const value of input.businessDomains) {
+    store.recordWorkspaceMemoryFact({
+      kind: "business_domain",
+      value,
+      source,
+      confidence: 0.72,
+      taskId: input.task.id,
+      sessionId: input.task.sessionId,
+      note: "Inferred from completed task context."
+    });
+  }
+  for (const value of input.targetUsers) {
+    store.recordWorkspaceMemoryFact({
+      kind: "target_user",
+      value,
+      source,
+      confidence: 0.7,
+      taskId: input.task.id,
+      sessionId: input.task.sessionId,
+      note: "Inferred from completed task context."
+    });
+  }
+  for (const value of input.deliverablePreferences) {
+    store.recordWorkspaceMemoryFact({
+      kind: "deliverable_preference",
+      value,
+      source,
+      confidence: 0.68,
+      taskId: input.task.id,
+      sessionId: input.task.sessionId,
+      note: "Inferred from deliverable shape and follow-up wording."
+    });
+  }
+  store.recordWorkspaceMemoryFact({
+    kind: "decision_style",
+    value: input.decisionStyle,
+    source,
+    confidence: 0.6,
+    taskId: input.task.id,
+    sessionId: input.task.sessionId,
+    note: "Best-effort decision style inferred from task and result text."
+  });
+  for (const feedback of input.feedbackSignals) {
+    store.recordWorkspaceMemoryFact({
+      kind: "feedback",
+      value: feedback.signal,
+      source,
+      confidence: 0.74,
+      taskId: input.task.id,
+      sessionId: input.task.sessionId,
+      note: feedback.note
+    });
   }
 }
 
@@ -3145,6 +3478,14 @@ function syncInstalledSkillVerification(task: TaskRecord): void {
         ? [`现在可以让 ${task.roleId} 正式按 ${skillId} 执行真实任务`]
         : [`检查 ${task.roleId} 的验证输出和 skill 约束`, `修复 ${skillId} 后重新验证`]
   });
+  recordEvolutionSignals(store, [
+    extractEvolutionSignalFromSkillVerification({
+      task,
+      skillId,
+      verificationStatus
+    })
+  ]);
+  applyLowRiskEvolutionProposals(store);
 }
 
 type FounderWorkflowStage = "prd" | "implementation" | "qa" | "recap";
@@ -4114,7 +4455,11 @@ function resolveDeployCredentialSpec(target: string): { providerId: string; keys
   }
 }
 
-async function notifyGoalRunProgress(run: GoalRunRecord, message: string): Promise<void> {
+async function notifyGoalRunProgress(
+  run: GoalRunRecord,
+  message: string,
+  workbenchReason?: string | undefined
+): Promise<void> {
   const currentTask = run.currentTaskId ? store.getTask(run.currentTaskId) : undefined;
   const latestHandoff = store.getLatestGoalRunHandoff(run.id);
   const projectMemory =
@@ -4133,6 +4478,15 @@ async function notifyGoalRunProgress(run: GoalRunRecord, message: string): Promi
       projectMemory
     }
   });
+  if (workbenchReason) {
+    await notifySessionWorkbench({
+      store,
+      feishuClient: createFeishuClient(),
+      sessionId: run.sessionId,
+      chatId: run.chatId,
+      reason: workbenchReason
+    });
+  }
 }
 
 function buildGoalExecutionInstruction(run: GoalRunRecord): string {
@@ -4324,7 +4678,7 @@ async function processGoalRun(): Promise<boolean> {
             fields: missing
           }
         });
-        await notifyGoalRunProgress(updated, prompt);
+        await notifyGoalRunProgress(updated, prompt, "goal_run_awaiting_input");
         return true;
       }
 
@@ -4456,7 +4810,7 @@ async function processGoalRun(): Promise<boolean> {
             roleId: task.roleId
           }
         });
-        await notifyGoalRunProgress(run, `已进入执行阶段，创建任务 ${task.id.slice(0, 8)}。`);
+        await notifyGoalRunProgress(run, `已进入执行阶段，创建任务 ${task.id.slice(0, 8)}。`, "goal_run_execution_task_created");
         return true;
       }
 
@@ -4511,7 +4865,7 @@ async function processGoalRun(): Promise<boolean> {
                 timeoutMs: goalRunCollaborationTimeoutMs
               }
             });
-            await notifyGoalRunProgress(failed, "执行失败：协作执行超时，请重试或拆分更小任务。");
+            await notifyGoalRunProgress(failed, "执行失败：协作执行超时，请重试或拆分更小任务。", "goal_run_failed");
             return true;
           }
           return false;
@@ -4541,7 +4895,7 @@ async function processGoalRun(): Promise<boolean> {
                 timeoutMs: goalRunExecHardTimeoutMs
               }
             });
-            await notifyGoalRunProgress(failed, "执行失败：超时且未交付可验证产物文件。");
+            await notifyGoalRunProgress(failed, "执行失败：超时且未交付可验证产物文件。", "goal_run_failed");
             return true;
           }
           return false;
@@ -4707,7 +5061,8 @@ async function processGoalRun(): Promise<boolean> {
               retried,
               `协作执行未完全通过（完成角色：${evidence.completedRoles.join("、") || "无"}；失败角色：${
                 evidence.failedRoles.join("、") || "无"
-              }），已自动重试（${retried.retryCount}/${retried.maxRetries}）。`
+              }），已自动重试（${retried.retryCount}/${retried.maxRetries}）。`,
+              "goal_run_retry_scheduled"
             );
             return true;
           }
@@ -4746,7 +5101,8 @@ async function processGoalRun(): Promise<boolean> {
             failed,
             `执行失败：协作任务未通过（完成角色：${evidence.completedRoles.join("、") || "无"}；失败角色：${
               evidence.failedRoles.join("、") || "无"
-            }）。`
+            }）。`,
+            "goal_run_failed"
           );
           return true;
         }
@@ -4786,7 +5142,7 @@ async function processGoalRun(): Promise<boolean> {
           failureCategory: "runtime",
           metadata: {}
         });
-        await notifyGoalRunProgress(failed, `执行失败：${task.errorText ?? "未知错误"}`);
+        await notifyGoalRunProgress(failed, `执行失败：${task.errorText ?? "未知错误"}`, "goal_run_failed");
         return true;
       }
       return true;
@@ -4817,7 +5173,7 @@ async function processGoalRun(): Promise<boolean> {
               lastStatus: lastStatus ?? ""
             }
           });
-          await notifyGoalRunProgress(failed, "校验失败：需要完成真实执行任务，不能使用文本兜底。");
+          await notifyGoalRunProgress(failed, "校验失败：需要完成真实执行任务，不能使用文本兜底。", "goal_run_failed");
           return true;
         }
         if (artifactFiles.length === 0) {
@@ -4837,7 +5193,7 @@ async function processGoalRun(): Promise<boolean> {
             failureCategory: "validation",
             metadata: {}
           });
-          await notifyGoalRunProgress(failed, "校验失败：未检测到产物文件变更。");
+          await notifyGoalRunProgress(failed, "校验失败：未检测到产物文件变更。", "goal_run_failed");
           return true;
         }
 
@@ -4876,7 +5232,8 @@ async function processGoalRun(): Promise<boolean> {
                 retried,
                 `校验发现关键角色交付不完整（缺失：${missingRequired.join("、") || "无"}；失败：${
                   failedRequired.join("、") || "无"
-                }），已自动重试（${retried.retryCount}/${retried.maxRetries}）。`
+                }），已自动重试（${retried.retryCount}/${retried.maxRetries}）。`,
+                "goal_run_retry_scheduled"
               );
               return true;
             }
@@ -4918,7 +5275,8 @@ async function processGoalRun(): Promise<boolean> {
               failed,
               `校验失败：关键角色交付不完整（缺失：${missingRequired.join("、") || "无"}；失败：${
                 failedRequired.join("、") || "无"
-              }）。`
+              }）。`,
+              "goal_run_failed"
             );
             return true;
           }
@@ -4944,7 +5302,7 @@ async function processGoalRun(): Promise<boolean> {
             lastStatus: lastStatus ?? ""
           }
         });
-        await notifyGoalRunProgress(failed, "校验失败：缺少可验证的执行结果。");
+        await notifyGoalRunProgress(failed, "校验失败：缺少可验证的执行结果。", "goal_run_failed");
         return true;
       }
       store.appendGoalRunTimelineEvent({
@@ -5016,7 +5374,7 @@ async function processGoalRun(): Promise<boolean> {
             fields: ["deploy_target"]
           }
         });
-        await notifyGoalRunProgress(waiting ?? run, prompt);
+        await notifyGoalRunProgress(waiting ?? run, prompt, "goal_run_awaiting_input");
         return true;
       }
 
@@ -5074,7 +5432,7 @@ async function processGoalRun(): Promise<boolean> {
               target
             }
           });
-          await notifyGoalRunProgress(waiting ?? run, prompt);
+          await notifyGoalRunProgress(waiting ?? run, prompt, "goal_run_awaiting_input");
           return true;
         }
       }
@@ -5118,7 +5476,8 @@ async function processGoalRun(): Promise<boolean> {
         });
         await notifyGoalRunProgress(
           waiting ?? run,
-          `部署前需要一次授权。请在控制台调用 /api/goal-runs/${run.id}/authorize 并提交 token（前缀 ${token.token.slice(0, 8)}）。`
+          `部署前需要一次授权。请在控制台调用 /api/goal-runs/${run.id}/authorize 并提交 token（前缀 ${token.token.slice(0, 8)}）。`,
+          "goal_run_awaiting_authorization"
         );
         return true;
       }
@@ -5186,7 +5545,8 @@ async function processGoalRun(): Promise<boolean> {
       });
       await notifyGoalRunProgress(
         completed,
-        `${result.summary}\n\n${result.deliverable.slice(0, 1200)}`
+        `${result.summary}\n\n${result.deliverable.slice(0, 1200)}`,
+        "goal_run_completed"
       );
       return true;
     }
@@ -5201,7 +5561,7 @@ async function processGoalRun(): Promise<boolean> {
         stage: run.currentStage
       }
     });
-    await notifyGoalRunProgress(failed, `执行失败：不支持的阶段 ${run.currentStage}`);
+    await notifyGoalRunProgress(failed, `执行失败：不支持的阶段 ${run.currentStage}`, "goal_run_failed");
     return true;
   } catch (error) {
     if (isDatabaseLockedError(error)) {
@@ -5229,7 +5589,7 @@ async function processGoalRun(): Promise<boolean> {
       stage: run.currentStage,
       instanceId: runnerInstanceId
     });
-    await notifyGoalRunProgress(failed, `GoalRun执行异常：${message}`);
+    await notifyGoalRunProgress(failed, `GoalRun执行异常：${message}`, "goal_run_failed");
     return true;
   }
 }
@@ -5239,7 +5599,10 @@ async function processTask(): Promise<boolean> {
   if (!task) {
     return false;
   }
-  if (task.source === "feishu" && isFeishuSmalltalkInstruction(task.instruction)) {
+  if (
+    task.source === "feishu" &&
+    (isFeishuSmalltalkInstruction(task.instruction) || isFeishuNonActionableChatInstruction(task.instruction))
+  ) {
     const message = buildFeishuSmalltalkResponse(task.instruction);
     const result: TaskResult = {
       summary: "问候消息已快速回复",
@@ -5260,6 +5623,7 @@ async function processTask(): Promise<boolean> {
     });
     syncSkillIntegrationOutcome(completed);
     syncInstalledSkillVerification(completed);
+    await recordEvolutionFromCompletedTask(completed);
     if (completed.sessionId) {
       store.appendSessionMessage({
         sessionId: completed.sessionId,
@@ -5455,6 +5819,7 @@ async function processTask(): Promise<boolean> {
         workflowSummary: buildWorkflowStatusSummary(failed, { includeGoal: true, includeArtifacts: true })
       });
       await notifyFeishuCard(failed.chatId, card);
+      await notifyTaskSessionWorkbench(failed, "task_failed");
     }
     return true;
   } finally {

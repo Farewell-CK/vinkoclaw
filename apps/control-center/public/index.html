@@ -18,6 +18,7 @@
           <button type="button" class="ghost nav-btn" data-view="routing" data-i18n="nav.routing">模板与队列</button>
           <button type="button" class="ghost nav-btn" data-view="config" data-i18n="nav.config">团队与渠道</button>
           <button type="button" class="ghost nav-btn" data-view="execution" data-i18n="nav.execution">审批与执行</button>
+          <button type="button" class="ghost nav-btn" data-view="evolution" data-i18n="nav.evolution">自动进化</button>
           <button type="button" class="ghost nav-btn" data-view="telemetry" data-i18n="nav.telemetry">遥测</button>
           <button type="button" class="ghost nav-btn" data-view="audit" data-i18n="nav.audit">审计</button>
         </nav>
@@ -138,6 +139,15 @@
             <p data-i18n="panel.projects.desc">Recent sessions, current goals, stages, and unresolved questions.</p>
           </header>
           <div id="project-memory-board" class="list"></div>
+          <div id="session-workbench-detail" class="task-detail-panel is-hidden"></div>
+        </article>
+
+        <article class="panel span-2 view-panel" data-view="workbench">
+          <header>
+            <h2 data-i18n="panel.milestones.title">关键里程碑</h2>
+            <p data-i18n="panel.milestones.desc">任务、审批、GoalRun、协作和工作台推送的实时状态回报。</p>
+          </header>
+          <div id="milestone-stream" class="list milestone-stream"></div>
         </article>
 
         <article class="panel view-panel" data-view="workbench">
@@ -352,12 +362,25 @@
           <div id="goal-run-detail" class="task-detail-panel is-hidden"></div>
         </article>
 
+        <article class="panel span-2 view-panel" data-view="evolution">
+          <header>
+            <h2 data-i18n="panel.evolution.title">自动进化</h2>
+            <p data-i18n="panel.evolution.desc">查看学习到的路由偏好、模板提示、技能推荐，以及最近应用的自动调整。</p>
+          </header>
+          <div class="row" style="justify-content:flex-end;margin-bottom:12px;">
+            <button type="button" class="ghost" id="evolution-rollback-btn" data-i18n="panel.evolution.rollback">回滚最近一次自动应用</button>
+          </div>
+          <div id="evolution-result" class="feedback"></div>
+          <div id="evolution-board" class="list"></div>
+        </article>
+
         <!-- Telemetry: Traces -->
         <article class="panel span-2 view-panel" data-view="telemetry">
           <header>
             <h2 data-i18n="panel.activity.title">实时活动流</h2>
             <p data-i18n="panel.activity.desc">统一查看系统最近与正在发生的审计、执行、审批与追踪事件。</p>
           </header>
+          <div id="live-stream-status" class="live-stream-status">Live stream: connecting…</div>
           <div id="activity-feed" class="list activity-feed"></div>
         </article>
 

@@ -1,4 +1,4 @@
-import { type OperatorActionRecord, type RoleId, type TaskSource } from "@vinko/shared";
+import { type OperatorActionRecord, type RoleId, type RuntimeConfig, type TaskSource } from "@vinko/shared";
 
 const SMALLTALK_ONLY_PATTERN =
   /^(?:你好|您好|嗨|哈喽|hello|hi|hey|在吗|在不在|早上好|中午好|下午好|晚上好|谢谢|多谢|thx|thanks|thankyou|辛苦了)(?:呀|啊|哈|呢|啦|嘛|哇)?$/i;
@@ -17,6 +17,7 @@ const EXPLICIT_TEAM_REQUEST_PATTERN =
 const THANKS_PATTERN = /^(?:谢谢|多谢|thx|thanks|thankyou|辛苦了)/i;
 const PRESENCE_PATTERN = /^(?:在吗|在不在)/i;
 const CONTINUE_PATTERN = /^(?:继续|请继续|继续推进|继续处理|继续执行|go\s*on|continue)(?:吧|呀|一下|下去)?$/i;
+const NON_ACTIONABLE_CHAT_PATTERN = /^[？?!.。！…~～\s]+$/;
 
 const OWNER_LOW_RISK_RUNTIME_SETTING_KEYS = new Set([
   "SEARCH_PROVIDER",
@@ -60,6 +61,21 @@ export function buildSmalltalkReply(text: string): string {
   return "你好，我在。你可以直接说你的需求。";
 }
 
+export function isNonActionableChatMessage(text: string): boolean {
+  const normalized = normalizeSmalltalkCandidate(text);
+  if (!normalized) {
+    return true;
+  }
+  if (ACTION_INTENT_PATTERN.test(normalized)) {
+    return false;
+  }
+  return NON_ACTIONABLE_CHAT_PATTERN.test(normalized);
+}
+
+export function buildNonActionableChatReply(text: string): string {
+  return "我没拿到明确任务。你可以直接说目标，例如“写一个活动落地页 PRD”或“帮我检查当前任务进度”。";
+}
+
 export function isContinueSignal(text: string): boolean {
   const normalized = normalizeSmalltalkCandidate(text);
   if (!normalized) {
@@ -76,6 +92,7 @@ export function shouldUseTeamCollaboration(
   text: string,
   options?: {
     triggerKeywords?: string[] | undefined;
+    evolution?: Partial<RuntimeConfig["evolution"]["intake"]> | undefined;
   }
 ): boolean {
   const normalized = text.trim();
@@ -110,14 +127,21 @@ export function shouldUseTeamCollaboration(
     return false;
   }
 
-  // Collaboration requires both an explicit team signal AND sufficient complexity.
-  // A short instruction that merely contains a verb like "开发" or "设计" is a single task, not a team effort.
-  // Require explicit team role mention OR instruction long enough to plausibly need multiple specialists.
+  const policy = options?.evolution;
+  const requireExplicitTeamSignal = policy?.requireExplicitTeamSignal ?? true;
+  const collaborationMinLength = normalizeLength(policy?.collaborationMinLength, 40, 12, 240);
+
+  // Collaboration requires explicit team intent by default. Runtime evolution may
+  // loosen this only after repeated evidence that long cross-domain tasks benefit.
   if (EXPLICIT_TEAM_REQUEST_PATTERN.test(normalized)) {
     return true;
   }
 
-  return normalized.length >= 40;
+  if (requireExplicitTeamSignal) {
+    return false;
+  }
+
+  return normalized.length >= collaborationMinLength;
 }
 
 export function hasExplicitTeamCollaborationSignal(text: string): boolean {
@@ -147,6 +171,14 @@ function compactSmalltalk(text: string): string {
     .toLowerCase()
     .replace(/[，。！？!?,.~～\s]/g, "")
     .replace(/[^\p{Letter}\p{Number}]+/gu, "");
+}
+
+function normalizeLength(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.round(parsed)));
 }
 
 export function isOwnerRequester(input: {

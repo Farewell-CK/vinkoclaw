@@ -205,6 +205,13 @@ describe("project-board", () => {
           preferredTechStack: [],
           communicationStyle: "concise"
         },
+        founderProfile: {
+          businessDomains: [],
+          targetUsers: [],
+          deliverablePreferences: [],
+          decisionStyle: "balanced",
+          feedbackSignals: []
+        },
         keyDecisions: [],
         projectContext: {
           currentGoals: ["OPC 增长引擎"],

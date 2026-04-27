@@ -275,6 +275,13 @@ describe("project routes", () => {
           preferredTechStack: [],
           communicationStyle: "concise"
         },
+        founderProfile: {
+          businessDomains: ["AI Agent"],
+          targetUsers: ["个人创业者"],
+          deliverablePreferences: ["结论先行"],
+          decisionStyle: "action_first",
+          feedbackSignals: []
+        },
         keyDecisions: [],
         projectContext: {
           currentGoals: ["增长项目"],
@@ -313,6 +320,7 @@ describe("project routes", () => {
       expect(payload.focusProjects).toBeInstanceOf(Array);
       expect(payload.projects).toBeInstanceOf(Array);
       expect(payload.teamReadiness).toBeInstanceOf(Array);
+      expect((payload.founderMemory as Record<string, unknown>).businessDomains).toEqual(["AI Agent"]);
       expect(payload.attentionQueue).toBeInstanceOf(Array);
       expect(payload.nextActions).toBeInstanceOf(Array);
       expect((payload.recurring as Record<string, unknown>).health).toBe("attention_required");

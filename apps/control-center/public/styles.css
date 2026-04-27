@@ -705,6 +705,77 @@ pre {
   margin-top: 8px;
 }
 
+.milestone-stream {
+  display: grid;
+  gap: 10px;
+}
+
+.milestone-card {
+  position: relative;
+  overflow: hidden;
+  border-left: 4px solid var(--accent);
+}
+
+.milestone-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 56px;
+  opacity: 0.1;
+  pointer-events: none;
+}
+
+.milestone-card.is-good {
+  border-left-color: var(--green);
+}
+
+.milestone-card.is-good::before {
+  background: linear-gradient(90deg, var(--green), transparent);
+}
+
+.milestone-card.is-attention {
+  border-left-color: var(--orange);
+}
+
+.milestone-card.is-attention::before {
+  background: linear-gradient(90deg, var(--orange), transparent);
+}
+
+.milestone-card.is-workbench {
+  border-left-color: var(--accent);
+}
+
+.milestone-card.is-workbench::before {
+  background: linear-gradient(90deg, var(--accent), transparent);
+}
+
+.live-stream-status {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.live-stream-status.connected {
+  color: var(--green);
+  border-color: rgba(43, 138, 62, 0.2);
+  background: rgba(43, 138, 62, 0.08);
+}
+
+.live-stream-status.disconnected {
+  color: var(--red);
+  border-color: rgba(201, 42, 42, 0.18);
+  background: rgba(201, 42, 42, 0.08);
+}
+
+.evolution-grid {
+  display: grid;
+  gap: 10px;
+}
+
 .trace-header {
   padding: 12px 16px;
   background: var(--accent-soft);

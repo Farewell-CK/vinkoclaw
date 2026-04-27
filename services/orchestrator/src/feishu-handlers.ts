@@ -495,10 +495,58 @@ export function createFeishuHandlers(deps: FeishuHandlerDeps): FeishuHandlers {
           `角色 ${task.roleId} 执行的任务获得正面反馈`,
           "quality_signal"
         );
+        const currentMemory = store.getWorkspaceMemory();
+        store.patchWorkspaceMemory({
+          founderProfile: {
+            ...currentMemory.founderProfile,
+            feedbackSignals: [
+              ...currentMemory.founderProfile.feedbackSignals,
+              {
+                signal: "positive" as const,
+                note: `用户满意：${task.title}`,
+                taskId: task.id,
+                createdAt: new Date().toISOString()
+              }
+            ].slice(-20)
+          }
+        });
+        store.recordWorkspaceMemoryFact({
+          kind: "feedback",
+          value: "positive",
+          source: "feishu",
+          confidence: 1,
+          taskId: task.id,
+          sessionId: task.sessionId,
+          note: `用户满意：${task.title}`
+        });
         try {
           await createClient().sendCardToChat(chatId, buildFeedbackGoodCard());
         } catch { /* best-effort */ }
       } else if (rating === "poor") {
+        const currentMemory = store.getWorkspaceMemory();
+        store.patchWorkspaceMemory({
+          founderProfile: {
+            ...currentMemory.founderProfile,
+            feedbackSignals: [
+              ...currentMemory.founderProfile.feedbackSignals,
+              {
+                signal: "negative" as const,
+                note: `用户不满意，已安排重试：${task.title}`,
+                taskId: task.id,
+                createdAt: new Date().toISOString()
+              }
+            ].slice(-20)
+          }
+        });
+        store.recordWorkspaceMemoryFact({
+          kind: "feedback",
+          value: "negative",
+          source: "feishu",
+          confidence: 1,
+          taskId: task.id,
+          sessionId: task.sessionId,
+          note: `用户不满意，系统需要重做并复盘：${task.title}`
+        });
         store.createTask({
           sessionId: task.sessionId,
           source: task.source,

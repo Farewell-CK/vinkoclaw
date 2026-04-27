@@ -40,7 +40,21 @@ export const orchestratorCreateTaskSchema = z.object({
 });
 
 export const orchestratorInboundMessageSchema = z.object({
+  sessionId: z.string().trim().min(1).optional(),
   text: z.string().trim().min(1),
+  source: taskSourceSchema.optional(),
+  requestedBy: z.string().trim().min(1).optional(),
+  chatId: z.string().trim().min(1).optional(),
+  clientActionId: z.string().trim().min(1).max(160).optional(),
+  attachments: z.array(taskAttachmentSchema).max(20).optional()
+});
+
+export const sessionActionKindSchema = z.enum(["continue", "supplement", "rerun-goalrun"]);
+
+export const orchestratorSessionActionSchema = z.object({
+  action: sessionActionKindSchema,
+  actionId: z.string().trim().min(1).max(160).optional(),
+  text: z.string().trim().min(1).optional(),
   source: taskSourceSchema.optional(),
   requestedBy: z.string().trim().min(1).optional(),
   chatId: z.string().trim().min(1).optional(),
@@ -101,6 +115,8 @@ export const protocolEnvelopeSchema = z.object({
 
 export type OrchestratorCreateTaskInput = z.infer<typeof orchestratorCreateTaskSchema>;
 export type OrchestratorInboundMessageInput = z.infer<typeof orchestratorInboundMessageSchema>;
+export type SessionActionKind = z.infer<typeof sessionActionKindSchema>;
+export type OrchestratorSessionActionInput = z.infer<typeof orchestratorSessionActionSchema>;
 export type OrchestratorApprovalDecisionInput = z.infer<typeof orchestratorApprovalDecisionSchema>;
 export type ProtocolMethod = z.infer<typeof protocolMethodSchema>;
 export type ProtocolEnvelopeInput = z.infer<typeof protocolEnvelopeSchema>;

@@ -14,12 +14,17 @@ const auditContainer = document.querySelector("#audit");
 const telemetryBoardContainer = document.querySelector("#telemetry-board");
 const traceDetailContainer = document.querySelector("#trace-detail");
 const activityFeedContainer = document.querySelector("#activity-feed");
+const milestoneStreamContainer = document.querySelector("#milestone-stream");
+const liveStreamStatusContainer = document.querySelector("#live-stream-status");
+const evolutionBoardContainer = document.querySelector("#evolution-board");
+const evolutionResult = document.querySelector("#evolution-result");
 const goalRunsContainer = document.querySelector("#goal-runs");
 const goalRunDetailContainer = document.querySelector("#goal-run-detail");
 const messageResult = document.querySelector("#message-result");
 const taskResult = document.querySelector("#task-result");
 const taskDetailContainer = document.querySelector("#task-detail");
 const projectMemoryBoardContainer = document.querySelector("#project-memory-board");
+const sessionWorkbenchDetailContainer = document.querySelector("#session-workbench-detail");
 const harnessBoardContainer = document.querySelector("#harness-board");
 const crmBoardContainer = document.querySelector("#crm-board");
 const crmRunDueResult = document.querySelector("#crm-run-due-result");
@@ -45,6 +50,12 @@ let selectedTaskId = "";
 let selectedTaskDetail = null;
 let selectedGoalRunId = "";
 let selectedGoalRunDetail = null;
+let selectedSessionWorkbenchId = "";
+let selectedSessionWorkbenchDetail = null;
+let selectedSessionTimelineActionId = "";
+let sessionTimelineStream = null;
+let sessionTimelineStreamSessionId = "";
+let sessionTimelineReconnectTimer = null;
 let lastRolesPayload = null;
 let lastSkillsMarketResults = [];
 let selectedTraceTaskId = "";
@@ -57,6 +68,7 @@ const I18N = {
     "nav.routing": "模板与队列",
     "nav.config": "团队与渠道",
     "nav.execution": "审批与执行",
+    "nav.evolution": "自动进化",
     "nav.telemetry": "遥测",
     "nav.audit": "审计",
     "nav.logout": "退出",
@@ -82,6 +94,9 @@ const I18N = {
     "panel.task.submit": "入队任务",
     "panel.projects.title": "CEO 项目记忆",
     "panel.projects.desc": "最近会话、当前目标、阶段和待解决问题。",
+    "panel.milestones.title": "关键里程碑",
+    "panel.milestones.desc": "任务、审批、GoalRun、协作和工作台推送的实时状态回报。",
+    "panel.milestones.empty": "暂无关键里程碑；任务、审批或工作台推送出现后会在这里实时更新。",
     "panel.skillsMarket.title": "Skill Marketplace",
     "panel.skillsMarket.desc": "搜索 skill、查看候选并安装到角色。",
     "panel.skillsMarket.queryPlaceholder": "搜索 skill，例如：写 PRD / 调研报告 / 测试回归",
@@ -95,6 +110,9 @@ const I18N = {
     "panel.crm.runDue": "运行到期跟进",
     "panel.goalRuns.title": "Goal Runs",
     "panel.goalRuns.desc": "分阶段推进的运行流，包含 harness 评分、handoff、恢复态与审批。",
+    "panel.evolution.title": "自动进化",
+    "panel.evolution.desc": "查看学习到的路由偏好、模板提示、技能推荐，以及最近应用的自动调整。",
+    "panel.evolution.rollback": "回滚最近一次自动应用",
     "panel.routing.title": "路由模板",
     "panel.routing.desc": "管理任务路由模板，支持创建、更新、删除。",
     "panel.routing.templateNamePlaceholder": "模板名称",
@@ -131,6 +149,10 @@ const I18N = {
     "panel.traces.desc": "LLM 决策时间线、工具调用、Token 用量和规则拦截。",
     "panel.activity.title": "实时活动流",
     "panel.activity.desc": "统一查看系统最近与正在发生的审计、执行、审批与追踪事件。",
+    "panel.activity.live.connecting": "实时流连接中…",
+    "panel.activity.live.connected": "实时流已连接 · 最近更新 {time}",
+    "panel.activity.live.disconnected": "实时流已断开，等待重连…",
+    "panel.activity.live.error": "实时流异常，已切回轮询刷新。",
     "activity.noData": "暂无活动事件",
     "activity.kind.audit": "审计",
     "activity.kind.trace": "追踪",
@@ -257,6 +279,7 @@ const I18N = {
     "nav.routing": "Templates & Queue",
     "nav.config": "Team & Channels",
     "nav.execution": "Approvals & Execution",
+    "nav.evolution": "Evolution",
     "nav.telemetry": "Telemetry",
     "nav.audit": "Audit",
     "nav.logout": "Logout",
@@ -282,6 +305,9 @@ const I18N = {
     "panel.task.submit": "Queue Task",
     "panel.projects.title": "CEO Project Memory",
     "panel.projects.desc": "Recent sessions, current goals, stages, and unresolved questions.",
+    "panel.milestones.title": "Milestone Stream",
+    "panel.milestones.desc": "Live task, approval, GoalRun, collaboration, and workbench status updates.",
+    "panel.milestones.empty": "No key milestones yet. Task, approval, or workbench updates will appear here live.",
     "panel.skillsMarket.title": "Skill Marketplace",
     "panel.skillsMarket.desc": "Search skills, inspect matches, and install them to a role.",
     "panel.skillsMarket.queryPlaceholder": "Search skill, e.g. PRD writing / research report / regression testing",
@@ -295,6 +321,9 @@ const I18N = {
     "panel.crm.runDue": "Run Due Follow-ups",
     "panel.goalRuns.title": "Goal Runs",
     "panel.goalRuns.desc": "Stage-driven runs with harness evidence, handoffs, resume state, and approvals.",
+    "panel.evolution.title": "Evolution",
+    "panel.evolution.desc": "Inspect learned routing bias, template hints, skill recommendations, and latest auto-applied changes.",
+    "panel.evolution.rollback": "Rollback Latest Auto Apply",
     "panel.routing.title": "Routing Templates",
     "panel.routing.desc": "Manage task-routing templates with create, update, and delete operations.",
     "panel.routing.templateNamePlaceholder": "Template name",
@@ -331,6 +360,10 @@ const I18N = {
     "panel.traces.desc": "LLM decision timeline, tool calls, token usage, and rule blocks per task.",
     "panel.activity.title": "Live Activity",
     "panel.activity.desc": "Unified stream of recent and in-flight audit, execution, approval, and trace events.",
+    "panel.activity.live.connecting": "Live stream connecting…",
+    "panel.activity.live.connected": "Live stream connected · updated {time}",
+    "panel.activity.live.disconnected": "Live stream disconnected, reconnecting…",
+    "panel.activity.live.error": "Live stream failed. Falling back to polling.",
     "activity.noData": "No activity events yet",
     "activity.kind.audit": "Audit",
     "activity.kind.trace": "Trace",
@@ -453,9 +486,14 @@ const I18N = {
   }
 };
 
-const VIEW_IDS = new Set(["workbench", "routing", "config", "execution", "telemetry", "audit"]);
+const VIEW_IDS = new Set(["workbench", "routing", "config", "execution", "evolution", "telemetry", "audit"]);
 let currentLang = localStorage.getItem("vinkoclaw.lang") === "en" ? "en" : "zh";
 let currentView = VIEW_IDS.has(localStorage.getItem("vinkoclaw.view")) ? localStorage.getItem("vinkoclaw.view") : "workbench";
+let liveStream = null;
+let liveStreamReconnectTimer = null;
+let liveActivityFeedPayload = null;
+let liveTelemetryPayload = null;
+let liveStreamConnected = false;
 
 // Filter state
 let approvalFilter = "all";
@@ -500,6 +538,14 @@ function getActivityKindLabel(kind) {
 
 function getActivitySourceLabel(source) {
   return t(`activity.source.${String(source || "").toLowerCase()}`);
+}
+
+function formatActivityEventType(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+  return text.replaceAll("_", " ");
 }
 
 function applyI18n() {
@@ -549,6 +595,13 @@ async function setLanguage(lang) {
     button.classList.toggle("active", button.getAttribute("data-lang-switch") === currentLang);
   });
   applyI18n();
+  if (liveActivityFeedPayload) {
+    renderActivityFeed(liveActivityFeedPayload);
+  }
+  if (liveTelemetryPayload || lastRuntimeHarnessPayload) {
+    renderTelemetryBoard(liveTelemetryPayload, lastRuntimeHarnessPayload);
+  }
+  setLiveStreamStatus(liveStreamConnected ? "connected" : liveStream ? "connecting" : "disconnected");
   await refresh();
 }
 
@@ -1098,10 +1151,12 @@ function renderRuntimeHarnessBoard(payload) {
   const toolRegistry = payload.toolRegistry || {};
   const rulesEngine = payload.rulesEngine || {};
   const skills = payload.skills || {};
+  const evolution = payload.evolution || {};
   const roles = Array.isArray(skills.roles) ? skills.roles : [];
   const totalBoundSkills = roles.reduce((sum, role) => sum + Number(role.total || 0), 0);
   const verifiedBoundSkills = roles.reduce((sum, role) => sum + Number(role.verified || 0), 0);
   const failedBoundSkills = roles.reduce((sum, role) => sum + Number(role.failed || 0), 0);
+  const collaboration = evolution.collaborationConfig || {};
   return `
     <article class="list-card compact harness-card">
       <div class="list-head">
@@ -1115,6 +1170,8 @@ function renderRuntimeHarnessBoard(payload) {
         <span class="pill">bound:${escapeHtml(String(totalBoundSkills))}</span>
         <span class="pill">verified:${escapeHtml(String(verifiedBoundSkills))}</span>
         ${failedBoundSkills > 0 ? `<span class="pill">failed:${escapeHtml(String(failedBoundSkills))}</span>` : ""}
+        <span class="pill">evo-signals:${escapeHtml(String(evolution.signals || 0))}</span>
+        <span class="pill">evo-proposals:${escapeHtml(String(evolution.proposals || 0))}</span>
       </div>
       <div class="memory-block">
         <strong>${currentLang === "zh" ? "Role Bindings" : "Role Bindings"}</strong>
@@ -1132,7 +1189,279 @@ function renderRuntimeHarnessBoard(payload) {
             : `<p class="muted">${currentLang === "zh" ? "暂无角色 skill 绑定" : "No role skill bindings yet"}</p>`
         }
       </div>
+      <div class="memory-block">
+        <strong>${currentLang === "zh" ? "自动进化" : "Self-Evolution"}</strong>
+        ${
+          evolution.routerConfig
+            ? `<p class="muted">${
+                currentLang === "zh"
+                  ? `router阈值=${escapeHtml(String(evolution.routerConfig.confidenceThreshold ?? "-"))} · validatedFallback=${escapeHtml(String(evolution.routerConfig.preferValidatedFallbacks === true))} · learnedHints=${escapeHtml(String(evolution.routerConfig.templateHintCount || 0))}`
+                  : `router-threshold=${escapeHtml(String(evolution.routerConfig.confidenceThreshold ?? "-"))} · validatedFallback=${escapeHtml(String(evolution.routerConfig.preferValidatedFallbacks === true))} · learnedHints=${escapeHtml(String(evolution.routerConfig.templateHintCount || 0))}`
+              }</p>`
+            : ""
+        }
+        ${
+          evolution.collaborationConfig
+            ? `<p class="muted">${
+                currentLang === "zh"
+                  ? `协作策略=partial@${escapeHtml(String(collaboration.partialDeliveryMinCompletedRoles ?? "-"))} · timeout=${escapeHtml(String(collaboration.timeoutNoProgressMode || "-"))} · failure=${escapeHtml(String(collaboration.terminalFailureNoProgressMode || "-"))} · resume=${escapeHtml(String(collaboration.manualResumeAggregationMode || "-"))}`
+                  : `collab-policy=partial@${escapeHtml(String(collaboration.partialDeliveryMinCompletedRoles ?? "-"))} · timeout=${escapeHtml(String(collaboration.timeoutNoProgressMode || "-"))} · failure=${escapeHtml(String(collaboration.terminalFailureNoProgressMode || "-"))} · resume=${escapeHtml(String(collaboration.manualResumeAggregationMode || "-"))}`
+              }</p>`
+            : ""
+        }
+        ${
+          Number(evolution.skillRecommendationCount || 0) > 0
+            ? `<p class="muted">${currentLang === "zh" ? "学习到的 skill 推荐" : "Learned skill recommendations"}: ${escapeHtml(String(evolution.skillRecommendationCount || 0))}</p>`
+            : ""
+        }
+        ${
+          evolution.latestProposal
+            ? `<p><strong>${currentLang === "zh" ? "最新建议" : "Latest Proposal"}:</strong> ${escapeHtml(
+                evolution.latestProposal.summary || ""
+              )}</p>`
+            : `<p class="muted">${currentLang === "zh" ? "暂无进化建议" : "No evolution proposals yet"}</p>`
+        }
+        ${
+          evolution.latestAppliedChange
+            ? `<p><strong>${currentLang === "zh" ? "最近应用" : "Latest Applied"}:</strong> ${escapeHtml(
+                evolution.latestAppliedChange.kind || evolution.latestAppliedChange.proposalId || ""
+              )}</p>`
+            : ""
+        }
+        ${
+          Array.isArray(evolution.latestSignals) && evolution.latestSignals.length > 0
+            ? `<div class="pill-row">${evolution.latestSignals
+                .slice(0, 5)
+                .map(
+                  (signal) =>
+                    `<span class="pill">${escapeHtml(String(signal.kind || "signal"))}:${escapeHtml(String(signal.summary || "").slice(0, 36))}</span>`
+                )
+                .join("")}</div>`
+            : ""
+        }
+      </div>
     </article>
+  `;
+}
+
+function renderEvolutionBoard(payload) {
+  if (!evolutionBoardContainer) {
+    return;
+  }
+
+  if (!payload) {
+    evolutionBoardContainer.innerHTML = `
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "暂无进化数据" : "No evolution data yet"}</strong>
+          <span>0</span>
+        </div>
+        <p class="muted">${currentLang === "zh" ? "系统尚未记录自动进化状态。" : "The system has not recorded evolution state yet."}</p>
+      </article>
+    `;
+    return;
+  }
+
+  const runtimeConfig = payload.runtimeConfig || {};
+  const router = runtimeConfig.router || {};
+  const intake = runtimeConfig.intake || {};
+  const collaboration = runtimeConfig.collaboration || {};
+  const skills = runtimeConfig.skills || {};
+  const templateHints = Array.isArray(router.templateHints) ? router.templateHints : [];
+  const recommendations = Array.isArray(skills.recommendations) ? skills.recommendations : [];
+  const signals = Array.isArray(payload.signals) ? payload.signals : [];
+  const proposals = Array.isArray(payload.proposals) ? payload.proposals : [];
+  const appliedChanges = Array.isArray(payload.appliedChanges) ? payload.appliedChanges : [];
+
+  const templateHintCards =
+    templateHints.length > 0
+      ? templateHints
+          .slice(0, 12)
+          .map(
+            (hint) => `
+              <article class="list-card compact">
+                <div class="list-head">
+                  <strong>${escapeHtml(String(hint.templateId || "-"))}</strong>
+                  <span>${escapeHtml(String(hint.source || "evolution"))}</span>
+                </div>
+                <div class="pill-row">
+                  ${(Array.isArray(hint.phrases) ? hint.phrases : [])
+                    .slice(0, 8)
+                    .map((phrase) => `<span class="pill">${escapeHtml(String(phrase))}</span>`)
+                    .join("")}
+                </div>
+                <p class="muted">${hint.updatedAt ? formatDateTime(hint.updatedAt) : "-"}</p>
+              </article>
+            `
+          )
+          .join("")
+      : `<article class="list-card compact"><div class="list-head"><strong>${
+          currentLang === "zh" ? "Learned Template Hints" : "Learned Template Hints"
+        }</strong><span>0</span></div><p class="muted">${
+          currentLang === "zh" ? "还没有学习到的模板提示。" : "No learned template hints yet."
+        }</p></article>`;
+
+  const recommendationCards =
+    recommendations.length > 0
+      ? recommendations
+          .slice(0, 12)
+          .map(
+            (item) => `
+              <article class="list-card compact">
+                <div class="list-head">
+                  <strong>${escapeHtml(String(item.skillId || "-"))}</strong>
+                  <span>${escapeHtml(String(item.roleId || "-"))}</span>
+                </div>
+                <p>${escapeHtml(String(item.reason || "-"))}</p>
+                <div class="pill-row">
+                  <span class="pill">boost:${escapeHtml(String(item.scoreBoost || 0))}</span>
+                </div>
+                <p class="muted">${item.updatedAt ? formatDateTime(item.updatedAt) : "-"}</p>
+              </article>
+            `
+          )
+          .join("")
+      : `<article class="list-card compact"><div class="list-head"><strong>${
+          currentLang === "zh" ? "Learned Skill Recommendations" : "Learned Skill Recommendations"
+        }</strong><span>0</span></div><p class="muted">${
+          currentLang === "zh" ? "还没有学习到的技能推荐。" : "No learned skill recommendations yet."
+        }</p></article>`;
+
+  const proposalCards =
+    proposals.length > 0
+      ? proposals
+          .slice(0, 10)
+          .map(
+            (proposal) => `
+              <article class="list-card compact">
+                <div class="list-head">
+                  <strong>${escapeHtml(String(proposal.kind || "-"))}</strong>
+                  <span>${escapeHtml(String(proposal.status || "-"))}</span>
+                </div>
+                <p>${escapeHtml(String(proposal.summary || "-"))}</p>
+                <div class="pill-row">
+                  <span class="pill">risk:${escapeHtml(String(proposal.risk || "-"))}</span>
+                  ${(Array.isArray(proposal.sourceSignalKinds) ? proposal.sourceSignalKinds : [])
+                    .slice(0, 4)
+                    .map((kind) => `<span class="pill">${escapeHtml(String(kind))}</span>`)
+                    .join("")}
+                </div>
+                <p class="muted">${proposal.createdAt ? formatDateTime(proposal.createdAt) : "-"}</p>
+              </article>
+            `
+          )
+          .join("")
+      : `<article class="list-card compact"><div class="list-head"><strong>${
+          currentLang === "zh" ? "Evolution Proposals" : "Evolution Proposals"
+        }</strong><span>0</span></div><p class="muted">${
+          currentLang === "zh" ? "当前没有进化建议。" : "No evolution proposals right now."
+        }</p></article>`;
+
+  const appliedCards =
+    appliedChanges.length > 0
+      ? appliedChanges
+          .slice(0, 10)
+          .map(
+            (change) => `
+              <article class="list-card compact">
+                <div class="list-head">
+                  <strong>${escapeHtml(String(change.kind || "-"))}</strong>
+                  <span>${escapeHtml(String(change.proposalId || "-"))}</span>
+                </div>
+                <p class="muted">${change.appliedAt ? formatDateTime(change.appliedAt) : "-"}</p>
+              </article>
+            `
+          )
+          .join("")
+      : `<article class="list-card compact"><div class="list-head"><strong>${
+          currentLang === "zh" ? "Applied Changes" : "Applied Changes"
+        }</strong><span>0</span></div><p class="muted">${
+          currentLang === "zh" ? "当前没有自动应用记录。" : "No auto-applied changes yet."
+        }</p></article>`;
+
+  const signalCards =
+    signals.length > 0
+      ? signals
+          .slice(0, 12)
+          .map(
+            (signal) => `
+              <article class="list-card compact">
+                <div class="list-head">
+                  <strong>${escapeHtml(String(signal.kind || "-"))}</strong>
+                  <span>${escapeHtml(String(signal.source || "-"))}</span>
+                </div>
+                <p>${escapeHtml(String(signal.summary || "-"))}</p>
+                <div class="pill-row">
+                  ${signal.roleId ? `<span class="pill">${escapeHtml(String(signal.roleId))}</span>` : ""}
+                  ${signal.templateId ? `<span class="pill">${escapeHtml(String(signal.templateId))}</span>` : ""}
+                  ${signal.skillId ? `<span class="pill">${escapeHtml(String(signal.skillId))}</span>` : ""}
+                  <span class="pill">weight:${escapeHtml(String(signal.weight ?? 0))}</span>
+                </div>
+                <p class="muted">${signal.createdAt ? formatDateTime(signal.createdAt) : "-"}</p>
+              </article>
+            `
+          )
+          .join("")
+      : `<article class="list-card compact"><div class="list-head"><strong>${
+          currentLang === "zh" ? "Evolution Signals" : "Evolution Signals"
+        }</strong><span>0</span></div><p class="muted">${
+          currentLang === "zh" ? "当前没有演化信号。" : "No evolution signals yet."
+        }</p></article>`;
+
+  evolutionBoardContainer.innerHTML = `
+    <article class="list-card compact">
+      <div class="list-head">
+        <strong>${currentLang === "zh" ? "Evolution Runtime" : "Evolution Runtime"}</strong>
+        <span>${payload.updatedAt ? formatDateTime(payload.updatedAt) : "-"}</span>
+      </div>
+      <div class="pill-row">
+        <span class="pill">signals:${escapeHtml(String(payload.signalCount || 0))}</span>
+        <span class="pill">proposals:${escapeHtml(String(payload.proposalCount || 0))}</span>
+        <span class="pill">applied:${escapeHtml(String(payload.appliedChangeCount || 0))}</span>
+        <span class="pill">router-threshold:${escapeHtml(String(router.confidenceThreshold ?? "-"))}</span>
+        <span class="pill">validated-fallback:${escapeHtml(String(router.preferValidatedFallbacks === true))}</span>
+        <span class="pill">clarify-short-vague:${escapeHtml(String(intake.preferClarificationForShortVagueRequests === true))}</span>
+        <span class="pill">direct-conv-max:${escapeHtml(String(intake.directConversationMaxLength ?? "-"))}</span>
+        <span class="pill">collab-explicit:${escapeHtml(String(intake.requireExplicitTeamSignal !== false))}</span>
+        <span class="pill">collab-partial-min:${escapeHtml(String(collaboration.partialDeliveryMinCompletedRoles ?? "-"))}</span>
+        <span class="pill">collab-timeout:${escapeHtml(String(collaboration.timeoutNoProgressMode || "-"))}</span>
+        <span class="pill">learned-hints:${escapeHtml(String(templateHints.length))}</span>
+        <span class="pill">skill-recs:${escapeHtml(String(recommendations.length))}</span>
+      </div>
+    </article>
+    <div class="evolution-grid">
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "Intake Policy" : "Intake Policy"}</strong>
+          <span>${escapeHtml(String(intake.requireExplicitTeamSignal !== false))}</span>
+        </div>
+        <div class="pill-row">
+          <span class="pill">clarify:${escapeHtml(String(intake.preferClarificationForShortVagueRequests === true))}</span>
+          <span class="pill">short-vague-max:${escapeHtml(String(intake.shortVagueRequestMaxLength ?? "-"))}</span>
+          <span class="pill">direct-max:${escapeHtml(String(intake.directConversationMaxLength ?? "-"))}</span>
+          <span class="pill">ambiguous-max:${escapeHtml(String(intake.ambiguousConversationMaxLength ?? "-"))}</span>
+          <span class="pill">collab-min:${escapeHtml(String(intake.collaborationMinLength ?? "-"))}</span>
+          <span class="pill">explicit-team:${escapeHtml(String(intake.requireExplicitTeamSignal !== false))}</span>
+        </div>
+      </article>
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "Collaboration Policy" : "Collaboration Policy"}</strong>
+          <span>${escapeHtml(String(collaboration.manualResumeAggregationMode || "-"))}</span>
+        </div>
+        <div class="pill-row">
+          <span class="pill">partial-min:${escapeHtml(String(collaboration.partialDeliveryMinCompletedRoles ?? "-"))}</span>
+          <span class="pill">timeout:${escapeHtml(String(collaboration.timeoutNoProgressMode || "-"))}</span>
+          <span class="pill">terminal-failure:${escapeHtml(String(collaboration.terminalFailureNoProgressMode || "-"))}</span>
+          <span class="pill">manual-resume:${escapeHtml(String(collaboration.manualResumeAggregationMode || "-"))}</span>
+        </div>
+      </article>
+    </div>
+    <div class="evolution-grid">${templateHintCards}</div>
+    <div class="evolution-grid">${recommendationCards}</div>
+    <div class="evolution-grid">${proposalCards}</div>
+    <div class="evolution-grid">${appliedCards}</div>
+    <div class="evolution-grid">${signalCards}</div>
   `;
 }
 
@@ -2196,8 +2525,9 @@ function renderToolRuns(toolRuns) {
 
 function renderAudit(audit) {
   auditContainer.innerHTML = audit
-    .map(
-      (event) => `
+    .map((event) => {
+      const auditDetails = renderInboundRoutingDetails(event.payload, "audit");
+      return `
         <article class="list-card compact">
           <div class="list-head">
             <strong>${escapeHtml(event.category)}</strong>
@@ -2205,10 +2535,82 @@ function renderAudit(audit) {
           </div>
           <p>${escapeHtml(event.message)}</p>
           <p class="muted">${escapeHtml(event.entityType)} · ${escapeHtml(event.entityId)}</p>
+          ${auditDetails}
         </article>
       `
-    )
+    })
     .join("");
+}
+
+function renderInboundRoutingDetails(audit, mode = "activity") {
+  if (!audit || !["inbound-routing", "template-routing", "session-action"].includes(audit.category)) {
+    return "";
+  }
+
+  if (audit.category === "session-action") {
+    const actionId = audit.actionId || audit.clientActionId || "";
+    const pills = [
+      audit.action ? `<span class="pill">${escapeHtml(`action:${audit.action}`)}</span>` : "",
+      actionId ? `<span class="pill">${escapeHtml(`id:${actionId}`)}</span>` : "",
+      audit.resultType ? `<span class="pill">${escapeHtml(`result:${audit.resultType}`)}</span>` : "",
+      audit.taskId ? `<span class="pill">${escapeHtml(`task:${audit.taskId}`)}</span>` : "",
+      audit.goalRunId ? `<span class="pill">${escapeHtml(`goal:${audit.goalRunId}`)}</span>` : "",
+      audit.approvalId ? `<span class="pill">${escapeHtml(`approval:${audit.approvalId}`)}</span>` : ""
+    ]
+      .filter(Boolean)
+      .join("");
+    const layoutStyle =
+      mode === "audit"
+        ? `margin-top:8px;padding-top:8px;border-top:1px dashed rgba(15,23,42,0.12);`
+        : `margin-top:8px;`;
+    return `
+      <div class="stack-sm" style="${layoutStyle}">
+        ${audit.eventType ? `<p><strong>${currentLang === "zh" ? "事件" : "Event"}:</strong> ${escapeHtml(formatActivityEventType(audit.eventType))}</p>` : ""}
+        ${audit.textPreview ? `<p class="muted">${escapeHtml(audit.textPreview)}</p>` : ""}
+        ${pills ? `<div class="pill-row">${pills}</div>` : ""}
+      </div>
+    `;
+  }
+
+  const pills = [
+    audit.intent ? `<span class="pill">${escapeHtml(`intent:${audit.intent}`)}</span>` : "",
+    audit.stage ? `<span class="pill">${escapeHtml(`stage:${audit.stage}`)}</span>` : "",
+    audit.templateId ? `<span class="pill">${escapeHtml(`template:${audit.templateId}`)}</span>` : "",
+    audit.confidence ? `<span class="pill">${escapeHtml(`confidence:${audit.confidence}`)}</span>` : ""
+  ]
+    .filter(Boolean)
+    .join("");
+
+  const matchedRules = Array.isArray(audit.matchedRules) ? audit.matchedRules.filter(Boolean) : [];
+  const matchedKeywords = Array.isArray(audit.matchedKeywords) ? audit.matchedKeywords.filter(Boolean) : [];
+  const preview = audit.textPreview ? `<p class="muted">${escapeHtml(audit.textPreview)}</p>` : "";
+  const layoutStyle =
+    mode === "audit"
+      ? `margin-top:8px;padding-top:8px;border-top:1px dashed rgba(15,23,42,0.12);`
+      : `margin-top:8px;`;
+
+  return `
+    <div class="stack-sm" style="${layoutStyle}">
+      ${audit.reason ? `<p><strong>${currentLang === "zh" ? "命中原因" : "Reason"}:</strong> ${escapeHtml(audit.reason)}</p>` : ""}
+      ${
+        audit.templateName
+          ? `<p><strong>${currentLang === "zh" ? "命中模板" : "Template"}:</strong> ${escapeHtml(audit.templateName)}</p>`
+          : ""
+      }
+      ${
+        matchedRules.length > 0
+          ? `<p><strong>${currentLang === "zh" ? "命中规则" : "Matched rules"}:</strong> ${escapeHtml(matchedRules.join(", "))}</p>`
+          : ""
+      }
+      ${
+        matchedKeywords.length > 0
+          ? `<p><strong>${currentLang === "zh" ? "命中关键词" : "Matched keywords"}:</strong> ${escapeHtml(matchedKeywords.join(", "))}</p>`
+          : ""
+      }
+      ${preview}
+      ${pills ? `<div class="pill-row">${pills}</div>` : ""}
+    </div>
+  `;
 }
 
 function renderActivityFeed(payload) {
@@ -2224,8 +2626,11 @@ function renderActivityFeed(payload) {
 
   activityFeedContainer.innerHTML = events
     .map((event) => {
+      const auditDetails = renderInboundRoutingDetails(event.audit, "activity");
       const pills = [
         `<span class="pill">${escapeHtml(getActivityKindLabel(event.kind))}</span>`,
+        event.eventType ? `<span class="pill">${escapeHtml(formatActivityEventType(event.eventType))}</span>` : "",
+        event.audit?.actionId ? `<span class="pill">action:${escapeHtml(event.audit.actionId)}</span>` : "",
         event.status ? statusBadge(event.status) : "",
         event.roleId ? `<span class="pill">${escapeHtml(event.roleId)}</span>` : "",
         event.stage ? `<span class="pill">${escapeHtml(event.stage)}</span>` : "",
@@ -2240,7 +2645,9 @@ function renderActivityFeed(payload) {
         .join("");
 
       return `
-        <article class="list-card compact">
+        <article class="list-card compact" style="cursor:pointer" data-activity-kind="${escapeHtml(String(event.kind || ""))}" data-activity-entity-type="${escapeHtml(
+          String(event.entityType || "")
+        )}" data-activity-entity-id="${escapeHtml(String(event.entityId || ""))}">
           <div class="list-head">
             <strong>${escapeHtml(event.title || getActivityKindLabel(event.kind))}</strong>
             <span>${formatDateTime(event.ts)}</span>
@@ -2249,11 +2656,316 @@ function renderActivityFeed(payload) {
           <p class="muted">${escapeHtml(getActivitySourceLabel(event.source))} · ${escapeHtml(event.entityType)} · ${escapeHtml(
             String(event.entityId || "")
           )}</p>
+          ${auditDetails}
           <div class="pill-row">${pills}</div>
         </article>
       `;
     })
     .join("");
+
+  activityFeedContainer.querySelectorAll("[data-activity-entity-id]").forEach((card) => {
+    card.addEventListener("click", async () => {
+      const entityId = card.getAttribute("data-activity-entity-id") || "";
+      const entityType = card.getAttribute("data-activity-entity-type") || "";
+      const kind = card.getAttribute("data-activity-kind") || "";
+      const event = events.find(
+        (item) =>
+          String(item.entityId || "") === entityId &&
+          String(item.entityType || "") === entityType &&
+          String(item.kind || "") === kind
+      );
+      if (!entityId) {
+        return;
+      }
+
+      try {
+        if (kind === "trace") {
+          setView("telemetry");
+          await loadTraceDetail(entityId);
+          return;
+        }
+
+        if (entityType === "task") {
+          setView("execution");
+          await openTaskDetail(entityId);
+          return;
+        }
+
+        if (entityType === "goal_run") {
+          setView("execution");
+          await openGoalRunDetail(entityId);
+          return;
+        }
+
+        if (entityType === "session") {
+          setView("workbench");
+          await openSessionWorkbenchDetail(entityId);
+          const actionId = typeof event?.audit?.actionId === "string" ? event.audit.actionId : "";
+          if (actionId) {
+            selectedSessionTimelineActionId = actionId;
+            const timelinePayload = await request(
+              `/api/sessions/${encodeURIComponent(entityId)}/timeline?limit=30&actionId=${encodeURIComponent(actionId)}`
+            );
+            selectedSessionWorkbenchDetail = {
+              ...(selectedSessionWorkbenchDetail || {}),
+              session: timelinePayload.session || selectedSessionWorkbenchDetail?.session,
+              timeline: timelinePayload.timeline
+            };
+            renderSessionWorkbenchDetail(entityId, selectedSessionWorkbenchDetail);
+            startSessionTimelineStream(entityId);
+          }
+          return;
+        }
+
+        if (entityType === "approval") {
+          const sessionId =
+            typeof event?.audit?.sessionId === "string"
+              ? event.audit.sessionId
+              : typeof event?.audit?.taskId === "string" && Array.isArray(window._lastTasks)
+                ? window._lastTasks.find((task) => task.id === event.audit.taskId)?.sessionId || ""
+                : "";
+          if (sessionId) {
+            setView("workbench");
+            await openSessionWorkbenchDetail(sessionId);
+            return;
+          }
+          setView("execution");
+        }
+      } catch (error) {
+        taskResult.textContent = error instanceof Error ? error.message : String(error);
+      }
+    });
+  });
+}
+
+function isMilestoneEvent(event) {
+  const eventType = String(event?.eventType || "");
+  const source = String(event?.source || "");
+  const kind = String(event?.kind || "");
+  if (!eventType && !source && !kind) {
+    return false;
+  }
+  if (
+    eventType === "session_workbench_pushed" ||
+    eventType === "session_workbench_push_failed" ||
+    eventType.startsWith("session_action_")
+  ) {
+    return true;
+  }
+  if (eventType.startsWith("approval_") || eventType.startsWith("goal_run_") || eventType.startsWith("collaboration_")) {
+    return true;
+  }
+  if (eventType === "task_completed" || eventType === "task_failed" || eventType === "task_paused_input" || eventType === "task_waiting_approval") {
+    return true;
+  }
+  return source === "approval" || kind === "approval" || kind === "goal_run";
+}
+
+function renderMilestoneStream(payload) {
+  if (!milestoneStreamContainer) {
+    return;
+  }
+  const events = (Array.isArray(payload?.events) ? payload.events : [])
+    .filter(isMilestoneEvent)
+    .slice(0, 8);
+  if (events.length === 0) {
+    milestoneStreamContainer.innerHTML = `<p class="muted" style="text-align:center;padding:20px 0;">${t("panel.milestones.empty")}</p>`;
+    return;
+  }
+  milestoneStreamContainer.innerHTML = events
+    .map((event) => {
+      const eventType = String(event.eventType || "");
+      const isWorkbench = eventType.startsWith("session_workbench") || eventType.startsWith("session_action_");
+      const isProblem =
+        eventType.includes("failed") ||
+        eventType.includes("rejected") ||
+        eventType.includes("awaiting") ||
+        eventType.includes("pending") ||
+        event.status === "failed" ||
+        event.status === "rejected";
+      const stateClass = isProblem ? "is-attention" : isWorkbench ? "is-workbench" : "is-good";
+      const pills = [
+        `<span class="pill">${escapeHtml(getActivityKindLabel(event.kind))}</span>`,
+        eventType ? `<span class="pill">${escapeHtml(formatActivityEventType(eventType))}</span>` : "",
+        event.audit?.actionId ? `<span class="pill">action:${escapeHtml(event.audit.actionId)}</span>` : "",
+        event.status ? statusBadge(event.status) : "",
+        event.stage ? `<span class="pill">${escapeHtml(event.stage)}</span>` : ""
+      ]
+        .filter(Boolean)
+        .join("");
+      return `
+        <article class="list-card compact milestone-card ${stateClass}" data-milestone-entity-type="${escapeHtml(
+          String(event.entityType || "")
+        )}" data-milestone-entity-id="${escapeHtml(String(event.entityId || ""))}" data-milestone-kind="${escapeHtml(String(event.kind || ""))}">
+          <div class="list-head">
+            <strong>${escapeHtml(event.title || formatActivityEventType(eventType) || getActivityKindLabel(event.kind))}</strong>
+            <span>${formatDateTime(event.ts)}</span>
+          </div>
+          <p>${escapeHtml(event.summary || "")}</p>
+          <div class="pill-row">${pills}</div>
+        </article>
+      `;
+    })
+    .join("");
+
+  milestoneStreamContainer.querySelectorAll("[data-milestone-entity-id]").forEach((card) => {
+    card.addEventListener("click", async () => {
+      const entityType = card.getAttribute("data-milestone-entity-type") || "";
+      const entityId = card.getAttribute("data-milestone-entity-id") || "";
+      const kind = card.getAttribute("data-milestone-kind") || "";
+      const event = events.find(
+        (item) =>
+          String(item.entityId || "") === entityId &&
+          String(item.entityType || "") === entityType &&
+          String(item.kind || "") === kind
+      );
+      if (!entityId) {
+        return;
+      }
+      if (entityType === "session") {
+        setView("workbench");
+        await openSessionWorkbenchDetail(entityId);
+        const actionId = typeof event?.audit?.actionId === "string" ? event.audit.actionId : "";
+        if (actionId) {
+          selectedSessionTimelineActionId = actionId;
+          const timelinePayload = await request(
+            `/api/sessions/${encodeURIComponent(entityId)}/timeline?limit=30&actionId=${encodeURIComponent(actionId)}`
+          );
+          selectedSessionWorkbenchDetail = {
+            ...(selectedSessionWorkbenchDetail || {}),
+            session: timelinePayload.session || selectedSessionWorkbenchDetail?.session,
+            timeline: timelinePayload.timeline
+          };
+          renderSessionWorkbenchDetail(entityId, selectedSessionWorkbenchDetail);
+          startSessionTimelineStream(entityId);
+        }
+        return;
+      }
+      if (entityType === "task") {
+        setView("execution");
+        await openTaskDetail(entityId);
+        return;
+      }
+      if (entityType === "goal_run" || kind === "goal_run") {
+        setView("execution");
+        await openGoalRunDetail(entityId);
+        return;
+      }
+      if (entityType === "approval" || kind === "approval") {
+        const sessionId =
+          typeof event?.audit?.sessionId === "string"
+            ? event.audit.sessionId
+            : typeof event?.audit?.taskId === "string" && Array.isArray(window._lastTasks)
+              ? window._lastTasks.find((task) => task.id === event.audit.taskId)?.sessionId || ""
+              : "";
+        if (sessionId) {
+          setView("workbench");
+          await openSessionWorkbenchDetail(sessionId);
+          return;
+        }
+        setView("execution");
+      }
+    });
+  });
+}
+
+function setLiveStreamStatus(state, updatedAt) {
+  if (!liveStreamStatusContainer) {
+    return;
+  }
+  liveStreamStatusContainer.classList.remove("connected", "disconnected");
+  if (state === "connected") {
+    liveStreamStatusContainer.classList.add("connected");
+    liveStreamStatusContainer.textContent = t("panel.activity.live.connected", {
+      time: updatedAt ? formatDateTime(updatedAt) : "-"
+    });
+    return;
+  }
+  if (state === "disconnected" || state === "error") {
+    liveStreamStatusContainer.classList.add("disconnected");
+    liveStreamStatusContainer.textContent = t(
+      state === "error" ? "panel.activity.live.error" : "panel.activity.live.disconnected"
+    );
+    return;
+  }
+  liveStreamStatusContainer.textContent = t("panel.activity.live.connecting");
+}
+
+function closeLiveStream() {
+  if (liveStream) {
+    liveStream.close();
+    liveStream = null;
+  }
+  liveStreamConnected = false;
+  if (liveStreamReconnectTimer) {
+    clearTimeout(liveStreamReconnectTimer);
+    liveStreamReconnectTimer = null;
+  }
+}
+
+function scheduleLiveStreamReconnect() {
+  if (liveStreamReconnectTimer) {
+    return;
+  }
+  liveStreamReconnectTimer = setTimeout(() => {
+    liveStreamReconnectTimer = null;
+    startLiveStream();
+  }, 3000);
+}
+
+function startLiveStream() {
+  closeLiveStream();
+  if (typeof EventSource === "undefined") {
+    setLiveStreamStatus("error");
+    return;
+  }
+  liveStreamConnected = false;
+  setLiveStreamStatus("connecting");
+  liveStream = new EventSource("/api/system/activity-feed/stream?limit=20&pollMs=2000", {
+    withCredentials: true
+  });
+
+  liveStream.addEventListener("ready", () => {
+    setLiveStreamStatus("connecting");
+  });
+
+  liveStream.addEventListener("snapshot", (event) => {
+    try {
+      const payload = JSON.parse(event.data || "{}");
+      if (payload.activity) {
+        liveActivityFeedPayload = payload.activity;
+        renderActivityFeed(payload.activity);
+        renderMilestoneStream(payload.activity);
+      }
+      if (payload.telemetry) {
+        liveTelemetryPayload = payload.telemetry;
+        renderTelemetryBoard(payload.telemetry, lastRuntimeHarnessPayload);
+      }
+      liveStreamConnected = true;
+      setLiveStreamStatus("connected", payload.generatedAt || payload.activity?.generatedAt);
+    } catch {
+      liveStreamConnected = false;
+      setLiveStreamStatus("error");
+    }
+  });
+
+  liveStream.addEventListener("heartbeat", (event) => {
+    try {
+      const payload = JSON.parse(event.data || "{}");
+      liveStreamConnected = true;
+      setLiveStreamStatus("connected", payload.ts);
+    } catch {
+      liveStreamConnected = true;
+      setLiveStreamStatus("connected");
+    }
+  });
+
+  liveStream.onerror = () => {
+    liveStreamConnected = false;
+    setLiveStreamStatus("disconnected");
+    closeLiveStream();
+    scheduleLiveStreamReconnect();
+  };
 }
 
 function renderConfig(config) {
@@ -2509,8 +3221,481 @@ function normalizeOperatingSystemBoard(payload) {
     pendingDecisions: Array.isArray(payload.pendingDecisions) ? payload.pendingDecisions : [],
     nextActions: Array.isArray(payload.nextActions) ? payload.nextActions : [],
     latestArtifacts: Array.isArray(payload.latestArtifacts) ? payload.latestArtifacts : [],
+    verifiedArtifacts: Array.isArray(payload.verifiedArtifacts) ? payload.verifiedArtifacts : [],
+    memoryFacts: Array.isArray(payload.memoryFacts) ? payload.memoryFacts : [],
     teamReadiness: Array.isArray(payload.teamReadiness) ? payload.teamReadiness : []
   };
+}
+
+function renderSessionWorkbenchDetail(sessionId, detail) {
+  if (!sessionWorkbenchDetailContainer || !sessionId || !detail || !detail.snapshot) {
+    if (sessionWorkbenchDetailContainer) {
+      sessionWorkbenchDetailContainer.classList.add("is-hidden");
+      sessionWorkbenchDetailContainer.innerHTML = "";
+    }
+    return;
+  }
+
+  const snapshot = detail.snapshot || {};
+  const session = detail.session || {};
+  const tasks = Array.isArray(detail.tasks) ? detail.tasks : [];
+  const goalRuns = Array.isArray(detail.goalRuns) ? detail.goalRuns : [];
+  const approvals = Array.isArray(detail.approvals) ? detail.approvals : [];
+  const messages = Array.isArray(detail.messages) ? detail.messages : [];
+  const timelineEvents = Array.isArray(detail.timeline?.events) ? detail.timeline.events : [];
+  const timelineTotal = Number(detail.timeline?.total || timelineEvents.length || 0);
+  const timelineActionId = detail.timeline?.actionId || selectedSessionTimelineActionId || "";
+  const renderMiniList = (items, emptyLabel) =>
+    Array.isArray(items) && items.length > 0
+      ? `<ul style="margin:8px 0 0 18px;padding:0;">${items.map((item) => `<li>${escapeHtml(String(item))}</li>`).join("")}</ul>`
+      : `<p class="muted">${emptyLabel}</p>`;
+  const timelineKindLabel = (kind) => {
+    if (kind === "message") return currentLang === "zh" ? "消息" : "Message";
+    if (kind === "task") return currentLang === "zh" ? "任务" : "Task";
+    if (kind === "goal_run") return "GoalRun";
+    if (kind === "approval") return currentLang === "zh" ? "审批" : "Approval";
+    if (kind === "audit") return currentLang === "zh" ? "审计" : "Audit";
+    return String(kind || "event");
+  };
+
+  sessionWorkbenchDetailContainer.classList.remove("is-hidden");
+  sessionWorkbenchDetailContainer.innerHTML = `
+    <div class="task-detail-head">
+      <strong>${currentLang === "zh" ? "会话工作台" : "Session Workbench"}: ${escapeHtml(
+        snapshot.currentGoal || snapshot.sessionTitle || session.title || sessionId
+      )}</strong>
+      <button type="button" class="ghost" data-session-workbench-close="true">${currentLang === "zh" ? "关闭" : "Close"}</button>
+    </div>
+    <div class="task-detail-grid">
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "会话概览" : "Session Overview"}</strong>
+          <span>${escapeHtml(snapshot.currentStage || session.status || "-")}</span>
+        </div>
+        <p><strong>${currentLang === "zh" ? "当前目标" : "Current goal"}:</strong> ${escapeHtml(
+          snapshot.currentGoal || snapshot.sessionTitle || session.title || "-"
+        )}</p>
+        <p><strong>${currentLang === "zh" ? "最近结论" : "Latest summary"}:</strong> ${escapeHtml(snapshot.latestSummary || "-")}</p>
+        <p class="muted">${escapeHtml(snapshot.source || session.source || "-")} · ${formatDateTime(snapshot.generatedAt || session.updatedAt)}</p>
+        <div class="pill-row" style="margin-top:8px;">
+          <span class="pill">${currentLang === "zh" ? "任务" : "Tasks"} · ${escapeHtml(String(tasks.length))}</span>
+          <span class="pill">${currentLang === "zh" ? "GoalRun" : "GoalRuns"} · ${escapeHtml(String(goalRuns.length))}</span>
+          <span class="pill">${currentLang === "zh" ? "审批" : "Approvals"} · ${escapeHtml(String(approvals.length))}</span>
+          <span class="pill">${currentLang === "zh" ? "消息" : "Messages"} · ${escapeHtml(String(messages.length))}</span>
+          <span class="pill">Timeline · ${escapeHtml(String(timelineTotal))}</span>
+        </div>
+        <div class="action-row" style="margin-top:10px;">
+          <button type="button" class="ghost" data-session-action="continue" data-session-action-id="${escapeHtml(sessionId)}">${
+            currentLang === "zh" ? "继续推进" : "Continue"
+          }</button>
+          <button type="button" class="ghost" data-session-action="supplement" data-session-action-id="${escapeHtml(sessionId)}">${
+            currentLang === "zh" ? "补充信息" : "Supplement"
+          }</button>
+          <button type="button" class="ghost" data-session-action="rerun-goalrun" data-session-action-id="${escapeHtml(sessionId)}">${
+            currentLang === "zh" ? "重跑 GoalRun" : "Rerun GoalRun"
+          }</button>
+        </div>
+      </article>
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "会话时间线" : "Session Timeline"}</strong>
+          <span>${escapeHtml(String(timelineEvents.length))}/${escapeHtml(String(timelineTotal))}</span>
+        </div>
+        ${
+          timelineActionId
+            ? `<div class="action-row" style="margin:0 0 8px 0;">
+                <span class="pill">action:${escapeHtml(timelineActionId)}</span>
+                <button type="button" class="ghost" data-session-action-filter-clear="true">${
+                  currentLang === "zh" ? "查看全量时间线" : "Show Full Timeline"
+                }</button>
+              </div>`
+            : ""
+        }
+        <p class="muted">${
+          currentLang === "zh"
+            ? timelineActionId
+              ? "当前只展示这次会话动作的消息、审计和触发产物证据链。"
+              : "按时间聚合消息、任务、GoalRun、审批和审计事件，可直接跳转到证据详情。"
+            : timelineActionId
+              ? "Showing only the message, audit, and triggered-artifact evidence chain for this session action."
+              : "Messages, tasks, GoalRuns, approvals, and audit events ordered by time with evidence links."
+        }</p>
+        <div class="timeline-list">
+          ${
+            timelineEvents.length > 0
+              ? timelineEvents
+                  .slice(0, 12)
+                  .map((event) => {
+                    const clientActionId = event?.metadata?.clientActionId || "";
+                    return `
+                      <div class="timeline-item" data-session-timeline-entity-type="${escapeHtml(event.entityType || "")}" data-session-timeline-entity-id="${escapeHtml(
+                        event.entityId || ""
+                      )}" data-session-timeline-kind="${escapeHtml(event.kind || "")}" style="cursor:pointer">
+                        <div class="list-head">
+                          <strong>${escapeHtml(event.title || timelineKindLabel(event.kind))}</strong>
+                          <span>${formatDateTime(event.ts)}</span>
+                        </div>
+                        <p>${escapeHtml(event.summary || "")}</p>
+                        <div class="pill-row" style="margin-top:6px;">
+                          <span class="pill">${escapeHtml(timelineKindLabel(event.kind))}</span>
+                          ${event.eventType ? `<span class="pill">${escapeHtml(event.eventType)}</span>` : ""}
+                          ${
+                            clientActionId
+                              ? `<button type="button" class="pill" data-session-action-filter="${escapeHtml(clientActionId)}">action:${escapeHtml(
+                                  clientActionId
+                                )}</button>`
+                              : ""
+                          }
+                          ${event.status ? statusBadge(event.status) : ""}
+                          ${event.roleId ? `<span class="pill">${escapeHtml(event.roleId)}</span>` : ""}
+                        </div>
+                      </div>
+                    `;
+                  })
+                  .join("")
+              : `<p class="muted">${currentLang === "zh" ? "暂无时间线事件" : "No timeline events yet"}</p>`
+          }
+        </div>
+      </article>
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "阻塞与待决策" : "Blockers & Decisions"}</strong>
+          <span>${escapeHtml(String((snapshot.blockers || []).length + (snapshot.pendingDecisions || []).length))}</span>
+        </div>
+        <div class="memory-block" style="margin-top:0;padding-top:0;border-top:none;">
+          <strong>${currentLang === "zh" ? "阻塞项" : "Blockers"}</strong>
+          ${renderMiniList(snapshot.blockers, currentLang === "zh" ? "当前没有阻塞项" : "No blockers")}
+        </div>
+        <div class="memory-block">
+          <strong>${currentLang === "zh" ? "待决策" : "Pending decisions"}</strong>
+          ${renderMiniList(
+            snapshot.pendingDecisions,
+            currentLang === "zh" ? "当前没有待决策项" : "No pending decisions"
+          )}
+        </div>
+      </article>
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "下一步与产物" : "Next Actions & Artifacts"}</strong>
+          <span>${escapeHtml(String((snapshot.nextActions || []).length + (snapshot.latestArtifacts || []).length))}</span>
+        </div>
+        <div class="memory-block" style="margin-top:0;padding-top:0;border-top:none;">
+          <strong>${currentLang === "zh" ? "下一步动作" : "Next actions"}</strong>
+          ${renderMiniList(snapshot.nextActions, currentLang === "zh" ? "当前没有下一步动作" : "No next actions")}
+        </div>
+        <div class="memory-block">
+          <strong>${currentLang === "zh" ? "最近产物" : "Latest artifacts"}</strong>
+          ${renderMiniList(snapshot.latestArtifacts, currentLang === "zh" ? "当前没有产物" : "No artifacts")}
+        </div>
+      </article>
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "活跃执行态" : "Active execution state"}</strong>
+          <span>${escapeHtml(snapshot.activeTask?.status || snapshot.activeGoalRun?.status || snapshot.pendingApproval?.status || "-")}</span>
+        </div>
+        ${
+          snapshot.activeTask
+            ? `<p><strong>${currentLang === "zh" ? "活跃任务" : "Active task"}:</strong> ${escapeHtml(
+                `${snapshot.activeTask.title} · ${snapshot.activeTask.roleId} · ${snapshot.activeTask.status}`
+              )}</p>
+              <p class="muted">${escapeHtml(snapshot.activeTask.workflowSummary || "-")}</p>`
+            : `<p class="muted">${currentLang === "zh" ? "当前没有活跃任务" : "No active task"}</p>`
+        }
+        ${
+          snapshot.activeGoalRun
+            ? `<p><strong>${currentLang === "zh" ? "活跃 GoalRun" : "Active GoalRun"}:</strong> ${escapeHtml(
+                `${snapshot.activeGoalRun.objective} · ${snapshot.activeGoalRun.stage} · ${snapshot.activeGoalRun.status}`
+              )}</p>`
+            : ""
+        }
+        ${
+          snapshot.pendingApproval
+            ? `<p><strong>${currentLang === "zh" ? "待审批" : "Pending approval"}:</strong> ${escapeHtml(
+                `${snapshot.pendingApproval.summary} · ${snapshot.pendingApproval.status}`
+              )}</p>`
+            : ""
+        }
+      </article>
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "最近任务" : "Recent tasks"}</strong>
+          <span>${escapeHtml(String(tasks.length))}</span>
+        </div>
+        ${
+          tasks.length > 0
+            ? tasks
+                .slice(0, 6)
+                .map(
+                  (task) => `
+                    <div class="timeline-item">
+                      <strong>${escapeHtml(task.title || task.id || "-")}</strong>
+                      <p>${escapeHtml(task.roleId || "-")} · ${escapeHtml(task.status || "-")}</p>
+                      <div class="action-row" style="margin-top:8px;">
+                        <button type="button" class="ghost" data-session-workbench-task="${escapeHtml(task.id || "")}">${
+                          currentLang === "zh" ? "打开任务详情" : "Open Task"
+                        }</button>
+                      </div>
+                    </div>
+                  `
+                )
+                .join("")
+            : `<p class="muted">${currentLang === "zh" ? "暂无任务" : "No tasks"}</p>`
+        }
+      </article>
+      <article class="list-card compact">
+        <div class="list-head">
+          <strong>${currentLang === "zh" ? "最近 GoalRun / 审批" : "GoalRuns / Approvals"}</strong>
+          <span>${escapeHtml(String(goalRuns.length + approvals.length))}</span>
+        </div>
+        ${
+          goalRuns.length > 0
+            ? goalRuns
+                .slice(0, 4)
+                .map(
+                  (goalRun) => `
+                    <div class="timeline-item">
+                      <strong>${escapeHtml(goalRun.objective || goalRun.id || "-")}</strong>
+                      <p>${escapeHtml(goalRun.currentStage || "-")} · ${escapeHtml(goalRun.status || "-")}</p>
+                      <div class="action-row" style="margin-top:8px;">
+                        <button type="button" class="ghost" data-session-workbench-goal-run="${escapeHtml(goalRun.id || "")}">${
+                          currentLang === "zh" ? "打开 GoalRun" : "Open GoalRun"
+                        }</button>
+                      </div>
+                    </div>
+                  `
+                )
+                .join("")
+            : `<p class="muted">${currentLang === "zh" ? "暂无 GoalRun" : "No GoalRuns"}</p>`
+        }
+        ${
+          approvals.length > 0
+            ? `<div class="memory-block">
+                <strong>${currentLang === "zh" ? "审批队列" : "Approval queue"}</strong>
+                ${approvals
+                  .slice(0, 4)
+                  .map(
+                    (approval) => `
+                      <p>${escapeHtml(approval.summary || approval.id || "-")} · ${escapeHtml(approval.status || "-")}</p>
+                    `
+                  )
+                  .join("")}
+              </div>`
+            : ""
+        }
+      </article>
+    </div>
+  `;
+
+  sessionWorkbenchDetailContainer.querySelector('[data-session-workbench-close="true"]')?.addEventListener("click", () => {
+    closeSessionTimelineStream();
+    selectedSessionWorkbenchId = "";
+    selectedSessionWorkbenchDetail = null;
+    selectedSessionTimelineActionId = "";
+    renderSessionWorkbenchDetail("", null);
+  });
+  sessionWorkbenchDetailContainer.querySelector('[data-session-action-filter-clear="true"]')?.addEventListener("click", async () => {
+    selectedSessionTimelineActionId = "";
+    selectedSessionWorkbenchDetail = await request(`/api/sessions/${encodeURIComponent(sessionId)}/workbench`);
+    renderSessionWorkbenchDetail(sessionId, selectedSessionWorkbenchDetail);
+    startSessionTimelineStream(sessionId);
+  });
+  sessionWorkbenchDetailContainer.querySelectorAll("[data-session-action-filter]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const actionId = button.getAttribute("data-session-action-filter") || "";
+      if (!actionId) {
+        return;
+      }
+      selectedSessionTimelineActionId = actionId;
+      const timelinePayload = await request(
+        `/api/sessions/${encodeURIComponent(sessionId)}/timeline?limit=30&actionId=${encodeURIComponent(actionId)}`
+      );
+      selectedSessionWorkbenchDetail = {
+        ...(selectedSessionWorkbenchDetail || {}),
+        session: timelinePayload.session || selectedSessionWorkbenchDetail?.session,
+        timeline: timelinePayload.timeline
+      };
+      renderSessionWorkbenchDetail(sessionId, selectedSessionWorkbenchDetail);
+      startSessionTimelineStream(sessionId);
+    });
+  });
+  sessionWorkbenchDetailContainer.querySelectorAll("[data-session-workbench-task]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const taskId = button.getAttribute("data-session-workbench-task") || "";
+      if (!taskId) {
+        return;
+      }
+      setView("execution");
+      await openTaskDetail(taskId);
+    });
+  });
+  sessionWorkbenchDetailContainer.querySelectorAll("[data-session-workbench-goal-run]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const goalRunId = button.getAttribute("data-session-workbench-goal-run") || "";
+      if (!goalRunId) {
+        return;
+      }
+      setView("execution");
+      await openGoalRunDetail(goalRunId);
+    });
+  });
+  sessionWorkbenchDetailContainer.querySelectorAll("[data-session-timeline-entity-id]").forEach((item) => {
+    item.addEventListener("click", async () => {
+      const entityType = item.getAttribute("data-session-timeline-entity-type") || "";
+      const entityId = item.getAttribute("data-session-timeline-entity-id") || "";
+      if (!entityId) {
+        return;
+      }
+      if (entityType === "task") {
+        setView("execution");
+        await openTaskDetail(entityId);
+        return;
+      }
+      if (entityType === "goal_run") {
+        setView("execution");
+        await openGoalRunDetail(entityId);
+        return;
+      }
+      if (entityType === "approval") {
+        setView("execution");
+      }
+    });
+  });
+}
+
+function closeSessionTimelineStream() {
+  if (sessionTimelineStream) {
+    sessionTimelineStream.close();
+    sessionTimelineStream = null;
+  }
+  sessionTimelineStreamSessionId = "";
+  if (sessionTimelineReconnectTimer) {
+    clearTimeout(sessionTimelineReconnectTimer);
+    sessionTimelineReconnectTimer = null;
+  }
+}
+
+function scheduleSessionTimelineReconnect(sessionId) {
+  if (!sessionId || sessionTimelineReconnectTimer) {
+    return;
+  }
+  sessionTimelineReconnectTimer = setTimeout(() => {
+    sessionTimelineReconnectTimer = null;
+    startSessionTimelineStream(sessionId);
+  }, 3000);
+}
+
+function startSessionTimelineStream(sessionId) {
+  if (!sessionId || typeof EventSource === "undefined") {
+    return;
+  }
+  const streamKey = `${sessionId}:${selectedSessionTimelineActionId || ""}`;
+  if (sessionTimelineStream && sessionTimelineStreamSessionId === streamKey) {
+    return;
+  }
+  closeSessionTimelineStream();
+  sessionTimelineStreamSessionId = streamKey;
+  const query = selectedSessionTimelineActionId ? `&actionId=${encodeURIComponent(selectedSessionTimelineActionId)}` : "";
+  sessionTimelineStream = new EventSource(
+    `/api/sessions/${encodeURIComponent(sessionId)}/timeline/stream?limit=30&pollMs=2000${query}`,
+    {
+      withCredentials: true
+    }
+  );
+
+  sessionTimelineStream.addEventListener("snapshot", (event) => {
+    try {
+      const payload = JSON.parse(event.data || "{}");
+      if (selectedSessionWorkbenchId !== sessionId || !payload.timeline) {
+        return;
+      }
+      selectedSessionWorkbenchDetail = {
+        ...(selectedSessionWorkbenchDetail || {}),
+        session: payload.session || selectedSessionWorkbenchDetail?.session,
+        timeline: payload.timeline
+      };
+      renderSessionWorkbenchDetail(selectedSessionWorkbenchId, selectedSessionWorkbenchDetail);
+    } catch {
+      scheduleSessionTimelineReconnect(sessionId);
+    }
+  });
+
+  sessionTimelineStream.onerror = () => {
+    closeSessionTimelineStream();
+    if (selectedSessionWorkbenchId === sessionId) {
+      scheduleSessionTimelineReconnect(sessionId);
+    }
+  };
+}
+
+function getSessionActionSupplement(action) {
+  if (action === "supplement") {
+    const supplement = window.prompt(
+      currentLang === "zh"
+        ? "请输入要补充给当前会话的信息："
+        : "Enter supplemental information for this session:"
+    );
+    if (!supplement || !supplement.trim()) {
+      return "";
+    }
+    return supplement.trim();
+  }
+  return "";
+}
+
+async function runSessionAction(action, sessionId) {
+  if (!sessionId || !selectedSessionWorkbenchDetail) {
+    return;
+  }
+  const supplement = getSessionActionSupplement(action);
+  if (action === "supplement" && !supplement) {
+    return;
+  }
+  const requestedByInput = document.querySelector("#message-user");
+  const requestedBy = requestedByInput?.value?.trim() || inferInstalledBy();
+  const payload = await request(`/api/sessions/${encodeURIComponent(sessionId)}/actions`, {
+    method: "POST",
+    body: JSON.stringify({
+      action: action || "continue",
+      source: "control-center",
+      requestedBy,
+      ...(supplement ? { text: supplement } : {})
+    })
+  });
+  const actionId = payload?.actionId || "";
+  const result = payload?.result || {};
+  if (actionId) {
+    selectedSessionTimelineActionId = actionId;
+  }
+  messageResult.textContent =
+    currentLang === "zh"
+      ? `已发送会话操作 ${actionId}。${result?.message || ""}`
+      : `Session action ${actionId} sent. ${result?.message || ""}`;
+  if (payload?.workbench) {
+    selectedSessionWorkbenchDetail = {
+      ...payload.workbench,
+      timeline: payload.timeline || payload.workbench.timeline
+    };
+  } else {
+    selectedSessionWorkbenchDetail = await request(`/api/sessions/${sessionId}/workbench`);
+  }
+  renderSessionWorkbenchDetail(sessionId, selectedSessionWorkbenchDetail);
+  startSessionTimelineStream(sessionId);
+  await refresh();
+}
+
+async function openSessionWorkbenchDetail(sessionId) {
+  if (!sessionId) {
+    return;
+  }
+  if (selectedSessionWorkbenchId && selectedSessionWorkbenchId !== sessionId) {
+    closeSessionTimelineStream();
+  }
+  selectedSessionWorkbenchId = sessionId;
+  selectedSessionTimelineActionId = "";
+  selectedSessionWorkbenchDetail = await request(`/api/sessions/${sessionId}/workbench`);
+  renderSessionWorkbenchDetail(selectedSessionWorkbenchId, selectedSessionWorkbenchDetail);
+  startSessionTimelineStream(sessionId);
 }
 
 function renderProjectMemoryBoard(board) {
@@ -2530,6 +3715,33 @@ function renderProjectMemoryBoard(board) {
   const pendingDecisions = Array.isArray(board?.pendingDecisions) ? board.pendingDecisions.slice(0, 5) : [];
   const nextActions = Array.isArray(board?.nextActions) ? board.nextActions.slice(0, 5) : [];
   const latestArtifacts = Array.isArray(board?.latestArtifacts) ? board.latestArtifacts.slice(0, 5) : [];
+  const verifiedArtifacts = Array.isArray(board?.verifiedArtifacts) ? board.verifiedArtifacts.slice(0, 5) : [];
+  const founderMemory = board?.founderMemory || null;
+  const memoryFacts = Array.isArray(board?.memoryFacts) ? board.memoryFacts.slice(-8).reverse() : [];
+  const founderBusinessDomains = Array.isArray(founderMemory?.businessDomains) ? founderMemory.businessDomains.slice(0, 6) : [];
+  const founderTargetUsers = Array.isArray(founderMemory?.targetUsers) ? founderMemory.targetUsers.slice(0, 6) : [];
+  const founderDeliverables = Array.isArray(founderMemory?.deliverablePreferences)
+    ? founderMemory.deliverablePreferences.slice(0, 6)
+    : [];
+  const founderFeedback = Array.isArray(founderMemory?.feedbackSignals) ? founderMemory.feedbackSignals.slice(-3).reverse() : [];
+  const renderMemoryFactList = (items) =>
+    items.length > 0
+      ? `<ul style="margin:8px 0 0 18px;padding:0;">${items
+          .map(
+            (item) =>
+              `<li><strong>${escapeHtml(String(item.kind || "-"))}</strong> · ${escapeHtml(String(item.value || "-"))} <span class="muted">(${escapeHtml(String(item.source || "unknown"))} · ${Math.round(Number(item.confidence ?? 0) * 100)}%)</span></li>`
+          )
+          .join("")}</ul>`
+      : `<p class="muted">${currentLang === "zh" ? "暂无可审计记忆事实" : "No auditable memory facts yet"}</p>`;
+  const renderVerifiedArtifactList = (items) =>
+    items.length > 0
+      ? `<ul style="margin:8px 0 0 18px;padding:0;">${items
+          .map(
+            (item) =>
+              `<li>${item.exists ? "✓" : "!"} ${escapeHtml(String(item.path || "-"))}${item.exists && item.resolvedPath ? ` <span class="muted">(${escapeHtml(String(item.resolvedPath))})</span>` : ""}</li>`
+          )
+          .join("")}</ul>`
+      : renderMiniList(latestArtifacts, currentLang === "zh" ? "暂无产物" : "No artifacts");
   const renderMiniList = (items, emptyLabel) =>
     items.length > 0
       ? `<ul style="margin:8px 0 0 18px;padding:0;">${items.map((item) => `<li>${escapeHtml(String(item))}</li>`).join("")}</ul>`
@@ -2591,7 +3803,9 @@ function renderProjectMemoryBoard(board) {
     .slice(0, 4)
     .map(
       (stream) => `
-        <article class="list-card compact">
+        <article class="list-card compact ${selectedSessionWorkbenchId === stream.sessionId ? "is-selected" : ""}" data-session-workbench-open="${escapeHtml(
+          stream.sessionId || ""
+        )}" style="cursor:pointer">
           <div class="list-head">
             <strong>${escapeHtml(stream.currentGoal || stream.sessionTitle || stream.sessionId)}</strong>
             <span>${escapeHtml(stream.currentStage || (currentLang === "zh" ? "未设阶段" : "no stage"))}</span>
@@ -2734,9 +3948,59 @@ function renderProjectMemoryBoard(board) {
       }
     </article>
     ${
-      primary
+      founderMemory
         ? `
           <article class="list-card compact">
+            <div class="list-head">
+              <strong>${currentLang === "zh" ? "Founder Memory" : "Founder Memory"}</strong>
+              <span>${escapeHtml(String(founderMemory.decisionStyle || "balanced"))}</span>
+            </div>
+            <p class="muted">${
+              currentLang === "zh"
+                ? "系统跨会话沉淀的业务方向、目标用户和交付偏好。"
+                : "Cross-session memory of business domains, target users, and delivery preferences."
+            }</p>
+            <div class="memory-block">
+              <strong>${currentLang === "zh" ? "业务方向" : "Business domains"}</strong>
+              ${renderMiniList(founderBusinessDomains, currentLang === "zh" ? "尚未沉淀业务方向" : "No business domains learned yet")}
+            </div>
+            <div class="memory-block">
+              <strong>${currentLang === "zh" ? "目标用户" : "Target users"}</strong>
+              ${renderMiniList(founderTargetUsers, currentLang === "zh" ? "尚未沉淀目标用户" : "No target users learned yet")}
+            </div>
+            <div class="memory-block">
+              <strong>${currentLang === "zh" ? "交付偏好" : "Delivery preferences"}</strong>
+              ${renderMiniList(founderDeliverables, currentLang === "zh" ? "尚未沉淀交付偏好" : "No delivery preferences learned yet")}
+            </div>
+            <div class="memory-block">
+              <strong>${currentLang === "zh" ? "近期反馈" : "Recent feedback"}</strong>
+              ${
+                founderFeedback.length > 0
+                  ? `<ul style="margin:8px 0 0 18px;padding:0;">${founderFeedback
+                      .map((item) => `<li>${escapeHtml(String(item.signal || "-"))} · ${escapeHtml(String(item.note || "-"))}</li>`)
+                      .join("")}</ul>`
+                  : `<p class="muted">${currentLang === "zh" ? "暂无反馈信号" : "No feedback signals yet"}</p>`
+              }
+            </div>
+            <div class="memory-block">
+              <strong>${currentLang === "zh" ? "可审计记忆事实" : "Auditable memory facts"}</strong>
+              <p class="muted">${
+                currentLang === "zh"
+                  ? "每条记忆都保留来源和置信度，后续可用于确认、删除和回滚。"
+                  : "Each memory fact keeps provenance and confidence for review, deletion, and rollback."
+              }</p>
+              ${renderMemoryFactList(memoryFacts)}
+            </div>
+          </article>
+        `
+        : ""
+    }
+    ${
+      primary
+        ? `
+          <article class="list-card compact ${selectedSessionWorkbenchId === primary.sessionId ? "is-selected" : ""}" data-session-workbench-open="${escapeHtml(
+            primary.sessionId || ""
+          )}" style="cursor:pointer">
             <div class="list-head">
               <strong>${escapeHtml(primary.currentGoal || primary.sessionTitle || primary.sessionId)}</strong>
               <span>${escapeHtml(primary.currentStage || (currentLang === "zh" ? "未设阶段" : "no stage"))}</span>
@@ -2767,7 +4031,7 @@ function renderProjectMemoryBoard(board) {
             </div>
             <div class="memory-block">
               <strong>${currentLang === "zh" ? "最近产物" : "Recent artifacts"}</strong>
-              ${renderMiniList(latestArtifacts, currentLang === "zh" ? "暂无产物" : "No artifacts")}
+              ${renderVerifiedArtifactList(verifiedArtifacts)}
             </div>
           </article>
         `
@@ -2830,6 +4094,22 @@ function renderProjectMemoryBoard(board) {
         : ""
     }
   `;
+
+  projectMemoryBoardContainer.querySelectorAll("[data-session-workbench-open]").forEach((card) => {
+    card.addEventListener("click", async () => {
+      const sessionId = card.getAttribute("data-session-workbench-open") || "";
+      if (!sessionId) {
+        return;
+      }
+      try {
+        await openSessionWorkbenchDetail(sessionId);
+      } catch (error) {
+        taskResult.textContent = error instanceof Error ? error.message : String(error);
+      }
+    });
+  });
+
+  renderSessionWorkbenchDetail(selectedSessionWorkbenchId, selectedSessionWorkbenchDetail);
 }
 
 function renderHarnessBoard(payload, gradesPayload, runtimeHarnessPayload) {
@@ -3213,7 +4493,7 @@ function renderCrmBoard(board) {
 }
 
 async function refresh() {
-  const [dashboard, rolesPayload, channelsPayload, providersPayload, operatingSystemPayload, goalRunsPayload, harnessPayload, telemetryPayload, runtimeHarnessPayload, harnessGradesPayload, crmBoardPayload, activityFeedPayload] = await Promise.all([
+  const [dashboard, rolesPayload, channelsPayload, providersPayload, operatingSystemPayload, goalRunsPayload, harnessPayload, telemetryPayload, runtimeHarnessPayload, harnessGradesPayload, crmBoardPayload, activityFeedPayload, evolutionPayload] = await Promise.all([
     request("/api/dashboard"),
     request("/api/roles"),
     request("/api/channels/status").catch(() => null),
@@ -3225,7 +4505,8 @@ async function refresh() {
     request("/api/system/runtime-harness").catch(() => null),
     request("/api/system/harness/grades").catch(() => null),
     request("/api/recurring/status").catch(() => request("/api/crm/dashboard").catch(() => null)),
-    request("/api/system/activity-feed?limit=20").catch(() => null)
+    request("/api/system/activity-feed?limit=20").catch(() => null),
+    request("/api/system/evolution").catch(() => null)
   ]);
 
   renderRoles(rolesPayload);
@@ -3245,8 +4526,16 @@ async function refresh() {
   renderHarnessBoard(harnessPayload, harnessGradesPayload, runtimeHarnessPayload);
   renderCrmBoard(crmBoardPayload);
   renderSkillsMarketResults(lastSkillsMarketResults);
-  renderActivityFeed(activityFeedPayload);
-  renderTelemetryBoard(telemetryPayload, runtimeHarnessPayload);
+  renderEvolutionBoard(evolutionPayload);
+  if (!liveStreamConnected || !liveActivityFeedPayload) {
+    renderActivityFeed(activityFeedPayload);
+    renderMilestoneStream(activityFeedPayload);
+    liveActivityFeedPayload = activityFeedPayload;
+  }
+  if (!liveStreamConnected || !liveTelemetryPayload) {
+    liveTelemetryPayload = telemetryPayload;
+  }
+  renderTelemetryBoard(liveTelemetryPayload || telemetryPayload, runtimeHarnessPayload);
   if (selectedGoalRunId) {
     openGoalRunDetail(selectedGoalRunId, { background: true }).catch(() => null);
   }
@@ -3352,6 +4641,28 @@ document.querySelector("#crm-run-due-btn")?.addEventListener("click", async () =
   } catch (error) {
     if (crmRunDueResult) {
       crmRunDueResult.textContent = error instanceof Error ? error.message : String(error);
+    }
+  }
+});
+
+document.querySelector("#evolution-rollback-btn")?.addEventListener("click", async () => {
+  try {
+    const result = await request("/api/system/evolution/rollback-latest", {
+      method: "POST"
+    });
+    if (evolutionResult) {
+      evolutionResult.textContent = result?.ok
+        ? currentLang === "zh"
+          ? `已回滚最近一次自动应用：${result?.rolledBack?.proposalId || "-"}`
+          : `Rolled back latest auto-applied change: ${result?.rolledBack?.proposalId || "-"}`
+        : currentLang === "zh"
+          ? "当前没有可回滚的自动应用记录。"
+          : "No auto-applied change available to roll back.";
+    }
+    await refresh();
+  } catch (error) {
+    if (evolutionResult) {
+      evolutionResult.textContent = error instanceof Error ? error.message : String(error);
     }
   }
 });
@@ -3519,6 +4830,22 @@ document.addEventListener("click", async (event) => {
   const goalRunDetailId = target ? target.closest("[data-goal-run-detail]")?.getAttribute("data-goal-run-detail") : null;
   const closeGoalRunDetail = target ? target.closest("[data-goal-run-detail-close]") : null;
   const goalRunTaskId = target ? target.closest("[data-goal-run-open-task]")?.getAttribute("data-goal-run-open-task") : null;
+  const sessionActionButton = target ? target.closest("[data-session-action]") : null;
+
+  if (sessionActionButton) {
+    const action = sessionActionButton.getAttribute("data-session-action") || "";
+    const sessionId = sessionActionButton.getAttribute("data-session-action-id") || selectedSessionWorkbenchId;
+    sessionActionButton.setAttribute("disabled", "true");
+    messageResult.textContent = currentLang === "zh" ? "正在发送会话操作..." : "Sending session action...";
+    try {
+      await runSessionAction(action, sessionId);
+    } catch (error) {
+      messageResult.textContent = error instanceof Error ? error.message : String(error);
+    } finally {
+      sessionActionButton.removeAttribute("disabled");
+    }
+    return;
+  }
 
   if (skillReadyInstallButton) {
     const skillId = skillReadyInstallButton.getAttribute("data-skill-install-ready") || "";
@@ -3829,7 +5156,7 @@ function renderTelemetryBoard(payload, runtimeHarnessPayload) {
   }).join("")}`;
 
   telemetryBoardContainer.innerHTML = html;
-  if (traceDetailContainer) {
+  if (traceDetailContainer && !selectedTraceTaskId) {
     traceDetailContainer.classList.add("is-hidden");
     traceDetailContainer.innerHTML = "";
   }
@@ -3839,10 +5166,15 @@ function renderTelemetryBoard(payload, runtimeHarnessPayload) {
       loadTraceDetail(card.getAttribute("data-trace-id"));
     });
   });
+
+  if (selectedTraceTaskId) {
+    loadTraceDetail(selectedTraceTaskId).catch(() => null);
+  }
 }
 
 async function loadTraceDetail(taskId) {
   if (!traceDetailContainer) return;
+  selectedTraceTaskId = taskId;
 
   try {
     const trace = await request(`/api/tasks/${taskId}/trace`);
@@ -3900,6 +5232,7 @@ function renderTraceDetail(trace) {
   traceDetailContainer.classList.remove("is-hidden");
 
   document.getElementById("trace-back-btn").addEventListener("click", () => {
+    selectedTraceTaskId = "";
     traceDetailContainer.classList.add("is-hidden");
     traceDetailContainer.innerHTML = "";
   });
@@ -3947,6 +5280,7 @@ async function initAuth() {
   }
 
   await refresh();
+  startLiveStream();
   setInterval(refresh, 5000);
 }
 

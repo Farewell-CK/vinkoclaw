@@ -91,6 +91,24 @@ async function withServer(app: express.Express, fn: (baseUrl: string) => Promise
   }
 }
 
+async function readChunks(stream: ReadableStream<Uint8Array>, count: number): Promise<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let output = "";
+  try {
+    for (let index = 0; index < count; index += 1) {
+      const result = await reader.read();
+      if (result.done) {
+        break;
+      }
+      output += decoder.decode(result.value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return output;
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -336,11 +354,402 @@ describe("task routes", () => {
     expect(handleInboundMessage).toHaveBeenCalledTimes(1);
     expect(handleInboundMessage).toHaveBeenCalledWith({
       text: "目标用户是独立开发者",
+      sessionId: undefined,
       source: "control-center",
       requestedBy: "owner",
       chatId: undefined,
+      clientActionId: undefined,
       attachments: []
     });
+  });
+
+  it("manages auditable workspace memory facts", async () => {
+    let memoryFacts: Array<Record<string, unknown>> = [];
+    const store = {
+      recordWorkspaceMemoryFact: vi.fn((fact: Record<string, unknown>) => {
+        memoryFacts = [
+          {
+            id: "memory_fact_ai_toy",
+            createdAt: "2026-04-27T00:00:00.000Z",
+            updatedAt: "2026-04-27T00:00:00.000Z",
+            ...fact
+          }
+        ];
+        return { memoryFacts };
+      }),
+      deleteWorkspaceMemoryFact: vi.fn((id: string) => {
+        memoryFacts = memoryFacts.filter((fact) => fact.id !== id);
+        return { memoryFacts };
+      }),
+      resetWorkspaceMemoryFacts: vi.fn(() => {
+        memoryFacts = [];
+        return { memoryFacts };
+      })
+    } as unknown as VinkoStore;
+    const app = createTaskRoutesApp(store);
+
+    await withServer(app, async (baseUrl) => {
+      const createResponse = await fetch(`${baseUrl}/api/workspace-memory/facts`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          kind: "business_domain",
+          value: "AI 玩具",
+          source: "manual",
+          confidence: 0.9
+        })
+      });
+      expect(createResponse.status).toBe(200);
+      const created = (await createResponse.json()) as { memoryFacts: Array<Record<string, unknown>> };
+      expect(created.memoryFacts[0]?.value).toBe("AI 玩具");
+
+      const deleteResponse = await fetch(`${baseUrl}/api/workspace-memory/facts/memory_fact_ai_toy`, {
+        method: "DELETE"
+      });
+      expect(deleteResponse.status).toBe(200);
+      await expect(deleteResponse.json()).resolves.toEqual({ memoryFacts: [] });
+
+      const resetResponse = await fetch(`${baseUrl}/api/workspace-memory/facts/reset`, {
+        method: "POST"
+      });
+      expect(resetResponse.status).toBe(200);
+      await expect(resetResponse.json()).resolves.toEqual({ memoryFacts: [] });
+    });
+  });
+
+  it("runs structured session actions against the selected session and records audit evidence", async () => {
+    const session = buildSession({
+      id: "session_action_target",
+      source: "control-center",
+      sourceKey: "operator:owner",
+      title: "通用智能体工作台",
+      metadata: {
+        projectMemory: {
+          currentGoal: "交付通用智能体工作台",
+          currentStage: "execution",
+          latestUserRequest: "继续推进",
+          latestSummary: "正在补结构化会话动作",
+          nextActions: ["补接口"],
+          updatedAt: "2026-04-23T02:00:00.000Z",
+          updatedBy: "owner"
+        }
+      }
+    });
+    const auditEvents: Array<{
+      id: string;
+      category: string;
+      entityType: string;
+      entityId: string;
+      message: string;
+      payload: Record<string, unknown>;
+      createdAt: string;
+    }> = [];
+    const appendAuditEvent = vi.fn((input) => {
+      const event = {
+        id: `audit_${auditEvents.length + 1}`,
+        category: input.category,
+        entityType: input.entityType,
+        entityId: input.entityId,
+        message: input.message,
+        payload: input.payload ?? {},
+        createdAt: `2026-04-23T02:0${auditEvents.length + 1}:00.000Z`
+      };
+      auditEvents.unshift(event);
+      return event;
+    });
+    const handleInboundMessage = vi.fn<TaskRoutesDeps["handleInboundMessage"]>(async () => ({
+      type: "task_queued",
+      message: "已续接当前会话并排队",
+      taskId: "task_session_action"
+    }));
+    const actionTask = buildTask({
+      id: "task_session_action",
+      sessionId: session.id,
+      title: "继续推进当前会话",
+      status: "queued",
+      updatedAt: "2026-04-23T02:03:00.000Z"
+    });
+    const unrelatedTask = buildTask({
+      id: "task_unrelated",
+      sessionId: session.id,
+      title: "其他任务",
+      status: "queued",
+      updatedAt: "2026-04-23T02:04:00.000Z"
+    });
+    const store = {
+      getSession: vi.fn((id: string) => (id === session.id ? session : undefined)),
+      listSessions: vi.fn(() => [session]),
+      listTasks: vi.fn(() => [actionTask, unrelatedTask]),
+      listApprovals: vi.fn(() => []),
+      listGoalRuns: vi.fn(() => []),
+      listSessionMessages: vi.fn(() => []),
+      appendAuditEvent,
+      listAuditEvents: vi.fn(() => auditEvents),
+      resolveSkillsForRole: vi.fn(() => []),
+      getWorkspaceMemory: vi.fn(() => undefined),
+      listCrmLeads: vi.fn(() => []),
+      listCrmCadences: vi.fn(() => []),
+      listCrmContacts: vi.fn(() => []),
+      listGoalRunHandoffArtifacts: vi.fn(() => []),
+      listGoalRunTraces: vi.fn(() => []),
+      listToolRunsByTask: vi.fn(() => []),
+      listTaskChildren: vi.fn(() => [])
+    } as unknown as VinkoStore;
+    const app = createTaskRoutesApp(store, { handleInboundMessage });
+
+    await withServer(app, async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/sessions/${session.id}/actions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "continue",
+          actionId: "session_action_continue_fixed",
+          source: "control-center",
+          requestedBy: "owner"
+        })
+      });
+      expect(response.status).toBe(202);
+      const payload = (await response.json()) as {
+        actionId: string;
+        action: string;
+        result: Record<string, unknown>;
+        workbench: {
+          session: Record<string, unknown>;
+          timeline: { events: Array<Record<string, unknown>> };
+        };
+        timeline: { actionId?: string; events: Array<Record<string, unknown>> };
+      };
+
+      expect(payload.actionId).toBe("session_action_continue_fixed");
+      expect(payload.action).toBe("continue");
+      expect(payload.result).toEqual(
+        expect.objectContaining({
+          type: "task_queued",
+          taskId: "task_session_action"
+        })
+      );
+      expect(payload.workbench.session.id).toBe(session.id);
+      expect(payload.timeline.events.map((event) => event.entityId)).toEqual(
+        expect.arrayContaining(["task_session_action"])
+      );
+      expect(payload.timeline.events.map((event) => event.entityId)).not.toContain("task_unrelated");
+      expect(payload.timeline.events.map((event) => event.eventType)).toEqual(
+        expect.arrayContaining(["session_action_requested", "session_action_completed"])
+      );
+
+      const timelineResponse = await fetch(
+        `${baseUrl}/api/sessions/${session.id}/timeline?actionId=session_action_continue_fixed&limit=20`
+      );
+      expect(timelineResponse.status).toBe(200);
+      const timelinePayload = (await timelineResponse.json()) as {
+        timeline: { actionId?: string; events: Array<Record<string, unknown>> };
+      };
+      expect(timelinePayload.timeline.actionId).toBe("session_action_continue_fixed");
+      expect(timelinePayload.timeline.events.map((event) => event.entityId)).toEqual(
+        expect.arrayContaining(["task_session_action"])
+      );
+      expect(timelinePayload.timeline.events.map((event) => event.entityId)).not.toContain("task_unrelated");
+    });
+
+    expect(handleInboundMessage).toHaveBeenCalledWith({
+      sessionId: session.id,
+      text: expect.stringContaining("请继续推进当前会话：交付通用智能体工作台"),
+      taskText: expect.stringContaining("请继续推进当前会话：交付通用智能体工作台"),
+      source: "control-center",
+      requestedBy: "owner",
+      chatId: undefined,
+      clientActionId: "session_action_continue_fixed",
+      attachments: []
+    });
+    const handledInput = handleInboundMessage.mock.calls[0]?.[0];
+    expect(handledInput).toBeDefined();
+    expect(handledInput?.text).toContain("优先处理这些下一步：补接口");
+    expect(handledInput?.text).toContain("最近时间线");
+    expect(appendAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        category: "session-action",
+        entityType: "session",
+        entityId: session.id,
+        payload: expect.objectContaining({
+          eventType: "session_action_requested",
+          actionId: "session_action_continue_fixed"
+        })
+      })
+    );
+    expect(appendAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        category: "session-action",
+        entityType: "session",
+        entityId: session.id,
+        payload: expect.objectContaining({
+          eventType: "session_action_completed",
+          resultType: "task_queued",
+          taskId: "task_session_action"
+        })
+      })
+    );
+  });
+
+  it("deduplicates structured session actions by action id", async () => {
+    const session = buildSession({
+      id: "session_action_dedupe",
+      source: "control-center",
+      sourceKey: "operator:owner",
+      title: "幂等会话",
+      metadata: {
+        projectMemory: {
+          currentGoal: "继续交付",
+          currentStage: "execution",
+          latestSummary: "已有完成动作",
+          updatedAt: "2026-04-23T02:00:00.000Z",
+          updatedBy: "owner"
+        }
+      }
+    });
+    const auditEvents = [
+      {
+        id: "audit_existing_completed",
+        category: "session-action",
+        entityType: "session",
+        entityId: session.id,
+        message: "Session action completed: continue",
+        payload: {
+          eventType: "session_action_completed",
+          sessionId: session.id,
+          action: "continue",
+          actionId: "session_action_dedupe_fixed",
+          clientActionId: "session_action_dedupe_fixed",
+          resultType: "task_queued",
+          taskId: "task_existing"
+        },
+        createdAt: "2026-04-23T02:02:00.000Z"
+      }
+    ];
+    const handleInboundMessage = vi.fn<TaskRoutesDeps["handleInboundMessage"]>(async () => ({
+      type: "task_queued",
+      message: "不应调用",
+      taskId: "task_duplicate"
+    }));
+    const store = {
+      getSession: vi.fn((id: string) => (id === session.id ? session : undefined)),
+      listSessions: vi.fn(() => [session]),
+      listTasks: vi.fn(() => [
+        buildTask({
+          id: "task_existing",
+          sessionId: session.id,
+          status: "queued",
+          updatedAt: "2026-04-23T02:03:00.000Z"
+        })
+      ]),
+      listApprovals: vi.fn(() => []),
+      listGoalRuns: vi.fn(() => []),
+      listSessionMessages: vi.fn(() => []),
+      appendAuditEvent: vi.fn(),
+      listAuditEvents: vi.fn(() => auditEvents),
+      resolveSkillsForRole: vi.fn(() => []),
+      getWorkspaceMemory: vi.fn(() => undefined),
+      listCrmLeads: vi.fn(() => []),
+      listCrmCadences: vi.fn(() => []),
+      listCrmContacts: vi.fn(() => []),
+      listGoalRunHandoffArtifacts: vi.fn(() => []),
+      listGoalRunTraces: vi.fn(() => []),
+      listToolRunsByTask: vi.fn(() => []),
+      listTaskChildren: vi.fn(() => [])
+    } as unknown as VinkoStore;
+    const app = createTaskRoutesApp(store, { handleInboundMessage });
+
+    await withServer(app, async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/sessions/${session.id}/actions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "continue",
+          actionId: "session_action_dedupe_fixed",
+          source: "control-center",
+          requestedBy: "owner"
+        })
+      });
+      expect(response.status).toBe(202);
+      const payload = (await response.json()) as {
+        duplicate?: boolean;
+        duplicateStatus?: string;
+        existing?: { taskId?: string };
+        timeline?: { actionId?: string; events: Array<Record<string, unknown>> };
+      };
+      expect(payload.duplicate).toBe(true);
+      expect(payload.duplicateStatus).toBe("completed");
+      expect(payload.existing?.taskId).toBe("task_existing");
+      expect(payload.timeline?.actionId).toBe("session_action_dedupe_fixed");
+    });
+
+    expect(handleInboundMessage).not.toHaveBeenCalled();
+    expect(store.appendAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it("rejects session action id conflicts across action kinds", async () => {
+    const session = buildSession({
+      id: "session_action_conflict",
+      source: "control-center",
+      sourceKey: "operator:owner",
+      title: "冲突会话"
+    });
+    const auditEvents = [
+      {
+        id: "audit_existing_requested",
+        category: "session-action",
+        entityType: "session",
+        entityId: session.id,
+        message: "Session action requested: continue",
+        payload: {
+          eventType: "session_action_requested",
+          sessionId: session.id,
+          action: "continue",
+          actionId: "session_action_conflict_fixed"
+        },
+        createdAt: "2026-04-23T02:01:00.000Z"
+      }
+    ];
+    const handleInboundMessage = vi.fn<TaskRoutesDeps["handleInboundMessage"]>(async () => ({
+      type: "task_queued",
+      message: "不应调用",
+      taskId: "task_conflict"
+    }));
+    const store = {
+      getSession: vi.fn((id: string) => (id === session.id ? session : undefined)),
+      listTasks: vi.fn(() => []),
+      listApprovals: vi.fn(() => []),
+      listGoalRuns: vi.fn(() => []),
+      listSessionMessages: vi.fn(() => []),
+      appendAuditEvent: vi.fn(),
+      listAuditEvents: vi.fn(() => auditEvents),
+      listToolRunsByTask: vi.fn(() => []),
+      listTaskChildren: vi.fn(() => [])
+    } as unknown as VinkoStore;
+    const app = createTaskRoutesApp(store, { handleInboundMessage });
+
+    await withServer(app, async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/sessions/${session.id}/actions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "supplement",
+          actionId: "session_action_conflict_fixed",
+          source: "control-center",
+          requestedBy: "owner",
+          text: "补充信息"
+        })
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        error: "session_action_id_conflict",
+        actionId: "session_action_conflict_fixed",
+        existingAction: "continue",
+        requestedAction: "supplement"
+      });
+    });
+
+    expect(handleInboundMessage).not.toHaveBeenCalled();
+    expect(store.appendAuditEvent).not.toHaveBeenCalled();
   });
 
   it("builds a CEO project board snapshot", async () => {
@@ -604,6 +1013,195 @@ describe("task routes", () => {
       expect(skills.bindings).toEqual([expect.objectContaining({ skillId: "prd-writer", verificationStatus: "verified" })]);
       expect(harness.grade).toBeTruthy();
       expect(typeof harness.score).toBe("number");
+    });
+  });
+
+  it("returns session workbench detail", async () => {
+    const session = buildSession({
+      metadata: {
+        projectMemory: {
+          currentGoal: "交付通用智能体工作台",
+          currentStage: "execution",
+          latestUserRequest: "继续推进 session workbench",
+          latestSummary: "已接入 milestone stream",
+          unresolvedQuestions: ["是否需要单独的实时日志存储"],
+          nextActions: ["补 session workbench 详情接口", "接通控制台点击跳转"],
+          latestArtifacts: ["docs/workbench.md"],
+          updatedAt: "2026-04-23T02:00:00.000Z",
+          updatedBy: "system"
+        }
+      }
+    });
+    const activeTask = buildTask({
+      id: "task_workbench",
+      sessionId: session.id,
+      title: "补齐 session workbench 闭环",
+      instruction: "实现 session workbench detail route",
+      status: "running",
+      updatedAt: "2026-04-23T02:05:00.000Z"
+    });
+    const failedTask = buildTask({
+      id: "task_failed",
+      sessionId: session.id,
+      title: "尝试旧版补丁",
+      status: "failed",
+      errorText: "legacy patch approach rejected",
+      updatedAt: "2026-04-23T01:59:00.000Z"
+    });
+    const approval = {
+      id: "approval_session",
+      kind: "task_execution",
+      taskId: activeTask.id,
+      summary: "Approve pushing workbench card",
+      payload: {
+        sessionId: session.id
+      },
+      status: "pending",
+      createdAt: "2026-04-23T02:03:00.000Z",
+      updatedAt: "2026-04-23T02:03:00.000Z"
+    };
+    const goalRun = {
+      id: "goalrun_session",
+      sessionId: session.id,
+      source: "control-center",
+      objective: "打造通用超级智能体",
+      status: "running",
+      currentStage: "execute",
+      language: "zh-CN",
+      metadata: {},
+      context: {},
+      retryCount: 0,
+      maxRetries: 2,
+      awaitingInputFields: [],
+      createdAt: "2026-04-23T01:55:00.000Z",
+      updatedAt: "2026-04-23T02:04:00.000Z"
+    };
+    const sessionMessages = [
+      {
+        id: "msg_1",
+        sessionId: session.id,
+        actorType: "user",
+        actorId: "owner",
+        messageType: "text",
+        content: "继续推进",
+        metadata: {},
+        createdAt: "2026-04-23T02:01:00.000Z"
+      },
+      {
+        id: "msg_2",
+        sessionId: session.id,
+        actorType: "system",
+        actorId: "orchestrator",
+        messageType: "event",
+        content: "开始补 workbench 详情",
+        metadata: {},
+        createdAt: "2026-04-23T02:02:00.000Z"
+      }
+    ];
+    const auditEvents = [
+      {
+        id: "audit_session_workbench",
+        category: "feishu",
+        entityType: "session",
+        entityId: session.id,
+        message: "Sent session workbench card",
+        payload: {
+          eventType: "session_workbench_pushed",
+          sessionId: session.id
+        },
+        createdAt: "2026-04-23T02:06:00.000Z"
+      },
+      {
+        id: "audit_other",
+        category: "task",
+        entityType: "task",
+        entityId: "task_other",
+        message: "Other task event",
+        payload: {},
+        createdAt: "2026-04-23T02:07:00.000Z"
+      }
+    ];
+    const store = {
+      getSession: vi.fn((id: string) => (id === session.id ? session : undefined)),
+      listSessions: vi.fn(() => [session]),
+      listTasks: vi.fn(() => [activeTask, failedTask]),
+      listApprovals: vi.fn(() => [approval]),
+      listGoalRuns: vi.fn(() => [goalRun]),
+      listSessionMessages: vi.fn(() => sessionMessages),
+      getTask: vi.fn((id: string) => [activeTask, failedTask].find((task) => task.id === id)),
+      resolveSkillsForRole: vi.fn(() => []),
+      getWorkspaceMemory: vi.fn(() => undefined),
+      listCrmLeads: vi.fn(() => []),
+      listCrmCadences: vi.fn(() => []),
+      listCrmContacts: vi.fn(() => []),
+      listGoalRunHandoffArtifacts: vi.fn(() => []),
+      listGoalRunTraces: vi.fn(() => []),
+      listAuditEvents: vi.fn(() => auditEvents),
+      listToolRunsByTask: vi.fn(() => []),
+      listTaskChildren: vi.fn(() => [])
+    } as unknown as VinkoStore;
+    const app = createTaskRoutesApp(store);
+
+    await withServer(app, async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/sessions/${session.id}/workbench`);
+      expect(response.status).toBe(200);
+      const payload = (await response.json()) as {
+        session: Record<string, unknown>;
+        snapshot: Record<string, unknown>;
+        tasks: Array<Record<string, unknown>>;
+        goalRuns: Array<Record<string, unknown>>;
+        approvals: Array<Record<string, unknown>>;
+        messages: Array<Record<string, unknown>>;
+        timeline: { total: number; events: Array<Record<string, unknown>> };
+      };
+
+      expect(payload.session.id).toBe(session.id);
+      expect(payload.snapshot.sessionId).toBe(session.id);
+      expect(payload.snapshot.currentGoal).toBe("交付通用智能体工作台");
+      expect(payload.snapshot.currentStage).toBe("execution");
+      expect(payload.snapshot.blockers).toEqual(
+        expect.arrayContaining(["尝试旧版补丁: legacy patch approach rejected", "待审批：Approve pushing workbench card"])
+      );
+      expect(payload.snapshot.pendingApproval).toEqual(
+        expect.objectContaining({ id: "approval_session", status: "pending" })
+      );
+      expect(payload.snapshot.activeTask).toEqual(
+        expect.objectContaining({ id: "task_workbench", status: "running", roleId: "ceo" })
+      );
+      expect(payload.snapshot.activeGoalRun).toEqual(
+        expect.objectContaining({ id: "goalrun_session", status: "running" })
+      );
+      expect(payload.tasks[0]?.id).toBe("task_workbench");
+      expect(payload.goalRuns[0]?.id).toBe("goalrun_session");
+      expect(payload.approvals[0]?.id).toBe("approval_session");
+      expect(payload.messages).toHaveLength(2);
+      expect(payload.timeline.total).toBe(7);
+      expect(payload.timeline.events[0]).toEqual(
+        expect.objectContaining({ kind: "audit", entityId: session.id, eventType: "session_workbench_pushed" })
+      );
+      expect(payload.timeline.events.map((event) => event.kind)).toEqual(
+        expect.arrayContaining(["message", "task", "goal_run", "approval", "audit"])
+      );
+
+      const timelineResponse = await fetch(`${baseUrl}/api/sessions/${session.id}/timeline?limit=3`);
+      expect(timelineResponse.status).toBe(200);
+      const timelinePayload = (await timelineResponse.json()) as {
+        session: Record<string, unknown>;
+        timeline: { total: number; events: Array<Record<string, unknown>> };
+      };
+      expect(timelinePayload.session.id).toBe(session.id);
+      expect(timelinePayload.timeline.total).toBe(7);
+      expect(timelinePayload.timeline.events).toHaveLength(3);
+
+      const streamResponse = await fetch(`${baseUrl}/api/sessions/${session.id}/timeline/stream?limit=3&pollMs=1000`);
+      expect(streamResponse.status).toBe(200);
+      expect(streamResponse.headers.get("content-type")).toContain("text/event-stream");
+      expect(streamResponse.body).toBeTruthy();
+      const streamOutput = await readChunks(streamResponse.body!, 2);
+      await streamResponse.body?.cancel();
+      expect(streamOutput).toContain("event: ready");
+      expect(streamOutput).toContain("event: snapshot");
+      expect(streamOutput).toContain("session_workbench_pushed");
     });
   });
 

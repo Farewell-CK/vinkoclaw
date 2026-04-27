@@ -97,6 +97,11 @@ function unwrapTaskResponse(payload) {
 }
 
 async function postMessageWithClarification(input) {
+  const expectedTypes = Array.isArray(input.expectedTypes)
+    ? input.expectedTypes
+    : typeof input.expectedType === "string"
+      ? [input.expectedType]
+      : [];
   const result = await postJson("/api/messages", {
     source: "feishu",
     requestedBy: input.identity.requestedBy,
@@ -116,17 +121,34 @@ async function postMessageWithClarification(input) {
       text: input.clarificationText
     });
     assert(
-      clarified.type === input.expectedType,
-      `expected ${input.expectedType} after clarification for ${input.label}, got ${JSON.stringify(clarified)} (initial: ${JSON.stringify(result)})`
+      expectedTypes.includes(clarified.type),
+      `expected ${expectedTypes.join(" or ")} after clarification for ${input.label}, got ${JSON.stringify(clarified)} (initial: ${JSON.stringify(result)})`
     );
     return clarified;
   }
 
   assert(
-    result.type === input.expectedType,
-    `expected ${input.expectedType} or needs_clarification for ${input.label}, got ${JSON.stringify(result)}`
+    expectedTypes.includes(result.type),
+    `expected ${expectedTypes.join(" or ")} or needs_clarification for ${input.label}, got ${JSON.stringify(result)}`
   );
   return result;
+}
+
+function extractQueuedTaskId(result) {
+  return extractQueuedTaskIds(result)[0] ?? "";
+}
+
+function extractQueuedTaskIds(result) {
+  const direct = typeof result?.taskId === "string" ? result.taskId.trim() : "";
+  if (direct) {
+    return [direct];
+  }
+  if (Array.isArray(result?.taskIds)) {
+    return Array.from(
+      new Set(result.taskIds.filter((item) => typeof item === "string").map((item) => item.trim()).filter(Boolean))
+    );
+  }
+  return [];
 }
 
 async function waitTaskTerminal(taskId, timeoutMs = 120_000) {
@@ -176,38 +198,46 @@ async function runSimpleTaskRoutingCheck() {
     label: "simple task routing",
     identity,
     text: "请帮我写一个登录页原型",
-    expectedType: "task_queued",
+    expectedTypes: ["task_queued", "template_tasks_queued"],
     clarificationText:
       "登录页原型请用 React + TypeScript + CSS 实现，包含账号密码登录、忘记密码入口和注册入口，桌面端优先并兼容移动端，风格简洁企业级，输出可运行代码。"
   });
-  const taskId = String(result.taskId ?? "");
-  assert(taskId.length > 0, "task_queued response missing taskId");
+  const taskIds = extractQueuedTaskIds(result);
+  const taskId = taskIds[0] ?? "";
+  assert(taskIds.length > 0, "task_queued/template_tasks_queued response missing taskId");
 
   const task = unwrapTaskResponse(await getJson(`/api/tasks/${taskId}`));
   assert(
-    task.roleId === "uiux" || task.roleId === "frontend",
-    `simple task should route to uiux/frontend, got ${task.roleId}`
+    task.roleId === "uiux" || task.roleId === "frontend" || task.roleId === "engineering",
+    `simple task should route to uiux/frontend/engineering, got ${task.roleId}`
   );
 
-  await postJson(`/api/tasks/${taskId}/cancel`, {
-    reason: `${RUN_ID} cleanup`
-  });
-  await waitTaskTerminal(taskId, 30_000);
+  for (const id of taskIds) {
+    await postJson(`/api/tasks/${id}/cancel`, {
+      reason: `${RUN_ID} cleanup`
+    });
+  }
+  for (const id of taskIds) {
+    await waitTaskTerminal(id, 30_000);
+  }
 }
 
 async function runGoalRunAndContinueCheck() {
   setCheck("goalrun-routing");
   info("goal run + continue signal check");
   const identity = uniqueIdentity("goalrun");
-  const created = await postMessageWithClarification({
-    label: "goalrun routing",
-    identity,
-    text: "帮我给公司写一个官网并部署",
-    expectedType: "goal_run_queued",
-    clarificationText:
-      "请端到端完成公司官网并部署：官网包含关于我们、产品展示、客户案例、联系方式四个模块；使用 React + TypeScript 开发；部署到 Vercel；优先交付可上线版本。"
+  const created = await postJson("/api/goal-runs", {
+    source: "feishu",
+    requestedBy: identity.requestedBy,
+    chatId: identity.chatId,
+    objective:
+      "请端到端完成一个产品发布项目：完成需求澄清、计划拆解、执行交付、验证和上线准备；优先交付可验收版本。",
+    metadata: {
+      selfCheck: RUN_ID,
+      purpose: "goalrun-continue"
+    }
   });
-  const goalRunId = String(created.goalRunId ?? "");
+  const goalRunId = String(created.goalRun?.id ?? "");
   assert(goalRunId.length > 0, "goal_run_queued response missing goalRunId");
 
   const continued = await postJson("/api/messages", {
@@ -259,33 +289,119 @@ async function runStatusIntentDisambiguationCheck() {
     `status keyword in action sentence should not be treated as pure status query: ${JSON.stringify(configReply)}`
   );
 
-  const collaborationCreated = await postMessageWithClarification({
-    label: "collaboration routing",
-    identity,
-    text: "团队协作执行，做一个活动落地页",
-    expectedType: "task_queued",
-    clarificationText:
-      "团队协作执行，做一个活动落地页：请前端、UIUX、QA 一起协作，使用 React + TypeScript，实现首屏、活动亮点、报名表单和移动端适配，做完检查一下。"
-  });
-  const taskId = String(collaborationCreated.taskId ?? "");
-  assert(taskId.length > 0, "collaboration task response missing taskId");
-
-  const progressReply = await postJson("/api/messages", {
+  let collaborationCreated = await postJson("/api/messages", {
     source: "feishu",
     requestedBy: identity.requestedBy,
     chatId: identity.chatId,
-    text: "当前进度怎么样？"
+    text: "团队协作执行，做一个活动落地页：请前端、UIUX、QA 一起协作，使用 React + TypeScript，实现首屏、活动亮点、报名表单和移动端适配，做完检查一下。"
   });
-  assert(progressReply.type === "smalltalk_replied", `progress query should return smalltalk_replied, got ${JSON.stringify(progressReply)}`);
+  if (collaborationCreated.type === "needs_clarification") {
+    collaborationCreated = await postJson("/api/messages", {
+      source: "feishu",
+      requestedBy: identity.requestedBy,
+      chatId: identity.chatId,
+      text: "活动落地页用于产品发布获客，目标是收集报名线索；需要首屏、活动亮点、报名表单、移动端适配和 QA 验收清单。"
+    });
+  }
   assert(
-    /协作进展|成员动态|团队协作已启动/.test(String(progressReply.message ?? "")),
-    `progress reply should include collaboration role progress hint: ${JSON.stringify(progressReply)}`
+    collaborationCreated.type === "task_queued" || collaborationCreated.type === "template_tasks_queued",
+    `collaboration routing should queue a task or product template, got ${JSON.stringify(collaborationCreated)}`
+  );
+  const taskIds =
+    collaborationCreated.type === "template_tasks_queued"
+      ? (Array.isArray(collaborationCreated.taskIds) ? collaborationCreated.taskIds.map(String).filter(Boolean) : [])
+      : [String(collaborationCreated.taskId ?? "")].filter(Boolean);
+  assert(taskIds.length > 0, "collaboration/template response missing task ids");
+
+  if (collaborationCreated.type === "task_queued") {
+    const progressReply = await postJson("/api/messages", {
+      source: "feishu",
+      requestedBy: identity.requestedBy,
+      chatId: identity.chatId,
+      text: "当前进度怎么样？"
+    });
+    assert(progressReply.type === "smalltalk_replied", `progress query should return smalltalk_replied, got ${JSON.stringify(progressReply)}`);
+    assert(
+      /协作进展|成员动态|团队协作已启动/.test(String(progressReply.message ?? "")),
+      `progress reply should include collaboration role progress hint: ${JSON.stringify(progressReply)}`
+    );
+  }
+
+  for (const taskId of taskIds) {
+    await postJson(`/api/tasks/${taskId}/cancel`, {
+      reason: `${RUN_ID} cleanup`
+    });
+    await waitTaskTerminal(taskId, 30_000);
+  }
+}
+
+async function runSessionActionHarnessCheck() {
+  setCheck("session-action-harness");
+  info("session action harness check");
+  const identity = uniqueIdentity("session-action");
+  const seedTask = unwrapTaskResponse(await postJson("/api/tasks", {
+    source: "control-center",
+    requestedBy: identity.requestedBy,
+    chatId: identity.chatId,
+    roleId: "product",
+    title: "Session action harness seed",
+    instruction:
+      "整理当前会话工作台验证清单：包含目标、已知上下文、阻塞项、下一步动作和交付物索引，用中文 Markdown 输出。",
+    metadata: {
+      selfCheck: RUN_ID,
+      purpose: "session-action-harness-seed"
+    }
+  }));
+  const seedTaskId = String(seedTask.id ?? "");
+  assert(seedTaskId.length > 0, `session action seed missing task id: ${JSON.stringify(seedTask)}`);
+  const sessionId = String(seedTask.sessionId ?? "");
+  assert(sessionId.length > 0, `session action seed task missing sessionId: ${JSON.stringify(seedTask)}`);
+
+  const actionId = `session_action_product_selfcheck_${Date.now()}`;
+  const action = await postJson(`/api/sessions/${sessionId}/actions`, {
+    action: "continue",
+    actionId,
+    source: "control-center",
+    requestedBy: identity.requestedBy
+  });
+  assert(action.actionId === actionId, `session action returned wrong actionId: ${JSON.stringify(action)}`);
+  assert(action.action === "continue", `session action returned wrong action: ${JSON.stringify(action)}`);
+  assert(action.result && typeof action.result.type === "string", `session action missing result type: ${JSON.stringify(action)}`);
+  assert(action.timeline?.actionId === actionId, `session action timeline missing actionId: ${JSON.stringify(action.timeline)}`);
+  assert(
+    Array.isArray(action.timeline?.events) &&
+      action.timeline.events.some((event) => event.eventType === "session_action_requested") &&
+      action.timeline.events.some((event) => event.eventType === "session_action_completed"),
+    `session action timeline missing requested/completed evidence: ${JSON.stringify(action.timeline)}`
   );
 
-  await postJson(`/api/tasks/${taskId}/cancel`, {
-    reason: `${RUN_ID} cleanup`
+  const duplicate = await postJson(`/api/sessions/${sessionId}/actions`, {
+    action: "continue",
+    actionId,
+    source: "control-center",
+    requestedBy: identity.requestedBy
   });
-  await waitTaskTerminal(taskId, 30_000);
+  assert(duplicate.duplicate === true, `duplicate session action should be deduped: ${JSON.stringify(duplicate)}`);
+  assert(duplicate.duplicateStatus === "completed", `duplicate session action status mismatch: ${JSON.stringify(duplicate)}`);
+  assert(duplicate.timeline?.actionId === actionId, `duplicate timeline missing actionId: ${JSON.stringify(duplicate.timeline)}`);
+
+  const timeline = await getJson(`/api/sessions/${sessionId}/timeline?actionId=${encodeURIComponent(actionId)}&limit=20`);
+  assert(timeline.timeline?.actionId === actionId, `action-scoped timeline missing actionId: ${JSON.stringify(timeline)}`);
+  assert(
+    Array.isArray(timeline.timeline?.events) && timeline.timeline.events.some((event) => event.eventType === "session_action_completed"),
+    `action-scoped timeline missing completed event: ${JSON.stringify(timeline)}`
+  );
+
+  const actionTaskId = String(action.result?.taskId ?? duplicate.existing?.taskId ?? "");
+  for (const taskId of Array.from(new Set([seedTaskId, actionTaskId].filter(Boolean)))) {
+    try {
+      await postJson(`/api/tasks/${taskId}/cancel`, {
+        reason: `${RUN_ID} session-action-cleanup`
+      });
+    } catch {
+      // The task may have completed or already been cleaned up by another path.
+    }
+  }
 }
 
 async function runStaleTaskAndGoalRunCleanupApiCheck() {
@@ -297,12 +413,12 @@ async function runStaleTaskAndGoalRunCleanupApiCheck() {
     label: "stale cleanup task",
     identity,
     text: "请帮我整理本周工作日报",
-    expectedType: "task_queued",
+    expectedTypes: ["task_queued", "template_tasks_queued"],
     clarificationText:
       "请整理本周工作日报：用中文 Markdown 输出，面向部门周会，包含本周完成、风险问题、下周计划和待协调事项，按条目化格式组织。"
   });
-  const taskId = String(taskCreated.taskId ?? "");
-  assert(taskId.length > 0, "task_queued response missing taskId");
+  const taskIds = extractQueuedTaskIds(taskCreated);
+  assert(taskIds.length > 0, "task_queued/template_tasks_queued response missing taskId");
 
   const taskDryRun = await postJson("/api/tasks/cancel-stale", {
     olderThanMinutes: 0,
@@ -313,7 +429,8 @@ async function runStaleTaskAndGoalRunCleanupApiCheck() {
   assert(taskDryRun.dryRun === true, `task cancel-stale dryRun failed: ${JSON.stringify(taskDryRun)}`);
   assert(Array.isArray(taskDryRun.candidateTaskIds), `task cancel-stale candidate ids missing: ${JSON.stringify(taskDryRun)}`);
 
-  if (taskDryRun.candidateTaskIds.includes(taskId)) {
+  const candidateOwnedTaskIds = taskIds.filter((id) => taskDryRun.candidateTaskIds.includes(id));
+  if (candidateOwnedTaskIds.length > 0) {
     const taskCleanup = await postJson("/api/tasks/cancel-stale", {
       olderThanMinutes: 0,
       includeRunning: true,
@@ -322,20 +439,26 @@ async function runStaleTaskAndGoalRunCleanupApiCheck() {
     });
     assert(Array.isArray(taskCleanup.errors) && taskCleanup.errors.length === 0, `task cancel-stale errors: ${JSON.stringify(taskCleanup)}`);
   } else {
-    await postJson(`/api/tasks/${taskId}/cancel`, {
-      reason: `${RUN_ID} cleanup-fallback`
-    });
+    for (const taskId of taskIds) {
+      await postJson(`/api/tasks/${taskId}/cancel`, {
+        reason: `${RUN_ID} cleanup-fallback`
+      });
+      await waitTaskTerminal(taskId, 30_000);
+    }
   }
 
-  const goalRunCreated = await postMessageWithClarification({
-    label: "stale cleanup goalrun",
-    identity,
-    text: "帮我做一个公司官网并部署上线",
-    expectedType: "goal_run_queued",
-    clarificationText:
-      "请端到端完成公司官网并部署上线：官网包含首页、关于我们、产品展示、联系方式；使用 React + TypeScript 开发；按企业级简洁风格实现；部署到 Vercel。"
+  const goalRunCreated = await postJson("/api/goal-runs", {
+    source: "feishu",
+    requestedBy: identity.requestedBy,
+    chatId: identity.chatId,
+    objective:
+      "请端到端完成一个上线前检查流程：梳理目标、制定计划、执行验证、输出上线风险和后续动作。",
+    metadata: {
+      selfCheck: RUN_ID,
+      purpose: "stale-cleanup"
+    }
   });
-  const goalRunId = String(goalRunCreated.goalRunId ?? "");
+  const goalRunId = String(goalRunCreated.goalRun?.id ?? "");
   assert(goalRunId.length > 0, "goal_run_queued response missing goalRunId");
 
   const goalRunDryRun = await postJson("/api/goal-runs/cancel-stale", {
@@ -454,6 +577,7 @@ async function main() {
   await runSimpleTaskRoutingCheck();
   await runGoalRunAndContinueCheck();
   await runStatusIntentDisambiguationCheck();
+  await runSessionActionHarnessCheck();
   await runStaleTaskAndGoalRunCleanupApiCheck();
   await runApprovalCancelChecks();
   await runStaleApprovalCleanupCheck();

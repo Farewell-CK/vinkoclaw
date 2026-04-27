@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { classifyInboundIntent } from "./intent-classifier.js";
+import { classifyInboundIntent, classifyInboundIntentDecision } from "./intent-classifier.js";
 
 // Force keyword fallback by making fetch fail
 beforeEach(() => {
@@ -51,6 +51,27 @@ describe("intent-classifier keyword fallback", () => {
     expect(await classifyInboundIntent("修复登录页的样式问题")).toBe("task");
     expect(await classifyInboundIntent("你好")).toBe("task");
     expect(await classifyInboundIntent("帮我整理本周工作日报")).toBe("task");
+  });
+
+  it("returns decision evidence for fallback classification", async () => {
+    const decision = await classifyInboundIntentDecision("给团队开启联网搜索能力");
+    expect(decision.intent).toBe("operator_config");
+    expect(decision.reason).toBe("operator_config_pattern");
+    expect(decision.matchedRules).toContain("operator_config_pattern");
+  });
+
+  it("respects evolution policy in keyword fallback", async () => {
+    const decision = await classifyInboundIntentDecision(
+      "请帮我处理一个跨角色协同事项，需要多人联动推进需求拆解、实现协调、验收校对与交付收口。",
+      {
+        evolution: {
+          requireExplicitTeamSignal: false,
+          collaborationMinLength: 18
+        }
+      }
+    );
+    expect(decision.intent).toBe("collaboration");
+    expect(decision.reason).toBe("evolution_length_based_collaboration");
   });
 
   it("downgrades model collaboration overclassification without explicit team signal", async () => {

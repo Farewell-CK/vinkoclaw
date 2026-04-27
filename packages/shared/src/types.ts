@@ -737,6 +737,49 @@ export interface RuntimeConfig {
     defaultParticipants: RoleId[];
     defaultConfig: CollaborationConfig;
   };
+  evolution: {
+    router: {
+      confidenceThreshold: number;
+      preferValidatedFallbacks: boolean;
+      templateHints: EvolutionRouterTemplateHint[];
+    };
+    intake: EvolutionIntakePolicy;
+    collaboration: EvolutionCollaborationPolicy;
+    skills: {
+      recommendations: EvolutionSkillRecommendation[];
+    };
+  };
+}
+
+export interface EvolutionRouterTemplateHint {
+  templateId: string;
+  phrases: string[];
+  source: string;
+  updatedAt: string;
+}
+
+export interface EvolutionIntakePolicy {
+  preferClarificationForShortVagueRequests: boolean;
+  shortVagueRequestMaxLength: number;
+  directConversationMaxLength: number;
+  ambiguousConversationMaxLength: number;
+  collaborationMinLength: number;
+  requireExplicitTeamSignal: boolean;
+}
+
+export interface EvolutionCollaborationPolicy {
+  partialDeliveryMinCompletedRoles: number;
+  timeoutNoProgressMode: "await_user" | "blocked";
+  terminalFailureNoProgressMode: "await_user" | "blocked";
+  manualResumeAggregationMode: "deliver" | "partial";
+}
+
+export interface EvolutionSkillRecommendation {
+  roleId: RoleId;
+  skillId: string;
+  reason: string;
+  scoreBoost: number;
+  updatedAt: string;
 }
 
 export interface AuditEventRecord {

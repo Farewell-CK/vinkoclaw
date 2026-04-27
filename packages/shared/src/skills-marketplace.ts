@@ -2,6 +2,7 @@ import type {
   MarketplaceRecommendation,
   MarketplaceRoleBindingState,
   RoleId,
+  RuntimeConfig,
   SkillDefinition,
   SkillMarketplaceEntry
 } from "./types.js";
@@ -205,42 +206,49 @@ export function getMarketplaceRecommendation(input: {
   entry: SkillMarketplaceEntry;
   roleBinding?: MarketplaceRoleBindingState | undefined;
   roleId?: RoleId | undefined;
+  runtimeConfig?: RuntimeConfig | undefined;
 }): MarketplaceRecommendation {
-  const { entry, roleBinding, roleId } = input;
+  const { entry, roleBinding, roleId, runtimeConfig } = input;
   const installed = roleBinding?.installed === true;
   const verificationStatus = roleBinding?.verificationStatus ?? "";
   const roleAllowed = roleId ? entry.allowedRoles.includes(roleId) : true;
+  const learnedBoost =
+    roleId && Array.isArray(runtimeConfig?.evolution?.skills?.recommendations)
+      ? runtimeConfig!.evolution!.skills!.recommendations
+          .filter((item) => item.roleId === roleId && item.skillId === entry.skillId)
+          .reduce((sum, item) => sum + Math.max(0, Number(item.scoreBoost ?? 0)), 0)
+      : 0;
 
   if (installed && verificationStatus === "verified") {
     return {
-      score: 400 + (roleAllowed ? 20 : 0),
+      score: 400 + (roleAllowed ? 20 : 0) + learnedBoost,
       state: "ready_verified",
       label: "verified_ready"
     };
   }
   if (installed && verificationStatus === "failed") {
     return {
-      score: 40 + (roleAllowed ? 5 : 0),
+      score: 40 + (roleAllowed ? 5 : 0) + learnedBoost,
       state: "ready_failed",
       label: "verification_failed"
     };
   }
   if (installed) {
     return {
-      score: 260 + (roleAllowed ? 20 : 0),
+      score: 260 + (roleAllowed ? 20 : 0) + learnedBoost,
       state: "ready_unverified",
       label: "verification_pending"
     };
   }
   if (entry.installState === "local_installable" && entry.installable !== false) {
     return {
-      score: 180 + (roleAllowed ? 30 : 0),
+      score: 180 + (roleAllowed ? 30 : 0) + learnedBoost,
       state: "install_recommended",
       label: "install_recommended"
     };
   }
   return {
-    score: 60 + (roleAllowed ? 15 : 0),
+    score: 60 + (roleAllowed ? 15 : 0) + learnedBoost,
     state: "integration_required",
     label: "integration_required"
   };

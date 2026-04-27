@@ -53,6 +53,26 @@ describe("isObviouslyClear", () => {
     expect(isObviouslyClear("帮我开发一个电商网站")).toBe(false);
     expect(isObviouslyClear("写一个数据分析报告")).toBe(false);
   });
+
+  it("supports evolution-driven clarification-first heuristic for short vague requests", () => {
+    expect(
+      isObviouslyClear("帮我做个东西", {
+        evolution: {
+          preferClarificationForShortVagueRequests: true,
+          shortVagueRequestMaxLength: 12
+        }
+      })
+    ).toBe(false);
+
+    expect(
+      isObviouslyClear("帮我做个 React 登录页", {
+        evolution: {
+          preferClarificationForShortVagueRequests: true,
+          shortVagueRequestMaxLength: 18
+        }
+      })
+    ).toBe(true);
+  });
 });
 
 describe("mergeClarificationResponse", () => {

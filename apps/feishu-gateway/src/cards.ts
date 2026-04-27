@@ -11,6 +11,26 @@
  *   grey    = neutral / acknowledgement
  */
 
+import {
+  buildCollaborationStatusCardSpec,
+  buildEvolutionStatusCardSpec,
+  buildGoalRunStatusCardSpec,
+  buildTaskCompletedStatusCardSpec,
+  buildTaskFailedStatusCardSpec,
+  buildTaskPausedStatusCardSpec,
+  buildTaskQueuedStatusCardSpec,
+  type SessionWorkbenchSnapshot,
+  type CollaborationStatusCardSpecInput,
+  type EvolutionStatusCardSpecInput,
+  type GoalRunStatusCardSpecInput,
+  type StatusCardAction,
+  type StatusCardSpec,
+  type TaskCompletedStatusCardSpecInput,
+  type TaskFailedStatusCardSpecInput,
+  type TaskPausedStatusCardSpecInput,
+  type TaskQueuedStatusCardSpecInput
+} from "@vinko/shared";
+
 // ── Colour palette ───────────────────────────────────────────────────────────
 
 type CardTemplate =
@@ -64,79 +84,86 @@ function card(
   };
 }
 
-// ── Task completed card ──────────────────────────────────────────────────────
-
-export interface TaskCompletedCardInput {
-  title: string;
-  roleLabel: string;
-  summary: string;
-  workflowSummary?: string;
-  /** Pass taskId + chatId to enable 👍/👎 feedback buttons */
-  feedback?: { taskId: string; chatId: string };
+function statusSummaryBlock(spec: StatusCardSpec): string {
+  const lines: string[] = [`**状态**：${spec.statusLabel}`];
+  if (spec.roleLabel) {
+    lines.push(`**执行角色**：${spec.roleLabel}`);
+  }
+  if (spec.summary) {
+    lines.push("", spec.summary);
+  }
+  return lines.join("\n");
 }
 
+function participantsBlock(participants: string[] | undefined): unknown[] {
+  const entries = Array.isArray(participants) ? participants.map((item) => String(item).trim()).filter(Boolean) : [];
+  if (entries.length === 0) {
+    return [];
+  }
+  return [md(`**参与角色**：${entries.join("、")}`)];
+}
+
+function nextActionsBlock(nextActions: string[] | undefined): unknown[] {
+  const items = Array.isArray(nextActions) ? nextActions.map((item) => String(item).trim()).filter(Boolean) : [];
+  if (items.length === 0) {
+    return [];
+  }
+  return [hr(), md(`**下一步**\n\n${items.slice(0, 4).map((item) => `- ${item}`).join("\n")}`)];
+}
+
+function renderStatusActions(actionsInput: StatusCardAction[] | undefined): Array<Record<string, unknown>> {
+  const actionButtons: Array<Record<string, unknown>> = [];
+  if (Array.isArray(actionsInput)) {
+    for (const item of actionsInput) {
+      if (item.url) {
+        actionButtons.push(linkButton(item.label, item.url, item.type === "primary" ? "primary" : "default"));
+        continue;
+      }
+      if (item.value) {
+        actionButtons.push(button(item.label, item.value, item.type ?? "default"));
+      }
+    }
+  }
+  return actionButtons;
+}
+
+function renderStatusCard(spec: StatusCardSpec): Record<string, unknown> {
+  const actionButtons = renderStatusActions(spec.actions);
+  return card(
+    header(spec.title, spec.template),
+    [
+      md(statusSummaryBlock(spec)),
+      ...participantsBlock(spec.participants),
+      ...(spec.workflowSummary?.trim() ? [hr(), md(spec.workflowSummary.trim())] : []),
+      ...nextActionsBlock(spec.nextActions),
+      ...(actionButtons.length > 0 ? [hr(), actions(...actionButtons)] : []),
+      ...(spec.footerNote ? [hr(), note(spec.footerNote)] : [])
+    ]
+  );
+}
+
+// ── Task completed card ──────────────────────────────────────────────────────
+
+export interface TaskCompletedCardInput extends TaskCompletedStatusCardSpecInput {}
+
 export function buildTaskCompletedCard(input: TaskCompletedCardInput): Record<string, unknown> {
-  const elements: unknown[] = [
-    md(`**${input.roleLabel}** 已完成任务\n\n${input.summary}`),
-  ];
-  if (input.workflowSummary?.trim()) {
-    elements.push(hr(), md(input.workflowSummary.trim()));
-  }
-
-  if (input.feedback) {
-    elements.push(hr());
-    const base = { kind: "task_feedback", taskId: input.feedback.taskId, chatId: input.feedback.chatId };
-    elements.push(
-      actions(
-        button("👍 满意", { ...base, rating: "good" }, "primary"),
-        button("👎 需改进", { ...base, rating: "poor" }, "danger"),
-      ),
-    );
-  }
-
-  return card(header(`✓ ${input.title}`, "green"), elements);
+  return renderStatusCard(buildTaskCompletedStatusCardSpec(input));
 }
 
 // ── Task failed card ─────────────────────────────────────────────────────────
 
-export interface TaskFailedCardInput {
-  title: string;
-  roleLabel: string;
-  reason: string;
-  workflowSummary?: string;
-}
+export interface TaskFailedCardInput extends TaskFailedStatusCardSpecInput {}
 
 export function buildTaskFailedCard(input: TaskFailedCardInput): Record<string, unknown> {
-  return card(
-    header(`✗ ${input.title}`, "red"),
-    [
-      md(`**${input.roleLabel}** 执行失败\n\n${input.reason}`),
-      ...(input.workflowSummary?.trim() ? [hr(), md(input.workflowSummary.trim())] : []),
-      hr(),
-      note("可重新描述任务，或补充更多信息后重试"),
-    ],
-  );
+  return renderStatusCard(buildTaskFailedStatusCardSpec(input));
 }
 
 // ── Task paused / needs input card ──────────────────────────────────────────
 
-export interface TaskPausedCardInput {
-  title: string;
-  roleLabel: string;
-  question: string;
-  workflowSummary?: string;
-}
+export interface TaskPausedCardInput extends TaskPausedStatusCardSpecInput {}
 
 export function buildTaskPausedCard(input: TaskPausedCardInput): Record<string, unknown> {
-  return card(
-    header(`⏸ ${input.title}`, "orange"),
-    [
-      md(`**${input.roleLabel}** 需要你补充信息才能继续：\n\n**${input.question}**`),
-      ...(input.workflowSummary?.trim() ? [hr(), md(input.workflowSummary.trim())] : []),
-      hr(),
-      note("请直接回复你的答案，任务将自动恢复"),
-    ],
-  );
+  return renderStatusCard(buildTaskPausedStatusCardSpec(input));
 }
 
 // ── Needs clarification card (intake phase) ──────────────────────────────────
@@ -163,94 +190,58 @@ export function buildNeedsClarificationCard(input: NeedsClarificationCardInput):
 // ── Task queued card ─────────────────────────────────────────────────────────
 
 export interface TaskQueuedCardInput {
-  title: string;
+  taskTitle?: string;
+  title?: string;
   roleLabel: string;
   workflowSummary?: string;
+  nextActions?: string[];
 }
 
 export function buildTaskQueuedCard(input: TaskQueuedCardInput): Record<string, unknown> {
-  return card(
-    header("CEO 工作已接收", "blue"),
-    [
-      md(
-        [
-          `**目标**：${input.title}`,
-          `**执行负责人**：${input.roleLabel}`,
-          "**当前状态**：已进入执行队列，系统会按目标推进、验证和回报结果"
-        ].join("\n")
-      ),
-      ...(input.workflowSummary?.trim() ? [hr(), md(`**执行简报**\n\n${input.workflowSummary.trim()}`)] : []),
-      hr(),
-      note("你是 CEO。需要决策或补充信息时我会暂停并明确提问；完成后会回报产物、验证状态和下一步。"),
-    ],
+  return renderStatusCard(
+    buildTaskQueuedStatusCardSpec({
+      taskTitle: input.taskTitle ?? input.title ?? "",
+      roleLabel: input.roleLabel,
+      workflowSummary: input.workflowSummary,
+      nextActions: input.nextActions
+    })
   );
 }
 
 // ── GoalRun progress cards ───────────────────────────────────────────────────
 
-export interface GoalRunProgressCardInput {
-  title: string;
-  statusLabel: string;
-  summary: string;
-  workflowSummary?: string;
-  actions?: Array<{ label: string; value?: Record<string, unknown>; url?: string; type?: "primary" | "default" | "danger" }>;
-}
+export interface GoalRunProgressCardInput extends Omit<GoalRunStatusCardSpecInput, "status"> {}
 
 export function buildGoalRunProgressCard(input: GoalRunProgressCardInput): Record<string, unknown> {
-  const actionButtons: Array<Record<string, unknown>> = [];
-  if (Array.isArray(input.actions)) {
-    for (const item of input.actions) {
-      if (item.url) {
-        actionButtons.push(linkButton(item.label, item.url, item.type === "primary" ? "primary" : "default"));
-        continue;
-      }
-      if (item.value) {
-        actionButtons.push(button(item.label, item.value, item.type ?? "default"));
-      }
-    }
-  }
-  return card(
-    header(input.title, "blue"),
-    [
-      md(`**状态**：${input.statusLabel}\n\n${input.summary}`),
-      ...(input.workflowSummary?.trim() ? [hr(), md(input.workflowSummary.trim())] : []),
-      ...(actionButtons.length > 0 ? [hr(), actions(...actionButtons)] : []),
-      hr(),
-      note("GoalRun 会继续自动推进，并在关键节点同步")
-    ]
+  return renderStatusCard(
+    buildGoalRunStatusCardSpec({
+      ...input,
+      status: "running"
+    })
   );
 }
 
 export interface GoalRunBlockedCardInput {
   title: string;
+  status: "awaiting_input" | "awaiting_authorization";
   statusLabel: string;
   reason: string;
   workflowSummary?: string;
-  actions?: Array<{ label: string; value?: Record<string, unknown>; url?: string; type?: "primary" | "default" | "danger" }>;
+  nextActions?: string[];
+  actions?: StatusCardAction[];
 }
 
 export function buildGoalRunBlockedCard(input: GoalRunBlockedCardInput): Record<string, unknown> {
-  const actionButtons: Array<Record<string, unknown>> = [];
-  if (Array.isArray(input.actions)) {
-    for (const item of input.actions) {
-      if (item.url) {
-        actionButtons.push(linkButton(item.label, item.url, item.type === "primary" ? "primary" : "default"));
-        continue;
-      }
-      if (item.value) {
-        actionButtons.push(button(item.label, item.value, item.type ?? "default"));
-      }
-    }
-  }
-  return card(
-    header(input.title, "orange"),
-    [
-      md(`**状态**：${input.statusLabel}\n\n${input.reason}`),
-      ...(input.workflowSummary?.trim() ? [hr(), md(input.workflowSummary.trim())] : []),
-      ...(actionButtons.length > 0 ? [hr(), actions(...actionButtons)] : []),
-      hr(),
-      note("请直接回复补充信息，或在控制台继续授权/恢复")
-    ]
+  return renderStatusCard(
+    buildGoalRunStatusCardSpec({
+      title: input.title,
+      status: input.status,
+      statusLabel: input.statusLabel,
+      summary: input.reason,
+      workflowSummary: input.workflowSummary,
+      nextActions: input.nextActions,
+      actions: input.actions
+    })
   );
 }
 
@@ -258,17 +249,19 @@ export interface GoalRunCompletedCardInput {
   title: string;
   summary: string;
   workflowSummary?: string;
+  nextActions?: string[];
 }
 
 export function buildGoalRunCompletedCard(input: GoalRunCompletedCardInput): Record<string, unknown> {
-  return card(
-    header(input.title, "green"),
-    [
-      md(input.summary),
-      ...(input.workflowSummary?.trim() ? [hr(), md(input.workflowSummary.trim())] : []),
-      hr(),
-      note("如需继续下一轮目标，直接在当前会话下发新指令即可")
-    ]
+  return renderStatusCard(
+    buildGoalRunStatusCardSpec({
+      title: input.title,
+      status: "completed",
+      statusLabel: "已完成",
+      summary: input.summary,
+      workflowSummary: input.workflowSummary,
+      nextActions: input.nextActions
+    })
   );
 }
 
@@ -276,17 +269,19 @@ export interface GoalRunFailedCardInput {
   title: string;
   reason: string;
   workflowSummary?: string;
+  nextActions?: string[];
 }
 
 export function buildGoalRunFailedCard(input: GoalRunFailedCardInput): Record<string, unknown> {
-  return card(
-    header(input.title, "red"),
-    [
-      md(input.reason),
-      ...(input.workflowSummary?.trim() ? [hr(), md(input.workflowSummary.trim())] : []),
-      hr(),
-      note("建议补充缺失信息、缩小范围或重新发起一条更清晰的目标")
-    ]
+  return renderStatusCard(
+    buildGoalRunStatusCardSpec({
+      title: input.title,
+      status: "failed",
+      statusLabel: "执行失败",
+      summary: input.reason,
+      workflowSummary: input.workflowSummary,
+      nextActions: input.nextActions
+    })
   );
 }
 
@@ -424,4 +419,117 @@ export function buildEscalationCard(input: EscalationCardInput): Record<string, 
       note("请直接回复你的指示，任务将继续执行"),
     ],
   );
+}
+
+// ── Collaboration status cards ──────────────────────────────────────────────
+
+export interface CollaborationStatusCardInput extends Omit<CollaborationStatusCardSpecInput, "status"> {}
+
+export function buildCollaborationStartedCard(input: CollaborationStatusCardInput): Record<string, unknown> {
+  return renderStatusCard(buildCollaborationStatusCardSpec({ ...input, status: "active" }));
+}
+
+export function buildCollaborationAwaitUserCard(input: CollaborationStatusCardInput): Record<string, unknown> {
+  return renderStatusCard(buildCollaborationStatusCardSpec({ ...input, status: "await_user" }));
+}
+
+export function buildCollaborationPartialCard(input: CollaborationStatusCardInput): Record<string, unknown> {
+  return renderStatusCard(buildCollaborationStatusCardSpec({ ...input, status: "partial" }));
+}
+
+export function buildCollaborationCompletedCard(input: CollaborationStatusCardInput): Record<string, unknown> {
+  return renderStatusCard(buildCollaborationStatusCardSpec({ ...input, status: "completed" }));
+}
+
+export function buildCollaborationBlockedCard(input: CollaborationStatusCardInput): Record<string, unknown> {
+  return renderStatusCard(buildCollaborationStatusCardSpec({ ...input, status: "blocked" }));
+}
+
+// ── Evolution status cards ──────────────────────────────────────────────────
+
+export interface EvolutionStatusCardInput extends EvolutionStatusCardSpecInput {}
+
+export function buildEvolutionStatusCard(input: EvolutionStatusCardInput): Record<string, unknown> {
+  return renderStatusCard(buildEvolutionStatusCardSpec(input));
+}
+
+// ── Session workbench card ──────────────────────────────────────────────────
+
+export interface SessionWorkbenchCardInput {
+  snapshot: SessionWorkbenchSnapshot;
+}
+
+export function buildSessionWorkbenchCard(input: SessionWorkbenchCardInput): Record<string, unknown> {
+  const { snapshot } = input;
+  const actionsInput: StatusCardAction[] = [
+    {
+      label: "刷新状态",
+      type: "primary",
+      value: {
+        kind: "session_workbench",
+        sessionId: snapshot.sessionId,
+        action: "refresh"
+      }
+    },
+    {
+      label: "继续推进",
+      type: "default",
+      value: {
+        kind: "session_workbench",
+        sessionId: snapshot.sessionId,
+        action: "continue"
+      }
+    }
+  ];
+  if (snapshot.activeTask) {
+    actionsInput.push({
+      label: "查看任务",
+      value: {
+        kind: "session_workbench",
+        sessionId: snapshot.sessionId,
+        action: "task_status",
+        taskId: snapshot.activeTask.id
+      }
+    });
+  }
+  if (snapshot.activeGoalRun) {
+    actionsInput.push({
+      label: "查看 GoalRun",
+      value: {
+        kind: "session_workbench",
+        sessionId: snapshot.sessionId,
+        action: "goal_run_status",
+        goalRunId: snapshot.activeGoalRun.id
+      }
+    });
+  }
+
+  return renderStatusCard({
+    eventType: "session_workbench",
+    title: `工作台 · ${snapshot.sessionTitle}`,
+    template: snapshot.blockers.length > 0 ? "orange" : "indigo",
+    statusLabel: snapshot.currentStage || "进行中",
+    summary: [
+      `**目标**：${snapshot.currentGoal || snapshot.sessionTitle}`,
+      snapshot.latestSummary ? `**最新进展**：${snapshot.latestSummary}` : "",
+      snapshot.activeTask
+        ? `**当前任务**：${snapshot.activeTask.title} · ${snapshot.activeTask.status} · ${snapshot.activeTask.roleId}`
+        : "",
+      snapshot.activeGoalRun
+        ? `**当前 GoalRun**：${snapshot.activeGoalRun.stage} · ${snapshot.activeGoalRun.status}`
+        : "",
+      snapshot.pendingApproval
+        ? `**待审批**：${snapshot.pendingApproval.summary}`
+        : ""
+    ].filter(Boolean).join("\n"),
+    workflowSummary: snapshot.activeTask?.workflowSummary,
+    nextActions: snapshot.nextActions,
+    actions: actionsInput,
+    footerNote:
+      snapshot.blockers.length > 0
+        ? `当前阻塞：${snapshot.blockers.slice(0, 2).join("；")}`
+        : snapshot.latestArtifacts.length > 0
+          ? `最近产物：${snapshot.latestArtifacts.slice(0, 3).join("；")}`
+          : "工作台会按当前会话持续回报状态。"
+  });
 }

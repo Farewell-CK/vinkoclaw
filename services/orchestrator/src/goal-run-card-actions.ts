@@ -63,6 +63,7 @@ export function buildGoalRunCardActionFeedback(input: {
         : "当前不在授权等待态，无需提交授权。";
     return buildGoalRunBlockedCard({
       title,
+      status: "awaiting_authorization",
       statusLabel,
       reason: message,
       workflowSummary
@@ -78,6 +79,7 @@ export function buildGoalRunCardActionFeedback(input: {
           : `GoalRun 当前状态是 ${input.run.status}，无需人工恢复，系统会继续推进。`;
     return buildGoalRunBlockedCard({
       title,
+      status: input.run.status === "awaiting_authorization" ? "awaiting_authorization" : "awaiting_input",
       statusLabel,
       reason: message,
       workflowSummary
@@ -101,6 +103,7 @@ export function buildGoalRunCardActionFeedback(input: {
   if (input.run.status === "awaiting_input" || input.run.status === "awaiting_authorization") {
     return buildGoalRunBlockedCard({
       title,
+      status: input.run.status,
       statusLabel,
       reason: workflowSummary,
       workflowSummary

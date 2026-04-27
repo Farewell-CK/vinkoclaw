@@ -75,7 +75,8 @@ export function registerSkillsMarketplaceRoutes(app: express.Express, deps: Skil
         const recommendation = getMarketplaceRecommendation({
           entry,
           roleBinding,
-          roleId
+          roleId,
+          runtimeConfig: store.getRuntimeConfig()
         });
         return {
           ...entry,

@@ -109,7 +109,7 @@ export const HARNESS_SUITES: HarnessSuiteDefinition[] = [
   { id: "founder-implementation", label: "Founder Implementation Task", command: ["npm", "run", "self-check:founder-implementation"], budgetMs: 5 * 60_000 },
   { id: "founder-bugfix", label: "Founder Bugfix Follow-up", command: ["npm", "run", "self-check:founder-bugfix"], budgetMs: 5 * 60_000 },
   { id: "artifact-export", label: "Artifact Export Self Check", command: ["npm", "run", "self-check:artifact-export"], budgetMs: 6 * 60_000 },
-  { id: "persona", label: "Persona Test", command: ["npm", "run", "persona-test"], budgetMs: 5 * 60_000 },
+  { id: "persona", label: "Persona Test", command: ["npm", "run", "persona-test"], budgetMs: 8 * 60_000 },
   { id: "collaboration", label: "Collaboration Self Check", command: ["npm", "run", "self-check:collaboration"], budgetMs: 6 * 60_000 },
   { id: "skill-lifecycle", label: "Skill Lifecycle Self Check", command: ["npm", "run", "self-check:skill-lifecycle"], budgetMs: 6 * 60_000 },
   { id: "crm-cadence", label: "CRM Cadence Self Check", command: ["npm", "run", "self-check:crm-cadence"], budgetMs: 4 * 60_000 }

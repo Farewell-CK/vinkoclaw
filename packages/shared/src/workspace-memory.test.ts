@@ -53,6 +53,97 @@ describe("WorkspaceMemoryManager", () => {
     expect(result.userPreferences.communicationStyle).toBe("concise");
   });
 
+  it("patches founder profile without schema migration", () => {
+    ctx.manager.patchFounderProfile({
+      businessDomains: ["AI Agent", "AI 玩具"],
+      targetUsers: ["个人创业者"],
+      deliverablePreferences: ["结论先行", "结构化报告"],
+      decisionStyle: "evidence_first",
+      feedbackSignals: [
+        {
+          signal: "revision_requested",
+          note: "用户要求补充市场证据",
+          taskId: "task_1",
+          createdAt: "2026-04-27T00:00:00.000Z"
+        }
+      ]
+    });
+
+    const result = ctx.manager.get();
+    expect(result.founderProfile.businessDomains).toEqual(["AI Agent", "AI 玩具"]);
+    expect(result.founderProfile.targetUsers).toEqual(["个人创业者"]);
+    expect(result.founderProfile.deliverablePreferences).toEqual(["结论先行", "结构化报告"]);
+    expect(result.founderProfile.decisionStyle).toBe("evidence_first");
+    expect(result.projectContext.founderProfile?.businessDomains).toEqual(["AI Agent", "AI 玩具"]);
+  });
+
+  it("records auditable memory facts with provenance", () => {
+    ctx.manager.recordMemoryFact({
+      kind: "business_domain",
+      value: "AI 玩具",
+      source: "task",
+      confidence: 0.8,
+      taskId: "task_1",
+      sessionId: "session_1",
+      note: "用户要求调研 AI 玩具市场"
+    });
+
+    const result = ctx.manager.get();
+    expect(result.memoryFacts).toHaveLength(1);
+    expect(result.memoryFacts?.[0]).toMatchObject({
+      kind: "business_domain",
+      value: "AI 玩具",
+      source: "task",
+      confidence: 0.8,
+      taskId: "task_1",
+      sessionId: "session_1"
+    });
+  });
+
+  it("updates existing memory fact by stable id instead of duplicating", () => {
+    ctx.manager.recordMemoryFact({
+      id: "memory_fact_domain_ai_toy",
+      kind: "business_domain",
+      value: "AI 玩具",
+      source: "task",
+      confidence: 0.6
+    });
+    ctx.manager.recordMemoryFact({
+      id: "memory_fact_domain_ai_toy",
+      kind: "business_domain",
+      value: "AI 玩具",
+      source: "manual",
+      confidence: 0.95,
+      note: "用户确认这是核心方向"
+    });
+
+    const result = ctx.manager.get();
+    expect(result.memoryFacts).toHaveLength(1);
+    expect(result.memoryFacts?.[0]?.source).toBe("manual");
+    expect(result.memoryFacts?.[0]?.confidence).toBe(0.95);
+    expect(result.memoryFacts?.[0]?.note).toBe("用户确认这是核心方向");
+  });
+
+  it("can delete and reset memory facts", () => {
+    ctx.manager.recordMemoryFact({
+      id: "memory_fact_1",
+      kind: "target_user",
+      value: "个人创业者",
+      source: "manual",
+      confidence: 1
+    });
+    ctx.manager.recordMemoryFact({
+      id: "memory_fact_2",
+      kind: "deliverable_preference",
+      value: "结构化报告",
+      source: "manual",
+      confidence: 1
+    });
+
+    expect(ctx.manager.deleteMemoryFact("memory_fact_1").memoryFacts).toHaveLength(1);
+    expect(ctx.manager.resetMemoryFacts().memoryFacts).toEqual([]);
+  });
+
   it("adds key decisions", () => {
     ctx.manager.addDecision("使用 React + Firebase", "团队熟悉该技术栈，开发效率高", "tech_stack");
     ctx.manager.addDecision("采用 JWT 认证", "无状态，易于扩展", "auth");

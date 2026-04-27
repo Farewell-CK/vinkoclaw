@@ -47,6 +47,19 @@ async function postJson(pathname, payload) {
   }
 }
 
+async function getJson(pathname) {
+  const response = await fetch(`${ORCH_BASE}${pathname}`);
+  const text = await response.text();
+  if (!response.ok) {
+    fail(`HTTP ${response.status} ${pathname}: ${text}`, { regressionCategory: "http_error" });
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    fail(`invalid json response for ${pathname}: ${text}`, { regressionCategory: "parse_error" });
+  }
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -103,12 +116,51 @@ async function main() {
     });
 
     const acceptedType = created?.type;
-    if (acceptedType !== "goal_run_queued" && acceptedType !== "task_queued") {
-      fail(`expected goal_run_queued|task_queued, got ${JSON.stringify(created)}`, { regressionCategory: "routing" });
+    if (acceptedType !== "goal_run_queued" && acceptedType !== "task_queued" && acceptedType !== "template_tasks_queued") {
+      fail(`expected goal_run_queued|task_queued|template_tasks_queued, got ${JSON.stringify(created)}`, { regressionCategory: "routing" });
     }
 
     const goalRunId = String(created.goalRunId ?? "");
     const directTaskId = String(created.taskId ?? "");
+    const templateTaskIds = Array.isArray(created.taskIds)
+      ? created.taskIds.filter((value) => typeof value === "string" && value.trim()).map((value) => value.trim())
+      : [];
+    if (acceptedType === "template_tasks_queued") {
+      if (templateTaskIds.length < 2) {
+        fail(`template collaboration should create multiple role tasks, got ${JSON.stringify(created)}`, {
+          regressionCategory: "collaboration_missing"
+        });
+      }
+      const roleIds = [];
+      for (const taskId of templateTaskIds) {
+        const taskPayload = await getJson(`/api/tasks/${taskId}`);
+        const task = taskPayload?.task && typeof taskPayload.task === "object" ? taskPayload.task : taskPayload;
+        if (typeof task?.roleId === "string") {
+          roleIds.push(task.roleId);
+        }
+        await postJson(`/api/tasks/${taskId}/cancel`, {
+          reason: "collaboration self-check cleanup"
+        }).catch(() => undefined);
+      }
+      const uniqueRoles = Array.from(new Set(roleIds));
+      if (uniqueRoles.length < 2) {
+        fail(`template collaboration should cover multiple roles, got roles=${uniqueRoles.join(",")}`, {
+          regressionCategory: "collaboration_missing"
+        });
+      }
+      emitHarnessMeta({
+        stage: "collaboration",
+        status: "completed",
+        regressionCategory: "none",
+        completedStages: ["collaboration"],
+        detail: `template=${created.templateId ?? "unknown"}, tasks=${templateTaskIds.length}, roles=${uniqueRoles.join(",")}`,
+        statePresent: true,
+        stateStage: "template_collaboration",
+        stateStatus: "queued"
+      });
+      info("PASS");
+      return;
+    }
 
     const deadline = Date.now() + 120_000;
     let executeTaskId = "";
@@ -125,7 +177,16 @@ async function main() {
            ), '');`
         );
       } else {
-        executeTaskId = directTaskId;
+        executeTaskId = directTaskId || templateTaskIds[0] || "";
+        if (acceptedType === "template_tasks_queued" && templateTaskIds.length > 0) {
+          const matchingTaskId = templateTaskIds.find((taskId) => {
+            const collaborationMode = Number(
+              sqlValue(`SELECT COALESCE(json_extract(metadata_json, '$.collaborationMode'), 0) FROM tasks WHERE id='${taskId.replace(/'/g, "''")}';`)
+            );
+            return collaborationMode === 1;
+          });
+          executeTaskId = matchingTaskId || executeTaskId;
+        }
       }
 
       if (executeTaskId) {
@@ -138,7 +199,7 @@ async function main() {
         const collaborationMode = Number(
           sqlValue(`SELECT COALESCE(json_extract(metadata_json, '$.collaborationMode'), 0) FROM tasks WHERE id='${executeTaskId.replace(/'/g, "''")}';`)
         );
-        if (acceptedType === "task_queued" && collaborationMode === 1) {
+        if ((acceptedType === "task_queued" || acceptedType === "template_tasks_queued") && collaborationMode === 1) {
           break;
         }
       }
@@ -149,7 +210,7 @@ async function main() {
       fail(
         acceptedType === "goal_run_queued"
           ? `goalRun ${goalRunId} did not create execute task in time`
-          : `task route did not return taskId in time`,
+          : `task/template route did not return taskId in time`,
         { stage: "execute", regressionCategory: "queue_delay" }
       );
     }

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { RuntimeConfig } from "./types.js";
 import {
   getMarketplaceRecommendation,
   getMarketplaceSkillDetail,
@@ -7,6 +8,64 @@ import {
 } from "./skills-marketplace.js";
 
 const originalRegistryUrl = process.env.VINKO_SKILL_REGISTRY_URL;
+
+function createRuntimeConfig(): RuntimeConfig {
+  return {
+    memory: { defaultBackend: "sqlite", roleBackends: {} },
+    routing: { primaryBackend: "openai", fallbackBackend: "zhipu" },
+    channels: { feishuEnabled: true, emailEnabled: false },
+    approvals: { requireForConfigMutation: true, requireForEmailSend: true },
+    queue: { sla: { warningWaitMs: 300000, criticalWaitMs: 900000 } },
+    tools: {
+      providerOrder: ["opencode", "codex", "claude"],
+      workspaceOnly: true,
+      timeoutMs: 1200000,
+      approvalMode: "cto_auto_owner_fallback",
+      ctoRoleId: "cto",
+      ownerRoleId: "ceo",
+      highRiskKeywords: [],
+      providerModels: {},
+      providerBaseUrls: {}
+    },
+    collaboration: {
+      enabled: true,
+      triggerKeywords: [],
+      defaultParticipants: ["product", "backend", "qa"],
+      defaultConfig: {
+        maxRounds: 3,
+        discussionTimeoutMs: 1800000,
+        requireConsensus: false,
+        pushIntermediateResults: true,
+        autoAggregateOnComplete: true,
+        aggregateTimeoutMs: 3600000
+      }
+    },
+    evolution: {
+      router: {
+        confidenceThreshold: 0.75,
+        preferValidatedFallbacks: false,
+        templateHints: []
+      },
+      intake: {
+        preferClarificationForShortVagueRequests: false,
+        shortVagueRequestMaxLength: 24,
+        directConversationMaxLength: 24,
+        ambiguousConversationMaxLength: 32,
+        collaborationMinLength: 40,
+        requireExplicitTeamSignal: true
+      },
+      collaboration: {
+        partialDeliveryMinCompletedRoles: 1,
+        timeoutNoProgressMode: "await_user",
+        terminalFailureNoProgressMode: "blocked",
+        manualResumeAggregationMode: "deliver"
+      },
+      skills: {
+        recommendations: []
+      }
+    }
+  };
+}
 
 afterEach(() => {
   if (originalRegistryUrl === undefined) {
@@ -146,5 +205,35 @@ describe("skills-marketplace", () => {
     expect(unverified.score).toBeGreaterThan(failed.score);
     expect(verified.state).toBe("ready_verified");
     expect(failed.state).toBe("ready_failed");
+  });
+
+  it("boosts recommendation score from learned runtime recommendations", () => {
+    const entry = getLocalSkillMarketplaceEntries().find((item) => item.skillId === "prd-writer");
+    expect(entry).toBeTruthy();
+    const runtimeConfig = createRuntimeConfig();
+    runtimeConfig.evolution.skills.recommendations = [
+      {
+        roleId: "product",
+        skillId: "prd-writer",
+        reason: "Repeated successful PRD work",
+        scoreBoost: 40,
+        updatedAt: "2026-04-22T00:00:00.000Z"
+      }
+    ];
+
+    const boosted = getMarketplaceRecommendation({
+      entry: entry!,
+      roleId: "product",
+      roleBinding: { installed: false, verificationStatus: "unverified" },
+      runtimeConfig
+    });
+    const baseline = getMarketplaceRecommendation({
+      entry: entry!,
+      roleId: "product",
+      roleBinding: { installed: false, verificationStatus: "unverified" }
+    });
+
+    expect(boosted.score).toBeGreaterThan(baseline.score);
+    expect(boosted.state).toBe("install_recommended");
   });
 });

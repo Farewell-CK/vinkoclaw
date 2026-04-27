@@ -100,6 +100,30 @@ function createRuntimeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeCon
         aggregateTimeoutMs: 3600000
       }
     },
+    evolution: {
+      router: {
+        confidenceThreshold: 0.75,
+        preferValidatedFallbacks: false,
+        templateHints: []
+      },
+      intake: {
+        preferClarificationForShortVagueRequests: false,
+        shortVagueRequestMaxLength: 24,
+        directConversationMaxLength: 24,
+        ambiguousConversationMaxLength: 32,
+        collaborationMinLength: 40,
+        requireExplicitTeamSignal: true
+      },
+      collaboration: {
+        partialDeliveryMinCompletedRoles: 1,
+        timeoutNoProgressMode: "await_user",
+        terminalFailureNoProgressMode: "blocked",
+        manualResumeAggregationMode: "deliver"
+      },
+      skills: {
+        recommendations: []
+      }
+    },
     ...overrides
   };
 }

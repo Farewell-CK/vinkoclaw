@@ -1,8 +1,10 @@
-import { loadEnv, type CollaborationPlan, type RoleId } from "@vinko/shared";
-import { shouldRouteToGoalRun } from "./goal-run-routing.js";
-import { hasExplicitTeamCollaborationSignal, shouldUseTeamCollaboration } from "./inbound-policy.js";
-
-export type InboundIntent = "goalrun" | "collaboration" | "light_collaboration" | "operator_config" | "task";
+import { loadEnv, type CollaborationPlan, type RoleId, type RuntimeConfig } from "@vinko/shared";
+import {
+  evaluateInboundIntentPolicy,
+  type InboundPolicyDecision,
+  normalizeModelInboundIntent,
+  type InboundIntent
+} from "./inbound-policy-engine.js";
 
 const CLASSIFIER_TIMEOUT_MS = 45_000;
 
@@ -27,76 +29,85 @@ Critical rules:
 - Respond with ONLY one of: goalrun, collaboration, light_collaboration, operator_config, task
 - No explanation, no punctuation, just the intent word.`;
 
-function keywordFallback(
+function keywordFallbackDecision(
   text: string,
-  options?: { triggerKeywords?: string[] }
-): InboundIntent {
-  if (shouldRouteToGoalRun(text)) {
-    return "goalrun";
+  options?: {
+    triggerKeywords?: string[];
+    evolution?: Partial<RuntimeConfig["evolution"]["intake"]>;
   }
-  if (shouldUseTeamCollaboration(text, options)) {
-    return "collaboration";
-  }
-  const normalized = text.trim().toLowerCase();
-  // Keyword fallback for light_collaboration — build + quick review pattern
-  if (
-    /(?:做完|写完|开发完|开发|写|做).*(?:检查|测试|验证|审阅|review|check)/i.test(normalized) ||
-    /(?:然后|顺便).*(?:检查|测试|验证|审阅|review|check)/i.test(normalized)
-  ) {
-    return "light_collaboration";
-  }
-  // Keyword fallback for operator_config — catches common patterns the LLM missed
-  if (
-    /(?:配置|设置|开通|启用|安装|增加|需要|开启|禁用|关闭|切换).*(?:搜索|模型|技能|邮件|api.?key|密钥|能力)/i.test(normalized) ||
-    /(?:搜索|模型|技能|邮件).*(?:配置|设置|开通|启用)/i.test(normalized) ||
-    /(?:set|enable|disable|configure|install)\s+(?:\w+\s+)*(?:search|model|skill|email|api.?key)/i.test(normalized) ||
-    /web\s*search/i.test(normalized)
-  ) {
-    return "operator_config";
-  }
-  return "task";
+){
+  return evaluateInboundIntentPolicy(text, options);
 }
 
-function singleAgentFallback(text: string): InboundIntent {
-  if (shouldRouteToGoalRun(text)) {
-    return "goalrun";
+function keywordFallback(
+  text: string,
+  options?: {
+    triggerKeywords?: string[];
+    evolution?: Partial<RuntimeConfig["evolution"]["intake"]>;
   }
-  const normalized = text.trim().toLowerCase();
-  if (
-    /(?:做完|写完|开发完|开发|写|做).*(?:检查|测试|验证|审阅|review|check)/i.test(normalized) ||
-    /(?:然后|顺便).*(?:检查|测试|验证|审阅|review|check)/i.test(normalized)
-  ) {
-    return "light_collaboration";
+): InboundIntent {
+  return keywordFallbackDecision(text, options).intent;
+}
+
+function singleAgentFallback(
+  text: string,
+  options?: {
+    triggerKeywords?: string[];
+    evolution?: Partial<RuntimeConfig["evolution"]["intake"]>;
   }
-  if (
-    /(?:配置|设置|开通|启用|安装|增加|需要|开启|禁用|关闭|切换).*(?:搜索|模型|技能|邮件|api.?key|密钥|能力)/i.test(normalized) ||
-    /(?:搜索|模型|技能|邮件).*(?:配置|设置|开通|启用)/i.test(normalized) ||
-    /(?:set|enable|disable|configure|install)\s+(?:\w+\s+)*(?:search|model|skill|email|api.?key)/i.test(normalized) ||
-    /web\s*search/i.test(normalized)
-  ) {
-    return "operator_config";
-  }
-  return "task";
+): InboundIntent {
+  const decision = evaluateInboundIntentPolicy(text, options);
+  return decision.intent === "collaboration" ? "task" : decision.intent;
 }
 
 function normalizeModelIntent(
   intent: InboundIntent,
   text: string,
-  options?: { triggerKeywords?: string[] }
+  options?: {
+    triggerKeywords?: string[];
+    evolution?: Partial<RuntimeConfig["evolution"]["intake"]>;
+  }
 ): InboundIntent {
-  if (intent === "collaboration" && !hasExplicitTeamCollaborationSignal(text)) {
-    return singleAgentFallback(text);
+  const decision = normalizeModelInboundIntent(intent, text, options);
+  if (decision.intent === "collaboration" || decision.intent === "goalrun") {
+    return decision.intent;
   }
-  if (intent === "goalrun" && !shouldRouteToGoalRun(text)) {
-    return keywordFallback(text, options);
+  if (intent === "collaboration") {
+    return singleAgentFallback(text, options);
   }
-  return intent;
+  return decision.intent;
 }
 
-export async function classifyInboundIntent(
+function normalizeModelIntentDecision(
+  intent: InboundIntent,
   text: string,
-  options?: { triggerKeywords?: string[] }
-): Promise<InboundIntent> {
+  options?: {
+    triggerKeywords?: string[];
+    evolution?: Partial<RuntimeConfig["evolution"]["intake"]>;
+  }
+): InboundPolicyDecision {
+  const decision = normalizeModelInboundIntent(intent, text, options);
+  if (decision.intent === "collaboration" || decision.intent === "goalrun") {
+    return decision;
+  }
+  if (intent === "collaboration") {
+    return {
+      intent: singleAgentFallback(text, options),
+      matchedRules: ["collaboration_single_agent_fallback"],
+      reason: "collaboration_single_agent_fallback",
+      confidence: "high"
+    };
+  }
+  return decision;
+}
+
+export async function classifyInboundIntentDecision(
+  text: string,
+  options?: {
+    triggerKeywords?: string[];
+    evolution?: Partial<RuntimeConfig["evolution"]["intake"]>;
+  }
+): Promise<InboundPolicyDecision> {
   const env = loadEnv();
 
   let baseUrl: string;
@@ -145,13 +156,12 @@ export async function classifyInboundIntent(
     });
 
     if (!response.ok) {
-      return keywordFallback(text, options);
+      return keywordFallbackDecision(text, options);
     }
 
     const payload = (await response.json()) as {
       choices?: Array<{ message?: { content?: unknown; reasoning?: unknown; reasoning_content?: unknown } }>;
     };
-    // Thinking models (e.g. Qwen3, GLM-5) may return content=null/empty and put the answer in reasoning/reasoning_content field
     const msg = payload.choices?.[0]?.message;
     const rawContent =
       typeof msg?.content === "string" && msg.content.trim() ? msg.content :
@@ -160,20 +170,29 @@ export async function classifyInboundIntent(
     const raw = rawContent.trim().toLowerCase();
 
     if (raw === "goalrun" || raw === "collaboration" || raw === "light_collaboration" || raw === "operator_config" || raw === "task") {
-      return normalizeModelIntent(raw, text, options);
+      return normalizeModelIntentDecision(raw, text, options);
     }
 
-    // Model returned something unexpected — extract the first known intent word
-    if (raw.includes("goalrun")) return normalizeModelIntent("goalrun", text, options);
-    if (raw.includes("light_collaboration")) return "light_collaboration";
-    if (raw.includes("collaboration")) return normalizeModelIntent("collaboration", text, options);
-    if (raw.includes("operator_config") || raw.includes("operator")) return "operator_config";
-    if (raw.includes("task")) return "task";
+    if (raw.includes("goalrun")) return normalizeModelIntentDecision("goalrun", text, options);
+    if (raw.includes("light_collaboration")) return normalizeModelIntentDecision("light_collaboration", text, options);
+    if (raw.includes("collaboration")) return normalizeModelIntentDecision("collaboration", text, options);
+    if (raw.includes("operator_config") || raw.includes("operator")) return normalizeModelIntentDecision("operator_config", text, options);
+    if (raw.includes("task")) return normalizeModelIntentDecision("task", text, options);
 
-    return keywordFallback(text, options);
+    return keywordFallbackDecision(text, options);
   } catch {
-    return keywordFallback(text, options);
+    return keywordFallbackDecision(text, options);
   }
+}
+
+export async function classifyInboundIntent(
+  text: string,
+  options?: {
+    triggerKeywords?: string[];
+    evolution?: Partial<RuntimeConfig["evolution"]["intake"]>;
+  }
+): Promise<InboundIntent> {
+  return (await classifyInboundIntentDecision(text, options)).intent;
 }
 
 // ── Collaboration need analysis ───────────────────────────────────────────────
@@ -209,7 +228,13 @@ For suggestedReviewers: pick from [qa, cto, product, research, engineer, operati
 Output ONLY valid JSON, no explanation:
 {"level":"none","complexity":"trivial","risk":"low","suggestedReviewers":[],"rationale":"short explanation"}`;
 
-function collaborationFallback(text: string, options?: { triggerKeywords?: string[] }): CollaborationPlan {
+function collaborationFallback(
+  text: string,
+  options?: {
+    triggerKeywords?: string[];
+    evolution?: Partial<RuntimeConfig["evolution"]["intake"]>;
+  }
+): CollaborationPlan {
   const intent = keywordFallback(text, options);
   if (intent === "light_collaboration") {
     return { level: "light", complexity: "simple", risk: "low", suggestedReviewers: [], rationale: "keyword_fallback" };
@@ -255,7 +280,10 @@ function parseCollaborationPlan(raw: string): CollaborationPlan | null {
 
 export async function analyzeCollaborationNeed(
   text: string,
-  options?: { triggerKeywords?: string[] }
+  options?: {
+    triggerKeywords?: string[];
+    evolution?: Partial<RuntimeConfig["evolution"]["intake"]>;
+  }
 ): Promise<CollaborationPlan> {
   // Fast path: trivially short messages need no LLM call
   if (isTrivialByLength(text)) {

@@ -79,7 +79,7 @@ import { listRoles } from "./roles.js";
 import { type RoleId } from "./types.js";
 import { DEFAULT_TOOL_EXEC_POLICY, normalizeToolExecPolicy } from "./tool-exec.js";
 import { mergeProjectMemory, normalizeProjectMemory } from "./project-memory.js";
-import { WorkspaceMemoryManager, type WorkspaceMemoryRecord } from "./workspace-memory.js";
+import { WorkspaceMemoryManager, type WorkspaceMemoryFactRecord, type WorkspaceMemoryRecord } from "./workspace-memory.js";
 import type { ProjectMemoryUpdate } from "./types.js";
 import { listWorkflowBlueprints, workflowBlueprintToRoutingTemplate } from "./workflow-blueprints.js";
 
@@ -118,6 +118,30 @@ const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
       pushIntermediateResults: true,
       autoAggregateOnComplete: true,
       aggregateTimeoutMs: 60 * 60 * 1000
+    }
+  },
+  evolution: {
+    router: {
+      confidenceThreshold: 0.75,
+      preferValidatedFallbacks: false,
+      templateHints: []
+    },
+    intake: {
+      preferClarificationForShortVagueRequests: false,
+      shortVagueRequestMaxLength: 24,
+      directConversationMaxLength: 24,
+      ambiguousConversationMaxLength: 32,
+      collaborationMinLength: 40,
+      requireExplicitTeamSignal: true
+    },
+    collaboration: {
+      partialDeliveryMinCompletedRoles: 1,
+      timeoutNoProgressMode: "await_user",
+      terminalFailureNoProgressMode: "blocked",
+      manualResumeAggregationMode: "deliver"
+    },
+    skills: {
+      recommendations: []
     }
   }
 };
@@ -225,6 +249,44 @@ function normalizeSlaPolicy(input: Partial<QueueSlaPolicy> | undefined): QueueSl
 
 function normalizeRuntimeConfig(input: Partial<RuntimeConfig> | undefined): RuntimeConfig {
   const base = DEFAULT_RUNTIME_CONFIG;
+  const confidenceCandidate = Number(input?.evolution?.router?.confidenceThreshold ?? base.evolution.router.confidenceThreshold);
+  const confidenceThreshold = Number.isFinite(confidenceCandidate)
+    ? Math.max(0.3, Math.min(0.98, confidenceCandidate))
+    : base.evolution.router.confidenceThreshold;
+  const intakePolicy = normalizeEvolutionIntakePolicy(input?.evolution?.intake);
+  const collaborationPolicy = normalizeEvolutionCollaborationPolicy(input?.evolution?.collaboration);
+  const templateHints = Array.isArray(input?.evolution?.router?.templateHints)
+    ? input!.evolution!.router!.templateHints
+        .filter((entry): entry is RuntimeConfig["evolution"]["router"]["templateHints"][number] => Boolean(entry && typeof entry === "object"))
+        .map((entry) => ({
+          templateId: String(entry.templateId ?? "").trim(),
+          phrases: Array.isArray(entry.phrases)
+            ? Array.from(
+                new Set(
+                  entry.phrases
+                    .filter((item): item is string => typeof item === "string")
+                    .map((item) => item.trim().toLowerCase())
+                    .filter(Boolean)
+                )
+              ).slice(0, 12)
+            : [],
+          source: typeof entry.source === "string" ? entry.source.trim() : "evolution",
+          updatedAt: typeof entry.updatedAt === "string" && entry.updatedAt.trim() ? entry.updatedAt : now()
+        }))
+        .filter((entry) => entry.templateId && entry.phrases.length > 0)
+    : base.evolution.router.templateHints;
+  const skillRecommendations = Array.isArray(input?.evolution?.skills?.recommendations)
+    ? input!.evolution!.skills!.recommendations
+        .filter((entry): entry is RuntimeConfig["evolution"]["skills"]["recommendations"][number] => Boolean(entry && typeof entry === "object"))
+        .map((entry) => ({
+          roleId: entry.roleId,
+          skillId: String(entry.skillId ?? "").trim(),
+          reason: typeof entry.reason === "string" ? entry.reason.trim() : "",
+          scoreBoost: Number.isFinite(Number(entry.scoreBoost)) ? Math.max(1, Math.min(200, Math.round(Number(entry.scoreBoost)))) : 30,
+          updatedAt: typeof entry.updatedAt === "string" && entry.updatedAt.trim() ? entry.updatedAt : now()
+        }))
+        .filter((entry) => typeof entry.roleId === "string" && entry.skillId)
+    : base.evolution.skills.recommendations;
   return {
     memory: {
       defaultBackend: input?.memory?.defaultBackend ?? base.memory.defaultBackend,
@@ -264,7 +326,74 @@ function normalizeRuntimeConfig(input: Partial<RuntimeConfig> | undefined): Runt
         aggregateTimeoutMs:
           input?.collaboration?.defaultConfig?.aggregateTimeoutMs ?? base.collaboration.defaultConfig.aggregateTimeoutMs
       }
+    },
+    evolution: {
+      router: {
+        confidenceThreshold,
+        preferValidatedFallbacks:
+          input?.evolution?.router?.preferValidatedFallbacks ?? base.evolution.router.preferValidatedFallbacks,
+        templateHints
+      },
+      intake: intakePolicy,
+      collaboration: collaborationPolicy,
+      skills: {
+        recommendations: skillRecommendations
+      }
     }
+  };
+}
+
+function normalizeEvolutionIntakePolicy(input: Partial<RuntimeConfig["evolution"]["intake"]> | undefined): RuntimeConfig["evolution"]["intake"] {
+  const fallback = DEFAULT_RUNTIME_CONFIG.evolution.intake;
+  const shortVagueCandidate = Number(input?.shortVagueRequestMaxLength ?? fallback.shortVagueRequestMaxLength);
+  const directCandidate = Number(input?.directConversationMaxLength ?? fallback.directConversationMaxLength);
+  const ambiguousCandidate = Number(input?.ambiguousConversationMaxLength ?? fallback.ambiguousConversationMaxLength);
+  const collaborationCandidate = Number(input?.collaborationMinLength ?? fallback.collaborationMinLength);
+  const shortVagueRequestMaxLength = Number.isFinite(shortVagueCandidate)
+    ? Math.max(4, Math.min(120, Math.round(shortVagueCandidate)))
+    : fallback.shortVagueRequestMaxLength;
+  const directConversationMaxLength = Number.isFinite(directCandidate)
+    ? Math.max(8, Math.min(120, Math.round(directCandidate)))
+    : fallback.directConversationMaxLength;
+  const ambiguousConversationMaxLength = Number.isFinite(ambiguousCandidate)
+    ? Math.max(directConversationMaxLength, Math.min(160, Math.round(ambiguousCandidate)))
+    : Math.max(directConversationMaxLength, fallback.ambiguousConversationMaxLength);
+  const collaborationMinLength = Number.isFinite(collaborationCandidate)
+    ? Math.max(12, Math.min(240, Math.round(collaborationCandidate)))
+    : fallback.collaborationMinLength;
+
+  return {
+    preferClarificationForShortVagueRequests:
+      input?.preferClarificationForShortVagueRequests ?? fallback.preferClarificationForShortVagueRequests,
+    shortVagueRequestMaxLength,
+    directConversationMaxLength,
+    ambiguousConversationMaxLength,
+    collaborationMinLength,
+    requireExplicitTeamSignal: input?.requireExplicitTeamSignal ?? fallback.requireExplicitTeamSignal
+  };
+}
+
+function normalizeEvolutionCollaborationPolicy(
+  input: Partial<RuntimeConfig["evolution"]["collaboration"]> | undefined
+): RuntimeConfig["evolution"]["collaboration"] {
+  const fallback = DEFAULT_RUNTIME_CONFIG.evolution.collaboration;
+  const partialCandidate = Number(input?.partialDeliveryMinCompletedRoles ?? fallback.partialDeliveryMinCompletedRoles);
+  return {
+    partialDeliveryMinCompletedRoles: Number.isFinite(partialCandidate)
+      ? Math.max(1, Math.min(8, Math.round(partialCandidate)))
+      : fallback.partialDeliveryMinCompletedRoles,
+    timeoutNoProgressMode:
+      input?.timeoutNoProgressMode === "blocked" || input?.timeoutNoProgressMode === "await_user"
+        ? input.timeoutNoProgressMode
+        : fallback.timeoutNoProgressMode,
+    terminalFailureNoProgressMode:
+      input?.terminalFailureNoProgressMode === "blocked" || input?.terminalFailureNoProgressMode === "await_user"
+        ? input.terminalFailureNoProgressMode
+        : fallback.terminalFailureNoProgressMode,
+    manualResumeAggregationMode:
+      input?.manualResumeAggregationMode === "partial" || input?.manualResumeAggregationMode === "deliver"
+        ? input.manualResumeAggregationMode
+        : fallback.manualResumeAggregationMode
   };
 }
 
@@ -2258,13 +2387,28 @@ export class VinkoStore {
     const timestamp = now();
     const existing = this.getSessionBySourceKey(input.source, sourceKey);
     if (existing) {
+      const workspaceMemory = this.getWorkspaceMemory();
+      const existingMetadata =
+        typeof existing.metadata === "object" && existing.metadata !== null ? existing.metadata : {};
+      const refreshedMetadata = {
+        ...existingMetadata,
+        ...(input.metadata ?? {}),
+        workspaceContext: {
+          preferredLanguage: workspaceMemory.userPreferences.preferredLanguage,
+          preferredTechStack: workspaceMemory.userPreferences.preferredTechStack,
+          communicationStyle: workspaceMemory.userPreferences.communicationStyle,
+          activeProjects: workspaceMemory.projectContext.activeProjects,
+          keyDecisions: workspaceMemory.keyDecisions.slice(-5),
+          founderProfile: workspaceMemory.founderProfile
+        }
+      };
       this.db
         .prepare(`
           UPDATE sessions
-          SET title = ?, updated_at = ?, last_message_at = ?
+          SET title = ?, metadata_json = ?, updated_at = ?, last_message_at = ?
           WHERE id = ?
         `)
-        .run(title, timestamp, timestamp, existing.id);
+        .run(title, jsonStringify(refreshedMetadata), timestamp, timestamp, existing.id);
       return this.getSession(existing.id) ?? existing;
     }
 
@@ -2279,7 +2423,8 @@ export class VinkoStore {
         preferredTechStack: workspaceMemory.userPreferences.preferredTechStack,
         communicationStyle: workspaceMemory.userPreferences.communicationStyle,
         activeProjects: workspaceMemory.projectContext.activeProjects,
-        keyDecisions: workspaceMemory.keyDecisions.slice(-5) // Last 5 decisions for context
+        keyDecisions: workspaceMemory.keyDecisions.slice(-5), // Last 5 decisions for context
+        founderProfile: workspaceMemory.founderProfile
       }
     };
 
@@ -5793,6 +5938,21 @@ export class VinkoStore {
 
   patchWorkspaceMemory(patch: Partial<WorkspaceMemoryRecord>): WorkspaceMemoryRecord {
     return this.workspaceMemoryManager.patch(patch);
+  }
+
+  recordWorkspaceMemoryFact(
+    fact: Omit<WorkspaceMemoryFactRecord, "id" | "createdAt" | "updatedAt"> &
+      Partial<Pick<WorkspaceMemoryFactRecord, "id" | "createdAt" | "updatedAt">>
+  ): WorkspaceMemoryRecord {
+    return this.workspaceMemoryManager.recordMemoryFact(fact);
+  }
+
+  deleteWorkspaceMemoryFact(id: string): WorkspaceMemoryRecord {
+    return this.workspaceMemoryManager.deleteMemoryFact(id);
+  }
+
+  resetWorkspaceMemoryFacts(): WorkspaceMemoryRecord {
+    return this.workspaceMemoryManager.resetMemoryFacts();
   }
 
   addWorkspaceDecision(decision: string, rationale: string, category?: string): void {

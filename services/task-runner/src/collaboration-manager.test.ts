@@ -14,7 +14,13 @@ function createTestStore(): VinkoStore {
 }
 
 function createAwaitingParentTask(store: VinkoStore): TaskRecord {
+  const session = store.ensureSession({
+    source: "feishu",
+    sourceKey: "chat:oc_1234567890abcdefghijklmn",
+    title: "协作父任务会话"
+  });
   return store.createTask({
+    sessionId: session.id,
     source: "feishu",
     roleId: "ceo",
     title: "协作父任务",
@@ -160,11 +166,11 @@ describe("CollaborationManager.resumeAwaitingCollaboration", () => {
     }
     store.createAgentCollaboration(collaboration);
 
-    const sendTextToChat = vi.fn(async (_chatId: string, _message: string) => undefined);
+    const sendCardToChat = vi.fn(async (_chatId: string, _card: Record<string, unknown>) => undefined);
     const manager = new CollaborationManager({
       store,
       feishuClient: {
-        sendTextToChat
+        sendCardToChat
       } as never
     });
     const performFinalAggregation = vi
@@ -190,11 +196,18 @@ describe("CollaborationManager.resumeAwaitingCollaboration", () => {
     expect(updatedCollaboration?.currentPhase).toBe("converge");
     expect(updatedCollaboration?.completedAt).toBeUndefined();
 
-    expect(sendTextToChat).toHaveBeenCalledTimes(1);
-    expect(sendTextToChat).toHaveBeenCalledWith(
+    expect(sendCardToChat).toHaveBeenCalledTimes(2);
+    expect(sendCardToChat).toHaveBeenCalledWith(
       "oc_1234567890abcdefghijklmn",
-      expect.stringContaining("已收到补充信息")
+      expect.objectContaining({
+        schema: "2.0"
+      })
     );
+    expect(JSON.stringify(sendCardToChat.mock.calls[1]?.[1] ?? {})).toContain("session_workbench");
+
+    const evolutionState = store.getConfigEntry<{ signals?: Array<{ kind?: string }> }>("evolution-state");
+    const signalKinds = (evolutionState?.signals ?? []).map((item) => item.kind);
+    expect(signalKinds).toContain("collaboration_resumed");
   });
 
   it("returns false when parent task does not belong to a collaboration", async () => {
@@ -261,5 +274,70 @@ describe("CollaborationManager harness state", () => {
     expect(memory?.orchestrationMode).toBe("main_agent");
     expect(memory?.orchestrationOwnerRoleId).toBe("cto");
     expect(memory?.orchestrationVerificationStatus).toBe("pending");
+  });
+
+  it("uses learned collaboration policy when failures finish with no completed roles", async () => {
+    const store = createTestStore();
+    store.patchRuntimeConfig((config) => {
+      config.evolution.collaboration.terminalFailureNoProgressMode = "await_user";
+      config.evolution.collaboration.partialDeliveryMinCompletedRoles = 2;
+      return config;
+    });
+    const fixture = createCollaborationHarnessFixture(store);
+    const recentCreatedAt = new Date(Date.now() - 30_000).toISOString();
+    const recentUpdatedAt = new Date(Date.now() - 10_000).toISOString();
+    fixture.collaboration.createdAt = recentCreatedAt;
+    fixture.collaboration.currentPhase = "execution";
+    fixture.collaboration.updatedAt = recentUpdatedAt;
+    store.updateAgentCollaboration(fixture.collaboration.id, {
+      currentPhase: "execution",
+      updatedAt: recentUpdatedAt
+    });
+    const child1 = store.createTask({
+      sessionId: fixture.parentTask.sessionId,
+      source: "system",
+      roleId: "product",
+      title: "产品子任务",
+      instruction: "do product",
+      metadata: {
+        parentTaskId: fixture.parentTask.id,
+        collaborationId: fixture.collaboration.id
+      }
+    });
+    const child2 = store.createTask({
+      sessionId: fixture.parentTask.sessionId,
+      source: "system",
+      roleId: "backend",
+      title: "后端子任务",
+      instruction: "do backend",
+      metadata: {
+        parentTaskId: fixture.parentTask.id,
+        collaborationId: fixture.collaboration.id
+      }
+    });
+    store.createTaskRelation({
+      parentTaskId: fixture.parentTask.id,
+      childTaskId: child1.id,
+      relationType: "split"
+    });
+    store.createTaskRelation({
+      parentTaskId: fixture.parentTask.id,
+      childTaskId: child2.id,
+      relationType: "split"
+    });
+    store.failTask(child1.id, "product failed");
+    store.failTask(child2.id, "backend failed");
+
+    const decision = (fixture.manager as unknown as {
+      resolveAggregationDecision: (collaboration: AgentCollaboration, manual?: boolean) => {
+        shouldAggregate: boolean;
+        mode: string;
+        reason: string;
+      };
+    }).resolveAggregationDecision(fixture.collaboration);
+
+    expect(decision.shouldAggregate).toBe(true);
+    expect(decision.mode).toBe("await_user");
+    expect(decision.reason).toBe("all_tasks_terminal_with_failures");
   });
 });

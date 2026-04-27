@@ -1,5 +1,6 @@
 import {
   buildGoalRunProgressMessage,
+  summarizeGoalRun,
   buildGoalRunWorkflowSummary,
   createLogger,
   type GoalRunRecord,
@@ -54,6 +55,7 @@ export async function notifyGoalRunProgressSafely(input: {
   }
   const renderedMessage = buildGoalRunProgressMessage(run, message, artifacts);
   const workflowSummary = buildGoalRunWorkflowSummary(run, artifacts);
+  const goalRunSummary = summarizeGoalRun(run, artifacts);
   const title = `GoalRun · ${run.id.slice(0, 8)}`;
   const statusLabel = `${run.currentStage} · ${run.status}`;
   const baseActions = [
@@ -94,9 +96,11 @@ export async function notifyGoalRunProgressSafely(input: {
             : run.status === "awaiting_input" || run.status === "awaiting_authorization"
             ? buildGoalRunBlockedCard({
                 title,
+                status: run.status,
                 statusLabel,
                 reason: renderedMessage,
                 workflowSummary,
+                nextActions: goalRunSummary.pendingItems.length > 0 ? goalRunSummary.pendingItems : [goalRunSummary.nextStep],
                 actions: baseActions
               })
               : buildGoalRunProgressCard({
@@ -104,6 +108,7 @@ export async function notifyGoalRunProgressSafely(input: {
                   statusLabel,
                   summary: renderedMessage,
                   workflowSummary,
+                  nextActions: [goalRunSummary.nextStep],
                   actions: baseActions
                 });
       await notifyFeishuCard(run.chatId, card);

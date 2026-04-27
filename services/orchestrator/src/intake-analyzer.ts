@@ -1,10 +1,14 @@
-import { loadEnv } from "@vinko/shared";
+import { loadEnv, type RuntimeConfig } from "@vinko/shared";
 
 const INTAKE_ANALYZER_TIMEOUT_MS = 8_000;
 
 export interface IntakeAnalysis {
   isClear: boolean;
   clarifyingQuestions: string[];
+}
+
+interface IntakeHeuristicConfig {
+  evolution?: Partial<RuntimeConfig["evolution"]["intake"]> | undefined;
 }
 
 const SYSTEM_PROMPT = `You are a requirements analyst for an AI team operating system.
@@ -43,8 +47,10 @@ Rules:
  * Fast heuristic: messages that are obviously clear and should skip LLM analysis.
  * Covers greetings, status queries, config commands, short direct requests, bug fixes.
  */
-export function isObviouslyClear(text: string): boolean {
+export function isObviouslyClear(text: string, config?: IntakeHeuristicConfig): boolean {
   const trimmed = text.trim();
+  const shortVagueMaxLength = normalizeLength(config?.evolution?.shortVagueRequestMaxLength, 24, 4, 120);
+  const preferClarificationForShortVagueRequests = config?.evolution?.preferClarificationForShortVagueRequests === true;
   // Ultra-short non-task messages (confirmations, single-word replies)
   if (trimmed.length <= 3) {
     return true;
@@ -65,6 +71,13 @@ export function isObviouslyClear(text: string): boolean {
   if (/(?:进度|状态|怎么样了|做到哪了|进展|status|progress)/i.test(trimmed)) {
     return true;
   }
+  // Short but sufficiently concrete direct requests can proceed without clarification.
+  if (
+    trimmed.length <= 30 &&
+    /(?:react|vue|node|python|typescript|java|go|mysql|postgres|firebase|vercel|api|h5|landing|sql|表格|原型|页面|脚本|接口)/i.test(trimmed)
+  ) {
+    return true;
+  }
   // Template toggle commands
   if (/(?:启用|停用|enable|disable)\s*(?:模板|template)/i.test(trimmed)) {
     return true;
@@ -72,6 +85,14 @@ export function isObviouslyClear(text: string): boolean {
   // Approval commands
   if (/^[01]\s/.test(trimmed) || /^(?:同意|拒绝|批准|approve|reject)/i.test(trimmed)) {
     return true;
+  }
+  if (
+    preferClarificationForShortVagueRequests &&
+    trimmed.length <= shortVagueMaxLength &&
+    /(?:做|写|建|搭|开发|实现|分析|设计|规划|调研|生成|创建|build|write|create|develop|implement|analyze|design)/i.test(trimmed) &&
+    !/(?:react|vue|node|python|typescript|java|go|mysql|postgres|firebase|vercel|prd|api|h5|landing|登录|注册|支付|官网|报告|调研|简历|海报|提示词|sql|bug|问题)/i.test(trimmed)
+  ) {
+    return false;
   }
   return false;
 }
@@ -82,8 +103,8 @@ export function isObviouslyClear(text: string): boolean {
  *
  * Falls back to { isClear: true } on timeout or LLM error (preserving existing behavior).
  */
-export async function analyzeIntakeClarity(text: string): Promise<IntakeAnalysis> {
-  if (isObviouslyClear(text)) {
+export async function analyzeIntakeClarity(text: string, config?: IntakeHeuristicConfig): Promise<IntakeAnalysis> {
+  if (isObviouslyClear(text, config)) {
     return { isClear: true, clarifyingQuestions: [] };
   }
 
@@ -153,6 +174,14 @@ export async function analyzeIntakeClarity(text: string): Promise<IntakeAnalysis
     // Timeout or network error — degrade gracefully to existing behavior
     return { isClear: true, clarifyingQuestions: [] };
   }
+}
+
+function normalizeLength(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.round(parsed)));
 }
 
 function safeParseIntakeAnalysis(raw: string): IntakeAnalysis {

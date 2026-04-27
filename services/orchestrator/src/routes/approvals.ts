@@ -49,6 +49,7 @@ export interface ApprovalRoutesDeps {
     approvalId: string;
     stepId?: string | undefined;
     reason: "decision" | "escalation";
+    approval?: ReturnType<VinkoStore["getApproval"]> | undefined;
   }) => Promise<void> | void;
 }
 
@@ -185,7 +186,8 @@ export function registerApprovalRoutes(app: express.Express, deps: ApprovalRoute
     try {
       await onApprovalWorkflowUpdated?.({
         approvalId: approval.id,
-        reason: "decision"
+        reason: "decision",
+        approval: decidedApproval
       });
     } catch {
       // Ignore callback failures to keep API decision path stable.
@@ -236,7 +238,8 @@ export function registerApprovalRoutes(app: express.Express, deps: ApprovalRoute
       void onApprovalWorkflowUpdated?.({
         approvalId: approval.id,
         stepId: result.step.id,
-        reason: "escalation"
+        reason: "escalation",
+        approval: store.getApproval(approval.id) ?? approval
       });
     } catch {
       // Ignore callback failures to keep API escalation path stable.
@@ -335,7 +338,8 @@ export function registerApprovalRoutes(app: express.Express, deps: ApprovalRoute
     try {
       await onApprovalWorkflowUpdated?.({
         approvalId: approval.id,
-        reason: "decision"
+        reason: "decision",
+        approval: decidedApproval
       });
     } catch {
       // Ignore callback failures to keep API decision path stable.
@@ -425,7 +429,8 @@ export function registerApprovalRoutes(app: express.Express, deps: ApprovalRoute
     try {
       await onApprovalWorkflowUpdated?.({
         approvalId: approval.id,
-        reason: "decision"
+        reason: "decision",
+        approval: decidedApproval
       });
     } catch {
       // Ignore callback failures to keep API cancellation path stable.
@@ -549,7 +554,8 @@ export function registerApprovalRoutes(app: express.Express, deps: ApprovalRoute
       try {
         await onApprovalWorkflowUpdated?.({
           approvalId: approval.id,
-          reason: "decision"
+          reason: "decision",
+          approval: decidedApproval
         });
       } catch {
         // keep cleanup flow best-effort
